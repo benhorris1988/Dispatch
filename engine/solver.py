@@ -341,6 +341,25 @@ def solve(model: dict, budget_seconds: float = 60.0) -> dict[str, Any]:
         bit = w.get((iid, pid, b))
         if bit is not None:
             anchors.setdefault((iid, pid), []).append(bit)
+    # Inside the freeze horizon the committed window is locked, so an item that is already
+    # committed there may not pick up anyone new: anchoring only the committed people says
+    # they must work it, not that nobody else may join them.
+    frozen_people: dict[int, set[int]] = {}
+    for ca in model.get("committed") or []:
+        if freeze_end and _d(ca["from_date"]) <= freeze_end:
+            frozen_people.setdefault(ca["work_item_id"], set()).add(ca["person_id"])
+    if freeze_end:
+        for iid, allowed in frozen_people.items():
+            for b in prep.buckets:
+                if b.start > freeze_end:
+                    continue
+                for pid in prep.eligible.get(iid, []):
+                    if pid in allowed:
+                        continue
+                    bit = w.get((iid, pid, b.index))
+                    if bit is not None:
+                        m.Add(bit == 0)
+
     for (iid, _pid), bits in anchors.items():
         # Conditional on the item being scheduled at all. An unconditional anchor makes
         # every committed item undroppable, so one item that genuinely cannot fit inside
