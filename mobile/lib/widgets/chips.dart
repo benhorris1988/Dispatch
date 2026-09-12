@@ -200,11 +200,22 @@ class _Chip extends StatelessWidget {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 8, vertical: compact ? 2 : 4),
       decoration: BoxDecoration(color: bg, borderRadius: DispatchRadius.chipR),
+      // Chips carry API-supplied labels of unpredictable length and sit in table cells and
+      // narrow columns, so the text has to be able to give way. Flexible + ellipsis keeps
+      // the chip inside its cell instead of overflowing the row it is in.
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[Icon(icon, size: compact ? 12 : 14, color: fg), const SizedBox(width: 4)],
-          Text(label, style: GoogleFonts.inter(fontSize: compact ? 11.5 : 12.5, fontWeight: FontWeight.w600, color: fg, height: 1.2)),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              softWrap: false,
+              style: GoogleFonts.inter(fontSize: compact ? 11.5 : 12.5, fontWeight: FontWeight.w600, color: fg, height: 1.2),
+            ),
+          ),
         ],
       ),
     );

@@ -111,12 +111,18 @@ class DispatchCard extends StatelessWidget {
         border: dashed ? null : Border.all(color: context.borderColor),
       ),
       clipBehavior: Clip.antiAlias,
+      // The accent rail has to run the full height of the card, but a stretched Row in an
+      // unbounded column (every one of these sits in a scroll view) asks its children for
+      // infinite height and throws. IntrinsicHeight bounds it to the content's own height,
+      // which is what "full height" means here.
       child: accent == null
           ? inner
-          : Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              Container(width: 3, color: accent),
-              Expanded(child: inner),
-            ]),
+          : IntrinsicHeight(
+              child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Container(width: 3, color: accent),
+                Expanded(child: inner),
+              ]),
+            ),
     );
     if (dashed) body = DashedBox(radius: DispatchRadius.card, color: context.borderColor, child: body);
     if (onTap == null) return body;

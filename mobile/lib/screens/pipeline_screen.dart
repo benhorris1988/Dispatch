@@ -484,12 +484,17 @@ class _PipelineScreenState extends State<PipelineScreen> {
                 const SizedBox(width: Sp.sm),
                 PriorityBar(i.priorityScore, width: 52),
                 const Spacer(),
-                Text(
-                  dotJoin([
-                    i.romLabel == '—' ? null : 'ROM ${i.romLabel} ${i.romUnit}',
-                    i.benefitValue > 0 ? fmtMoneyK(i.benefitValue) : null,
-                  ]),
-                  style: context.text.bodySmall,
+                Flexible(
+                  child: Text(
+                    dotJoin([
+                      i.romLabel == '—' ? null : 'ROM ${i.romLabel} ${i.romUnit}',
+                      i.benefitValue > 0 ? fmtMoneyK(i.benefitValue) : null,
+                    ]),
+                    style: context.text.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.end,
+                  ),
                 ),
               ]),
               if (i.skills.isNotEmpty) ...[

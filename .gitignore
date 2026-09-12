@@ -11,3 +11,7 @@ mobile/.dart_tool/
 mobile/.flutter-plugins*
 mobile/pubspec.lock
 *.apk
+
+# Diagnostic output from engine/diagnose_infeasible.py and solve_real_model.py
+engine/*.txt
+!engine/requirements.txt

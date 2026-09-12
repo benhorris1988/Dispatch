@@ -373,12 +373,17 @@ class TmGroupedBarChart extends StatelessWidget {
                 ]),
               ),
               const SizedBox(height: 6),
-              Text(
-                g.flag == null ? g.label : '${g.label} ${g.flag}',
-                style: labelStyle ?? context.text.labelSmall?.copyWith(color: context.mutedColor),
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+              // The parent reserves 26px below the bars, which one line fits and two do
+              // not; letting the label wrap overflowed the chart by ~6px.
+              Flexible(
+                child: Text(
+                  g.flag == null ? g.label : '${g.label} ${g.flag}',
+                  style: labelStyle ?? context.text.labelSmall?.copyWith(color: context.mutedColor),
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                ),
               ),
             ]),
           ),
