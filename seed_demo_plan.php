@@ -148,10 +148,10 @@ $PROPOSAL = xid($conn, 'proposals', [
     'workspace_id' => $W, 'candidate_plan_version_id' => $PV[7], 'base_plan_version_id' => $COMMITTED,
     'kind' => 'nightly', 'status' => 'open', 'generated_at' => '2026-09-08 02:00:00', 'generated_by' => $U['ben'],
     'improvement_pct' => 6.4, 'below_threshold' => 0,
-    'summary_before' => j(['lateItems' => 2, 'valueQuarter' => 612000, 'peopleOver100' => 2, 'singleSkillDeps' => 3,
-                           'assignmentDaysChanged' => 0, 'totalAssignmentDays' => 365, 'stabilityIndex' => 92]),
-    'summary_after'  => j(['lateItems' => 1, 'valueQuarter' => 657000, 'peopleOver100' => 0, 'singleSkillDeps' => 2,
-                           'assignmentDaysChanged' => 9, 'totalAssignmentDays' => 365, 'stabilityIndex' => 90]),
+    'summary_before' => j(['late_items' => 2, 'value_quarter' => 612000, 'people_over_100' => 2, 'single_skill_deps' => 3,
+                           'assignment_days_changed' => 0, 'total_assignment_days' => 365, 'stability_index' => 92]),
+    'summary_after'  => j(['late_items' => 1, 'value_quarter' => 657000, 'people_over_100' => 0, 'single_skill_deps' => 2,
+                           'assignment_days_changed' => 9, 'total_assignment_days' => 365, 'stability_index' => 90]),
     'triggers' => j($triggers),
     'carried_over_note' => null, 'scope_person_ids' => null, 'engine' => 'heuristic', 'decided_at' => null,
 ]);
@@ -202,7 +202,7 @@ $changes = [
         'reason' => 'Reduces single-person dependency on Priya for Terraform L3; Jon is L2 and flagged for development.',
         'chips'  => [['label' => 'Stability cost 4 assignment-days', 'tone' => 'info'], ['label' => 'Skills risk reduced', 'tone' => 'ok'], ['label' => 'WI-1044 finishes 3 days later', 'tone' => 'warn']],
         'stability' => 4, 'inside' => 0, 'guardrail' => 'ok', 'guardrail_reason' => null,
-        'delta' => ['singleSkillDeps' => -1, 'lateness' => 0.5], 'affected' => [$PN['Jon'], $PN['Priya']],
+        'delta' => ['single_skill_deps' => -1, 'lateness' => 0.5], 'affected' => [$PN['Jon'], $PN['Priya']],
     ],
     [   // 4
         'person' => 'Ewan', 'ref' => 'SR-0215', 'kind' => 'reassign',

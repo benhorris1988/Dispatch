@@ -396,7 +396,7 @@ CREATE TABLE dbo.proposals (
   generated_by INT NULL REFERENCES dbo.users(id),
   improvement_pct DECIMAL(6,2) NULL,
   below_threshold BIT NOT NULL DEFAULT 0,
-  summary_before NVARCHAR(MAX) NULL,           -- json {lateItems, valueQuarter, peopleOver100, singleSkillDeps, assignmentDaysChanged, totalAssignmentDays, stabilityIndex}
+  summary_before NVARCHAR(MAX) NULL,           -- json {late_items, value_quarter, people_over_100, single_skill_deps, assignment_days_changed, total_assignment_days, stability_index}
   summary_after NVARCHAR(MAX) NULL,
   triggers NVARCHAR(MAX) NULL,                 -- json [{type,label,occurredAt}]
   carried_over_note NVARCHAR(300) NULL,
