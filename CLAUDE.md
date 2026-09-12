@@ -34,7 +34,24 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 ## Verification bar
 
 ```bash
-"C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze          # in mobile/ — error-free
-"C:\temp\flutter sdk\flutter\bin\flutter.bat" build web --release --base-href=/mobile/build/web/ --dart-define=API_BASE=http://localhost:8090/api
-C:\xampp\php\php.exe tests\run_all.php                          # PHP suites against the local server
+C:\xampp\php\php.exe tests\run_all.php     # all five PHP suites; re-seeds before and after
+python engine\test_solver.py               # CP-SAT hard-constraint checks (no server needed)
+"C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze     # in mobile/ — must be "No issues found"
 ```
+
+`run_all.php` needs the local server up (`run_local.ps1`). The suites mutate the demo
+deliberately, so it re-seeds before and after; run `seed_demo.php` yourself if you
+interrupt one. Build the web app from **PowerShell** — the space in the Flutter SDK path
+breaks the bash invocation:
+
+```powershell
+& "C:\temp\flutter sdk\flutter\bin\flutter.bat" build web --release --base-href=/mobile/build/web/ --dart-define=API_BASE=http://localhost:8090/api
+```
+
+Two things that look like bugs and are not:
+
+- **Mojibake in a terminal is the terminal.** Four separate reports of double-encoded
+  UTF-8 turned out to be the Windows console rendering correct bytes. Check at byte level
+  (`curl … | python -c "import sys; print(sys.stdin.buffer.read()[:200])"`) before
+  "fixing" it; an en dash is `e2 80 93` and a double-encoded one is `c3 a2 c2 80 c2 93`.
+- **Identity columns can start at 0.** Never test an id for truthiness.
