@@ -534,8 +534,18 @@ class _EstimateScreenState extends State<EstimateScreen> {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Row(children: [
         Text('Effort by skill', style: context.text.titleMedium),
-        const Spacer(),
-        Text('Drives the skills the scheduler must match · total ${fmtDaysShort(_splitTotal)}', style: context.text.bodySmall),
+        const SizedBox(width: Sp.md),
+        // Expanded rather than a Spacer plus a natural-width Text: the note
+        // stays hard right but gives way instead of running off the panel.
+        Expanded(
+          child: Text(
+            'Drives the skills the scheduler must match · total ${fmtDaysShort(_splitTotal)}',
+            textAlign: TextAlign.right,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: context.text.bodySmall,
+          ),
+        ),
       ]),
       const SizedBox(height: Sp.md),
       if (_split.isEmpty)

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../models/person.dart';
+import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 
 /// Round initials avatar. [colour] may be a Color or a '#RRGGBB' string via
@@ -37,7 +37,7 @@ class PersonAvatar extends StatelessWidget {
       ),
       child: Text(
         initials.toUpperCase(),
-        style: GoogleFonts.manrope(fontSize: size * 0.36, fontWeight: FontWeight.w800, color: Colors.white, height: 1, letterSpacing: -0.2),
+        style: DispatchTheme.manrope(fontSize: size * 0.36, fontWeight: FontWeight.w800, color: Colors.white, height: 1, letterSpacing: -0.2),
       ),
     );
     return tooltip == null ? w : Tooltip(message: tooltip!, child: w);
@@ -71,7 +71,7 @@ class AvatarStack extends StatelessWidget {
               height: size,
               alignment: Alignment.center,
               decoration: BoxDecoration(color: DispatchColors.surfaceAlt, shape: BoxShape.circle, border: Border.all(color: Theme.of(context).colorScheme.surface, width: 2)),
-              child: Text('+$extra', style: GoogleFonts.manrope(fontSize: size * 0.34, fontWeight: FontWeight.w800, color: DispatchColors.ink)),
+              child: Text('+$extra', style: DispatchTheme.manrope(fontSize: size * 0.34, fontWeight: FontWeight.w800, color: DispatchColors.ink)),
             ),
           ),
       ]),

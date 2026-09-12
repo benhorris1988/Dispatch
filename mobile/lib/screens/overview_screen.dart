@@ -343,7 +343,10 @@ class _OverviewScreenState extends State<OverviewScreen> {
               Text(i.title, style: context.text.titleSmall),
               const SizedBox(height: Sp.sm),
               Row(children: [
-                TypeChip(i.typeName, colourHex: i.typeColour, compact: true),
+                // The type name is workspace configuration, so it can be long
+                // on a phone-width card; the chip ellipsises once it has to
+                // share the row with the avatars and the due date.
+                Flexible(child: TypeChip(i.typeName, colourHex: i.typeColour, compact: true)),
                 const SizedBox(width: Sp.sm),
                 AssigneeAvatars(i.assignees, size: 22),
                 const Spacer(),

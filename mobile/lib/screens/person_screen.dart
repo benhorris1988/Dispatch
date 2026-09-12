@@ -49,11 +49,21 @@ class _PersonScreenState extends State<PersonScreen> {
     if (oldWidget.id != widget.id) _load();
   }
 
+  /// Captured while the element is still active: an ancestor lookup from a
+  /// disposing element is not allowed, and [dispose] needs the shell.
+  ShellState? _shell;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _shell = context.read<ShellState>();
+  }
+
   @override
   void dispose() {
     // Hand the title back to the route default.
-    final shell = context.read<ShellState>();
-    WidgetsBinding.instance.addPostFrameCallback((_) => shell.setPageTitle(null));
+    final shell = _shell;
+    if (shell != null) WidgetsBinding.instance.addPostFrameCallback((_) => shell.setPageTitle(null));
     super.dispose();
   }
 

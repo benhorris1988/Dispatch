@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
@@ -24,7 +23,7 @@ class SizeStamp extends StatelessWidget {
     final ink = context.isDark ? DispatchColors.darkText : DispatchColors.ink;
     final label = Text(
       s,
-      style: GoogleFonts.manrope(fontSize: size * 0.5, fontWeight: FontWeight.w800, color: isFilled ? Colors.white : ink, height: 1),
+      style: DispatchTheme.manrope(fontSize: size * 0.5, fontWeight: FontWeight.w800, color: isFilled ? Colors.white : ink, height: 1),
     );
     if (isDashed) {
       return CustomPaint(
@@ -213,7 +212,7 @@ class _Chip extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               softWrap: false,
-              style: GoogleFonts.inter(fontSize: compact ? 11.5 : 12.5, fontWeight: FontWeight.w600, color: fg, height: 1.2),
+              style: DispatchTheme.inter(fontSize: compact ? 11.5 : 12.5, fontWeight: FontWeight.w600, color: fg, height: 1.2),
             ),
           ),
         ],
@@ -236,7 +235,9 @@ class LegendDot extends StatelessWidget {
           ? CustomPaint(painter: _DashedBorderPainter(color: colour, radius: 3, width: 1.2, dash: 2, gap: 2), child: const SizedBox(width: 11, height: 11))
           : Container(width: 11, height: 11, decoration: BoxDecoration(color: colour, borderRadius: BorderRadius.circular(3))),
       const SizedBox(width: 6),
-      Text(label, style: context.text.bodySmall),
+      // Legends are built from work-type names and sit in a Wrap inside panel
+      // headers, so the label has to be able to give way like a chip's does.
+      Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.bodySmall)),
     ]);
   }
 }

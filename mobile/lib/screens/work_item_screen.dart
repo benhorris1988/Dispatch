@@ -795,7 +795,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                 Expanded(child: Text(assignees.map((a) => a.firstName).join(', '), style: context.text.bodyMedium, overflow: TextOverflow.ellipsis)),
               ])),
         MetaRow('Stability', child: Row(children: [
-          Text('$changes change${changes == 1 ? '' : 's'} in 30 days', style: context.text.bodyMedium),
+          Flexible(child: Text('$changes change${changes == 1 ? '' : 's'} in 30 days', maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.bodyMedium)),
           const SizedBox(width: Sp.sm),
           ToneChip(asStrOr(plan['stability_label'], 'Steady'), tone: asStrOr(plan['stability_label'], 'Steady') == 'Steady' ? 'ok' : 'warn', compact: true),
         ])),

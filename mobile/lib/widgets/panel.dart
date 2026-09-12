@@ -71,21 +71,28 @@ class PanelHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+    // A Row hands its non-flex children an unbounded width, so a wide trailing
+    // (a legend, a segmented control) was measured as if the header were
+    // infinitely wide and then overflowed it. A Wrap measures both halves
+    // against the width the header really has and drops the trailing onto its
+    // own line when the two cannot share one; on a single line spaceBetween
+    // keeps the trailing hard right, exactly as the Row did.
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: Sp.md,
+      runSpacing: Sp.sm,
       children: [
-        Expanded(
-          child: Wrap(
-            crossAxisAlignment: WrapCrossAlignment.end,
-            spacing: Sp.md,
-            runSpacing: 2,
-            children: [
-              Text(title, style: context.text.titleLarge),
-              if (subtitle != null) Text(subtitle!, style: context.text.bodyMedium?.copyWith(color: context.mutedColor)),
-            ],
-          ),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.end,
+          spacing: Sp.md,
+          runSpacing: 2,
+          children: [
+            Text(title, style: context.text.titleLarge),
+            if (subtitle != null) Text(subtitle!, style: context.text.bodyMedium?.copyWith(color: context.mutedColor)),
+          ],
         ),
-        if (trailing != null) ...[const SizedBox(width: Sp.md), trailing!],
+        ?trailing,
       ],
     );
   }
@@ -208,10 +215,19 @@ class PageHeader extends StatelessWidget {
           if (actions.isNotEmpty) ...[const SizedBox(height: Sp.md), Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions)],
         ]);
       }
-      return Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        Expanded(child: titleBlock),
-        Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions),
-      ]);
+      // Same reason as [PanelHeader]: the action row is a non-flex child and a
+      // Row would measure it unbounded, so a long pill label plus two buttons
+      // overflowed the page instead of taking a second line.
+      return Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Sp.lg,
+        runSpacing: Sp.md,
+        children: [
+          titleBlock,
+          Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions),
+        ],
+      );
     });
   }
 }

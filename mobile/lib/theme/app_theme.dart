@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'tokens.dart';
@@ -14,7 +15,28 @@ class DispatchTheme {
 
   /// Manrope with tabular figures — for stat values, dates, refs, money.
   static TextStyle numeric({double size = 14, FontWeight weight = FontWeight.w700, Color? color, double? height}) =>
-      GoogleFonts.manrope(fontSize: size, fontWeight: weight, color: color, height: height, fontFeatures: const [FontFeature.tabularFigures()]);
+      manrope(fontSize: size, fontWeight: weight, color: color, height: height, fontFeatures: const [FontFeature.tabularFigures()]);
+
+  /// Manrope — headings, numbers, the logo, avatar initials.
+  ///
+  /// google_fonts downloads a family the first time it is asked for and caches
+  /// it through path_provider. On the web — the only way this app ships — that
+  /// is the intended path. Off the web there is no path_provider: google_fonts
+  /// drops the cache write on an unawaited future, so the MissingPluginException
+  /// escapes into the zone and fails whatever frame is in flight (and simply
+  /// turning fetching off makes it log a failure for every style it is asked
+  /// for, hundreds of times a test run). So off the web, name the family and
+  /// let the platform resolve it or fall back.
+  static TextStyle manrope({double? fontSize, FontWeight? fontWeight, Color? color, double? height, double? letterSpacing, List<FontFeature>? fontFeatures}) =>
+      kIsWeb
+          ? GoogleFonts.manrope(fontSize: fontSize, fontWeight: fontWeight, color: color, height: height, letterSpacing: letterSpacing, fontFeatures: fontFeatures)
+          : TextStyle(fontFamily: 'Manrope', fontSize: fontSize, fontWeight: fontWeight, color: color, height: height, letterSpacing: letterSpacing, fontFeatures: fontFeatures);
+
+  /// Inter — interface text. See [manrope] for why the web is a special case.
+  static TextStyle inter({double? fontSize, FontWeight? fontWeight, Color? color, double? height, double? letterSpacing}) =>
+      kIsWeb
+          ? GoogleFonts.inter(fontSize: fontSize, fontWeight: fontWeight, color: color, height: height, letterSpacing: letterSpacing)
+          : TextStyle(fontFamily: 'Inter', fontSize: fontSize, fontWeight: fontWeight, color: color, height: height, letterSpacing: letterSpacing);
 
   static ThemeData _build(Brightness b) {
     final isDark = b == Brightness.dark;
@@ -54,13 +76,14 @@ class DispatchTheme {
       inversePrimary: DispatchColors.orange,
     );
 
-    final inter = GoogleFonts.interTextTheme();
+    final base = ThemeData.light().textTheme;
+    final interTheme = kIsWeb ? GoogleFonts.interTextTheme(base) : base.apply(fontFamily: 'Inter');
     TextStyle man(double size, FontWeight w, {double? height, double? spacing}) =>
-        GoogleFonts.manrope(fontSize: size, fontWeight: w, color: text, height: height, letterSpacing: spacing);
+        manrope(fontSize: size, fontWeight: w, color: text, height: height, letterSpacing: spacing);
     TextStyle inr(double size, FontWeight w, {Color? color, double? height}) =>
-        GoogleFonts.inter(fontSize: size, fontWeight: w, color: color ?? text, height: height);
+        inter(fontSize: size, fontWeight: w, color: color ?? text, height: height);
 
-    final textTheme = inter.copyWith(
+    final textTheme = interTheme.copyWith(
       displayLarge: man(40, FontWeight.w800, height: 1.1, spacing: -0.5),
       displayMedium: man(32, FontWeight.w800, height: 1.15, spacing: -0.5),
       displaySmall: man(28, FontWeight.w800, height: 1.15, spacing: -0.3),

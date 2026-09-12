@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
+import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 
 /// Orange rounded mark with a route-arrow glyph.
@@ -63,8 +63,8 @@ class DispatchLogo extends StatelessWidget {
       DispatchMark(size: size),
       const SizedBox(width: 12),
       Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-        Text('Dispatch', style: GoogleFonts.manrope(fontSize: size * 0.5, fontWeight: FontWeight.w800, color: fg, height: 1.1, letterSpacing: -0.4)),
-        if (showTagline) Text('Delivery planning', style: GoogleFonts.inter(fontSize: size * 0.3, fontWeight: FontWeight.w500, color: sub, height: 1.2)),
+        Text('Dispatch', style: DispatchTheme.manrope(fontSize: size * 0.5, fontWeight: FontWeight.w800, color: fg, height: 1.1, letterSpacing: -0.4)),
+        if (showTagline) Text('Delivery planning', style: DispatchTheme.inter(fontSize: size * 0.3, fontWeight: FontWeight.w500, color: sub, height: 1.2)),
       ]),
     ]);
   }

@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 
 import '../app_state.dart';
+import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/dispatch_logo.dart';
 import '../widgets/person_avatar.dart';
@@ -42,7 +42,7 @@ class Sidebar extends StatelessWidget {
                     padding: EdgeInsets.only(top: 22, bottom: 8, left: collapsed ? 0 : 16),
                     child: collapsed
                         ? Divider(color: Colors.white.withValues(alpha: 0.1))
-                        : Text(group.label!, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: DispatchColors.sidebarMuted, letterSpacing: 0.2)),
+                        : Text(group.label!, style: DispatchTheme.inter(fontSize: 12, fontWeight: FontWeight.w600, color: DispatchColors.sidebarMuted, letterSpacing: 0.2)),
                   ),
                 for (final item in group.items)
                   if (session.can(item.minRole))
@@ -95,7 +95,7 @@ class _SidebarTileState extends State<_SidebarTile> {
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
             constraints: const BoxConstraints(minWidth: 22),
             decoration: BoxDecoration(color: DispatchColors.orange, borderRadius: BorderRadius.circular(999)),
-            child: Text('${widget.badge}', textAlign: TextAlign.center, style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
+            child: Text('${widget.badge}', textAlign: TextAlign.center, style: DispatchTheme.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
           )
         : null;
 
@@ -123,7 +123,7 @@ class _SidebarTileState extends State<_SidebarTile> {
                 : Row(children: [
                     Icon(sel ? widget.item.selectedIcon : widget.item.icon, color: fg, size: 22),
                     const SizedBox(width: 14),
-                    Expanded(child: Text(widget.item.label, style: GoogleFonts.inter(fontSize: 15, fontWeight: sel ? FontWeight.w600 : FontWeight.w500, color: fg))),
+                    Expanded(child: Text(widget.item.label, style: DispatchTheme.inter(fontSize: 15, fontWeight: sel ? FontWeight.w600 : FontWeight.w500, color: fg))),
                     ?badge,
                   ]),
           ),
@@ -187,8 +187,8 @@ class _UserMenu extends StatelessWidget {
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                     Text(_shortName(user.displayName, user.shortName), maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white)),
-                    Text(user.roleTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: GoogleFonts.inter(fontSize: 13, color: DispatchColors.sidebarMuted)),
+                        style: DispatchTheme.inter(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white)),
+                    Text(user.roleTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: DispatchTheme.inter(fontSize: 13, color: DispatchColors.sidebarMuted)),
                   ]),
                 ),
                 const Icon(Icons.unfold_more_rounded, color: DispatchColors.sidebarMuted, size: 20),

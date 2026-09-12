@@ -716,10 +716,15 @@ class TmSideNav extends StatelessWidget {
       for (var i = 0; i < items.length; i++)
         Padding(
           padding: const EdgeInsets.only(bottom: 2),
+          // Material asserts that shape and borderRadius are never both given;
+          // the selected row needs a border, so carry the radius in the shape
+          // for both states and vary only the side.
           child: Material(
             color: i == selected ? context.panelColor : Colors.transparent,
-            borderRadius: DispatchRadius.buttonR,
-            shape: i == selected ? RoundedRectangleBorder(borderRadius: DispatchRadius.buttonR, side: BorderSide(color: context.borderColor)) : null,
+            shape: RoundedRectangleBorder(
+              borderRadius: DispatchRadius.buttonR,
+              side: i == selected ? BorderSide(color: context.borderColor) : BorderSide.none,
+            ),
             child: InkWell(
               onTap: () => onChanged(i),
               borderRadius: DispatchRadius.buttonR,

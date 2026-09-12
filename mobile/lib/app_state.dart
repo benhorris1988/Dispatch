@@ -172,23 +172,40 @@ class ShellState extends ChangeNotifier {
   String? get pageTitle => _pageTitle;
   List<String> get breadcrumb => _breadcrumb;
 
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// Screens hand the title back from a post-frame callback and set the
+  /// counters from replies that arrive on their own schedule, so an update can
+  /// land after the shell itself has gone. Notifying a disposed
+  /// [ChangeNotifier] throws, and by then there is nothing left to tell.
+  void _notify() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
   void setPlanStatus(String text, {bool committed = true}) {
     if (text == _planStatusText && committed == _planCommitted) return;
     _planStatusText = text;
     _planCommitted = committed;
-    notifyListeners();
+    _notify();
   }
 
   void setPendingChanges(int n) {
     if (n == _pendingChanges) return;
     _pendingChanges = n;
-    notifyListeners();
+    _notify();
   }
 
   void setUnreadNotifications(int n) {
     if (n == _unreadNotifications) return;
     _unreadNotifications = n;
-    notifyListeners();
+    _notify();
   }
 
   /// Override the top-bar title/breadcrumb for the current page. Pass null to
@@ -197,7 +214,7 @@ class ShellState extends ChangeNotifier {
     if (title == _pageTitle && listEquals(breadcrumb, _breadcrumb)) return;
     _pageTitle = title;
     _breadcrumb = breadcrumb;
-    notifyListeners();
+    _notify();
   }
 
   /// Pull the shell counters from the API. Endpoints are being written

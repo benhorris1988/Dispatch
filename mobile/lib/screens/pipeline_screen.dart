@@ -406,18 +406,34 @@ class _PipelineScreenState extends State<PipelineScreen> {
     add('skills_gap', (n, d) => '$n with a skills gap');
     if (parts.isEmpty) return const SizedBox.shrink();
 
+    final message = Row(children: [
+      const Icon(Icons.pending_actions_rounded, size: 18, color: DispatchColors.amber),
+      const SizedBox(width: Sp.sm),
+      Expanded(child: Text('Queue health: ${parts.join(' · ')}', style: context.text.bodyMedium)),
+    ]);
+    // The link is a whole sentence; beside a multi-line message it has nothing
+    // like the room it needs on a phone, so it takes its own line there and
+    // stays a flexible child of the row everywhere else.
+    final link = TextButton(
+      onPressed: () => context.go(Routes.estimates),
+      child: const Text('Open the estimate queue', maxLines: 1, overflow: TextOverflow.ellipsis),
+    );
+
     return Padding(
       padding: const EdgeInsets.only(bottom: Sp.md),
       child: DispatchCard(
         tint: DispatchColors.tint(DispatchColors.amber, opacity: context.isDark ? 0.16 : 0.10),
         accent: DispatchColors.amber,
         padding: const EdgeInsets.symmetric(horizontal: Sp.md, vertical: Sp.sm),
-        child: Row(children: [
-          const Icon(Icons.pending_actions_rounded, size: 18, color: DispatchColors.amber),
-          const SizedBox(width: Sp.sm),
-          Expanded(child: Text('Queue health: ${parts.join(' · ')}', style: context.text.bodyMedium)),
-          TextButton(onPressed: () => context.go(Routes.estimates), child: const Text('Open the estimate queue')),
-        ]),
+        child: Breaks.isPhone(context)
+            ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                message,
+                link,
+              ])
+            : Row(children: [
+                Expanded(child: message),
+                Flexible(child: link),
+              ]),
       ),
     );
   }

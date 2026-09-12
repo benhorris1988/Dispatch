@@ -20,7 +20,10 @@ class PrimaryButton extends StatelessWidget {
         ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
         : Row(mainAxisSize: MainAxisSize.min, children: [
             if (icon != null) ...[Icon(icon, size: 18), const SizedBox(width: 8)],
-            Text(label),
+            // Loose flex inside a min-size Row: the label keeps its natural
+            // width wherever there is room and gives way in a narrow column
+            // instead of overflowing the button.
+            Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis)),
           ]);
     final btn = FilledButton(
       onPressed: busy ? null : onPressed,
@@ -48,7 +51,7 @@ class SecondaryButton extends StatelessWidget {
         ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: fg ?? context.inkColor))
         : Row(mainAxisSize: MainAxisSize.min, children: [
             if (icon != null) ...[Icon(icon, size: 18, color: fg), const SizedBox(width: 8)],
-            Text(label, style: fg == null ? null : TextStyle(color: fg)),
+            Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: fg == null ? null : TextStyle(color: fg))),
           ]);
     final btn = OutlinedButton(onPressed: busy ? null : onPressed, child: child);
     return expand ? SizedBox(width: double.infinity, child: btn) : btn;
@@ -73,7 +76,9 @@ class InfoPill extends StatelessWidget {
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (dot != null) ...[Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)), const SizedBox(width: 8)],
         if (icon != null) ...[Icon(icon, size: 16, color: context.mutedColor), const SizedBox(width: 6)],
-        Text(label, style: context.text.labelLarge?.copyWith(fontWeight: FontWeight.w500)),
+        // Pill labels are sentences ('Next replan proposal Wed 9 Sep 06:00')
+        // and the pill is often the widest thing in a header's action row.
+        Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.labelLarge?.copyWith(fontWeight: FontWeight.w500))),
       ]),
     );
     if (onTap == null) return body;
@@ -98,14 +103,24 @@ class SegmentedTabs extends StatelessWidget {
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         for (var i = 0; i < labels.length; i++) ...[
           if (i > 0) Container(width: 1, height: compact ? 28 : 36, color: context.borderColor),
-          InkWell(
-            onTap: () => onChanged(i),
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 16, vertical: compact ? 6 : 9),
-              color: i == selected ? DispatchColors.ink : Colors.transparent,
-              child: Text(
-                labels[i],
-                style: context.text.labelLarge?.copyWith(color: i == selected ? Colors.white : context.mutedColor, fontSize: compact ? 13 : 14),
+          // The control sits in panel headers and filter bars that can be much
+          // narrower than the sum of its segments. Loose flex keeps every
+          // segment at its natural width while there is room and gives each an
+          // equal share of what is left when there is not, rather than running
+          // off the edge. (Weighting the flex by label length is worse: it
+          // starves a short label like 'All' of the width it does need.)
+          Flexible(
+            child: InkWell(
+              onTap: () => onChanged(i),
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 16, vertical: compact ? 6 : 9),
+                color: i == selected ? DispatchColors.ink : Colors.transparent,
+                child: Text(
+                  labels[i],
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.text.labelLarge?.copyWith(color: i == selected ? Colors.white : context.mutedColor, fontSize: compact ? 13 : 14),
+                ),
               ),
             ),
           ),

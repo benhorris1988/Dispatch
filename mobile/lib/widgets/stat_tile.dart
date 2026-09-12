@@ -60,7 +60,17 @@ class StatTile extends StatelessWidget {
         Text(label, style: context.text.bodyMedium?.copyWith(color: context.mutedColor)),
         const SizedBox(height: Sp.sm),
         Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
-          Text(value, style: DispatchTheme.numeric(size: 34, weight: FontWeight.w800, color: context.inkColor, height: 1)),
+          // Most values are a number or two, but some are a phrase ('w/c 28
+          // Sep', 'Not on rota') that can be wider than a tile in a four-up
+          // row. Keep the value at its designed size and let it give way.
+          Flexible(
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: DispatchTheme.numeric(size: 34, weight: FontWeight.w800, color: context.inkColor, height: 1),
+            ),
+          ),
           if (unit != null) ...[
             const SizedBox(width: Sp.sm),
             Flexible(child: Text(unit!, style: context.text.bodyLarge?.copyWith(color: context.mutedColor), overflow: TextOverflow.ellipsis)),

@@ -278,11 +278,14 @@ class _PrefRow extends StatelessWidget {
             child: DropdownButtonFormField<String>(
               initialValue: p.digest,
               isDense: true,
+              // Without isExpanded the button row is measured from the item's
+              // natural width and overflows the field it sits in.
+              isExpanded: true,
               items: const [
-                DropdownMenuItem(value: 'immediate', child: Text('Immediate')),
-                DropdownMenuItem(value: 'daily', child: Text('Daily')),
-                DropdownMenuItem(value: 'weekly', child: Text('Weekly')),
-                DropdownMenuItem(value: 'off', child: Text('Off')),
+                DropdownMenuItem(value: 'immediate', child: Text('Immediate', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: 'daily', child: Text('Daily', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: 'weekly', child: Text('Weekly', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: 'off', child: Text('Off', maxLines: 1, overflow: TextOverflow.ellipsis)),
               ],
               onChanged: (v) => v == null ? null : onChange(p, {'digest': v}),
             ),
