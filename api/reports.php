@@ -23,10 +23,13 @@ function rp_median(array $v) { if (!$v) return null; sort($v); $n = count($v); r
 function rp_week_label($date) { return 'w' . (int)date('W', strtotime($date)); }
 
 /** Build every report section for the range. */
-function rp_build($conn, $wsId, $policy, $rangeFrom, $rangeTo, $prevFrom, $prevTo, $thisMon) {
+function rp_build($conn, $wsId, $policy, $rangeFrom, $rangeTo, $prevFrom, $prevTo, $thisMon, $weeks) {
     // ---- stability trend + load (stability_weeks) ----
-    $sw = rows($conn, "SELECT CONVERT(char(10), week_start, 23) week_start, total_assignment_days, moved_assignment_days, changes_inside_freeze, planned_load_pct, actual_load_pct, note
-                       FROM dbo.stability_weeks WHERE workspace_id = ? AND week_start BETWEEN ? AND ? ORDER BY week_start", [$wsId, $rangeFrom, $thisMon]);
+    // The trend is the last $weeks weekly roll-ups up to and including the current week. Taking the
+    // newest $weeks rows (rather than a date window) always returns a full series whether or not the
+    // current week has been rolled up yet - a 12-week range gives 12 points, a 4-week range gives 4.
+    $sw = array_reverse(rows($conn, "SELECT TOP $weeks CONVERT(char(10), week_start, 23) week_start, total_assignment_days, moved_assignment_days, changes_inside_freeze, planned_load_pct, actual_load_pct, note
+                       FROM dbo.stability_weeks WHERE workspace_id = ? AND week_start <= ? ORDER BY week_start DESC", [$wsId, $thisMon]));
     $stability = []; $load = [];
     foreach ($sw as $w) {
         $t = (float)$w['total_assignment_days']; $m = (float)$w['moved_assignment_days'];
@@ -91,7 +94,7 @@ function rp_build($conn, $wsId, $policy, $rangeFrom, $rangeTo, $prevFrom, $prevT
         'cycle_time' => ['median_days' => $cur['median'], 'n' => $cur['n'], 'previous_median_days' => $prev['median'], 'previous_n' => $prev['n']]];
 }
 
-$data = rp_build($conn, $wsId, $policy, $rangeFrom, $rangeTo, $prevFrom, $prevTo, $thisMon);
+$data = rp_build($conn, $wsId, $policy, $rangeFrom, $rangeTo, $prevFrom, $prevTo, $thisMon, $weeks);
 
 if ($action === 'get') {
     ok($data + ['range' => $range, 'range_label' => $rangeLabel, 'range_from' => $rangeFrom, 'range_to' => $rangeTo,

@@ -80,7 +80,7 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
    dependencies:{needs:[{id,ref,title,type,status,health,needed_by,cleared_at}], unblocks:[...]},
    plan:{planned_from, planned_to, assignees:[Person-lite], changes_30d, stability_label, enters_committed_on, slack_days, needed_by},
    estimate: latest Estimate + {expected, sd, p80, implied_stamp, cost_likely, cost_low, cost_high} | null, estimate_count,
-   benefits:[Benefit], benefit_total, benefit_confidence, payback_months,
+   benefits:[Benefit], benefit_total, benefit_confidence, blended_cost (PERT expected days x day rate), payback_months (blended_cost / (benefit_total / 12)),
    tasks:[{id,title,size_stamp,effort_days,skill_name,sequence,status}], tasks_rollup_days,
    assignments:[Assignment (committed plan)], comments:[{id,author_name,body,created_at}],
    readiness:{items:[{key,label,done}], ready:bool}, history_count}`

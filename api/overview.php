@@ -38,9 +38,14 @@ if ($action === 'get') {
     foreach ($landing as $it) {
         $id = (int)$it['id'];
         $pf = $finish[$id] ?? null;
-        $inWindow = ($pf !== null && $pf >= $today && $pf <= $freezeEnd) || ($it['needed_by'] !== null && $it['needed_by'] >= $today && $it['needed_by'] <= $freezeEnd);
+        // A delivery lands in the committed window when its committed assignments finish inside it, or
+        // when it is needed inside it. The date shown is the earliest of those that actually falls in
+        // the window - a later needed_by on work that finishes this week must not leak outside it.
+        $inWindow = [];
+        if ($pf !== null && $pf >= $today && $pf <= $freezeEnd) $inWindow[] = $pf;
+        if ($it['needed_by'] !== null && $it['needed_by'] >= $today && $it['needed_by'] <= $freezeEnd) $inWindow[] = $it['needed_by'];
         if (!$inWindow) continue;
-        $due = $it['needed_by'] ?? $pf;
+        $due = min($inWindow);
         $items[] = [
             'id' => $id, 'ref' => $it['ref'], 'title' => $it['title'], 'work_type_id' => (int)$it['work_type_id'],
             'type_name' => $it['type_name'], 'type_colour' => $it['type_colour'], 'type_policy' => $it['type_policy'],

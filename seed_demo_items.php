@@ -452,6 +452,62 @@ $skillReq = [
     'INC-4469' => [['Databricks', 3, 3, null], ['Azure', 2, 1, null]],
     'INC-4470' => [['Power BI', 2, 1, null], ['Azure', 2, 1, null]],
 ];
+// Delivered work carries its skill requirements too: it is what the "similar work" panel on the
+// estimate screen matches on (EST-08 - same size stamp, at least one shared skill).
+$deliveredSkills = [
+    // Large
+    'WI-0912' => [['Data modelling', 3], ['SQL', 3]],
+    'WI-0934' => [['Data modelling', 3], ['Azure Data Factory', 2], ['SQL', 3]],
+    'WI-0951' => [['Event streaming', 3], ['Python', 3], ['Azure', 2]],
+    'WI-0968' => [['Data modelling', 3], ['Security', 2], ['SQL', 2]],
+    'WI-0987' => [['Data modelling', 3], ['Databricks', 3], ['SQL', 3]],
+    'WI-0995' => [['Databricks', 3], ['Python', 3], ['Azure Data Factory', 2]],
+    'WI-1004' => [['Data modelling', 3], ['SQL', 3], ['Power BI', 2]],
+    'WI-1019' => [['Data modelling', 3], ['Power BI', 3], ['Procurement domain', 1]],
+    'WI-1027' => [['Databricks', 3], ['Terraform', 3], ['Azure', 2]],
+    // Custom
+    'WI-0925' => [['Data modelling', 3], ['SQL', 3], ['Azure Data Factory', 2]],
+    'WI-0972' => [['Data modelling', 3], ['SQL', 3], ['Power BI', 2]],
+    'WI-1008' => [['SQL', 3], ['Azure', 2], ['Data modelling', 2]],
+    'WI-1024' => [['Terraform', 3], ['Azure', 3], ['Security', 2]],
+    // Medium
+    'WI-0908' => [['Azure Data Factory', 2], ['Python', 2]],
+    'WI-0917' => [['SQL', 2], ['Procurement domain', 1]],
+    'WI-0929' => [['SQL', 2], ['Data modelling', 2]],
+    'WI-0941' => [['Databricks', 3], ['Security', 2]],
+    'INC-4402' => [['SQL', 3], ['Azure Data Factory', 2]],
+    'WI-0957' => [['SQL', 3], ['Data modelling', 2]],
+    'WI-0963' => [['Data modelling', 3], ['SQL', 2]],
+    'WI-0979' => [['Data modelling', 3], ['SQL', 2]],
+    'WI-0983' => [['Azure', 2], ['Python', 2]],
+    'WI-0991' => [['Data modelling', 3], ['SQL', 2]],
+    'WI-0999' => [['Data modelling', 2], ['SQL', 2]],
+    'INC-4428' => [['Azure', 2], ['Security', 2]],
+    'WI-1007' => [['Power BI', 3], ['SQL', 2]],
+    'WI-1011' => [['Data modelling', 3], ['SQL', 2]],
+    'WI-1015' => [['API integration', 3], ['Python', 2]],
+    'WI-1021' => [['Data modelling', 3], ['SQL', 2]],
+    'WI-1029' => [['Databricks', 3], ['Data modelling', 2]],
+    'INC-4455' => [['Databricks', 3], ['Azure', 2]],
+    'WI-1034' => [['SQL', 3], ['Data modelling', 2]],
+    // Small
+    'SR-0181' => [['Azure', 2]],
+    'WI-0921' => [['SQL', 2]],
+    'SR-0190' => [['Azure', 2]],
+    'WI-0946' => [['Azure Data Factory', 2]],
+    'INC-4411' => [['Power BI', 2]],
+    'SR-0196' => [['Power BI', 2]],
+    'WI-0975' => [['Security', 3]],
+    'WI-1002' => [['SQL', 2]],
+    'SR-0203' => [['Security', 2]],
+    'WI-1013' => [['Python', 2]],
+    'INC-4440' => [['SQL', 3]],
+    'SR-0208' => [['SQL', 2]],
+    'WI-1031' => [['Azure Data Factory', 2]],
+    'WI-1036' => [['Security', 2]],
+];
+foreach ($deliveredSkills as $ref => $rowsD) foreach ($rowsD as $r) $skillReq[$ref][] = [$r[0], $r[1], null, null];
+
 $N['skill_requirements'] = 0;
 foreach ($skillReq as $ref => $rows) {
     foreach ($rows as $r) {
@@ -586,6 +642,11 @@ foreach ($estSpec as $ref => $e) {
 // 7. BENEFITS — 31 benefits across 24 items (web-09).
 //    Items in the committed/planned window total £1,448,000 a year.
 //    Two benefits are at risk (£30k + £65k = £95k).
+//    The distribution is deliberately skewed, as a real portfolio is: three large cases
+//    (WI-1071 £800k, WI-1066 £690k, WI-1064 £560k raw) over a long tail of £15k-£160k ones.
+//    That puts the workspace 90th percentile of confidence-scaled per-item value at about
+//    £400k, which is the figure Appendix B of the specification works WI-1042 against
+//    (£210k at medium confidence = £147k; 147/400 = 0.37 for the value term).
 // -------------------------------------------------------------------------------------
 $benefitRows = [
     // ref, type, annual value, confidence, realisation_from, status, owner name, narrative
@@ -609,28 +670,42 @@ $benefitRows = [
     // unscheduled pipeline
     ['WI-1063', 'productivity',    45000, 'medium', '2026-10-01', 'planned',   'HR Services',       'Availability maintained automatically instead of by hand.'],
     ['WI-1066', 'cost_avoidance', 480000, 'medium', '2027-04-01', 'planned',   'Finance',           'Retires the licensed allocation engine and its support contract.'],
-    ['WI-1066', 'productivity',   120000, 'medium', '2027-04-01', 'planned',   'Finance',           'Allocation cycle cut from nine days to two.'],
+    ['WI-1066', 'productivity',   210000, 'medium', '2027-04-01', 'planned',   'Finance',           'Allocation cycle cut from nine days to two across the eleven reporting entities.'],
     ['WI-1068', 'compliance',      95000, 'low',    '2027-04-01', 'planned',   'Procurement',       'Evidence for the supplier due-diligence obligation.'],
     ['WI-1070', 'cost_avoidance',  22000, 'medium', '2027-01-01', 'planned',   'Data Platform',     'Hosting and support for the legacy reporting server retired.'],
-    ['WI-1071', 'risk_reduction', 140000, 'medium', '2027-04-01', 'planned',   'Information Security', 'Lateral movement risk reduced across the platform networks.'],
-    ['WI-1071', 'compliance',      55000, 'medium', '2027-04-01', 'planned',   'Information Security', 'Closes the outstanding segmentation finding.'],
+    ['WI-1064', 'revenue',        560000, 'medium', '2027-01-01', 'planned',   'Logistics',         'Throughput uplift from optimised slotting across the two national distribution centres.'],
+    ['WI-1071', 'risk_reduction', 620000, 'medium', '2027-04-01', 'planned',   'Information Security', 'Modelled annual loss avoided: lateral movement between the platform networks is the largest open exposure on the group risk register.'],
+    ['WI-1071', 'compliance',     180000, 'medium', '2027-04-01', 'planned',   'Information Security', 'Closes the outstanding segmentation finding and removes the compensating-control cost carried since the last audit.'],
     // delivered
     ['WI-0987', 'cost_avoidance', 180000, 'high',   '2026-04-01', 'realised',  'Finance',           'Customer reconciliation spreadsheets retired.'],
     ['WI-0987', 'productivity',    65000, 'high',   '2026-04-01', 'realised',  'Finance',           'Data stewards spend less time on duplicate resolution.'],
     ['WI-0912', 'cost_avoidance', 120000, 'high',   '2026-01-01', 'realised',  'Asset Management',  'Two asset register extracts decommissioned.'],
     ['WI-1011', 'productivity',    60000, 'high',   '2026-07-01', 'realising', 'Commercial',        'Product hierarchy maintained once, used everywhere.'],
     ['WI-1011', 'cost_avoidance',  25000, 'high',   '2026-07-01', 'realising', 'Commercial',        'Third-party hierarchy feed cancelled.'],
-    ['WI-1036', 'risk_reduction',  40000, 'medium', '2026-10-01', 'planned',   'Information Security', 'Standing access grants reviewed on a schedule rather than ad hoc.'],
     ['WI-1004', 'productivity',    70000, 'high',   '2026-07-01', 'realised',  'Finance',           'Group reporting pack built from one conformed layer.'],
 ];
 $benefitIds = [];   // index => benefit id, with annual value and realisation_from for the realisation loop
 $N['benefits'] = 0;
+/**
+ * When each benefit case was written. Everything defaults to earlier in the year; the
+ * refs listed here were added during the current quarter and total ~GBP 340k of in-plan
+ * value, which is the "+GBP 340k added this quarter" note on the benefits register.
+ */
+function benefit_created_at($ref) {
+    // 160k + 90k + 50k + 40k = GBP 340k of in-plan value. WI-1063 and WI-1052 are also
+    // recent but sit outside the plan, so they do not count towards the figure.
+    static $thisQuarter = ['WI-1040' => 1, 'WI-1044' => 1, 'WI-1047' => 1, 'WI-1041' => 1, 'WI-1063' => 1, 'WI-1052' => 1];
+    return isset($thisQuarter[$ref]) ? '2026-07-21 09:00:00' : '2026-04-14 09:00:00';
+}
 foreach ($benefitRows as $b) {
     $id = xid($conn, 'benefits', ['workspace_id' => $W, 'work_item_id' => $I[$b[0]], 'type' => $b[1],
         'annual_value' => $b[2], 'currency' => 'GBP', 'confidence' => $b[3], 'qualitative_scale' => null,
         'realisation_from' => $b[4], 'owner_person_id' => null, 'owner_name' => $b[6], 'narrative' => $b[7],
         'status' => $b[5], 'realised_value' => in_array($b[5], ['realised', 'realising'], true) ? round($b[2] * 0.6, 2) : null,
-        'created_at' => '2026-08-01 09:00:00']);
+        // A benefit case is written when the work is proposed, not all on one day. Cases
+        // added since the quarter started (1 Jul 2026) drive the "added this quarter"
+        // figure on the register, so only the newest few carry a Q3 date.
+        'created_at' => benefit_created_at($b[0])]);
     $benefitIds[] = ['id' => $id, 'value' => $b[2], 'from' => $b[4]];
     $N['benefits']++;
 }

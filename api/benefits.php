@@ -26,10 +26,16 @@ if ($action === 'list') {
     $today = today(); $year = substr($today, 0, 4);
     $qStart = sprintf('%s-%02d-01', $year, (int)((ceil((int)substr($today, 5, 2) / 3) - 1) * 3 + 1));
     $t = row($conn, "SELECT
-        SUM(CASE WHEN wi.status NOT IN ('delivered','cancelled') THEN b.annual_value ELSE 0 END) AS in_plan,
+        -- Value in the plan = value riding on work that is actually IN the plan, i.e.
+        -- scheduled or under way, not everything sitting in the pipeline. Counting the
+        -- whole backlog overstates what the team is on course to deliver: an unscheduled
+        -- item's benefit is precisely the value that is NOT yet in the plan. in_pipeline
+        -- carries the wider figure for anyone who wants it.
+        SUM(CASE WHEN wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS in_plan,
+        SUM(CASE WHEN wi.status NOT IN ('delivered','cancelled') THEN b.annual_value ELSE 0 END) AS in_pipeline,
         SUM(CASE WHEN b.status = 'at_risk' THEN b.annual_value ELSE 0 END) AS at_risk,
         SUM(CASE WHEN b.status = 'at_risk' THEN 1 ELSE 0 END) AS at_risk_count,
-        SUM(CASE WHEN b.created_at >= ? AND wi.status NOT IN ('delivered','cancelled') THEN b.annual_value ELSE 0 END) AS added_this_quarter,
+        SUM(CASE WHEN b.created_at >= ? AND wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS added_this_quarter,
         COUNT(*) AS benefit_count, COUNT(DISTINCT b.work_item_id) AS items_with_benefits
         FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id WHERE b.workspace_id = ?", [$qStart, $wsId]);
     $realisedYtd = (float)scalar($conn, "SELECT ISNULL(SUM(r.realised_value),0) FROM dbo.benefit_realisations r JOIN dbo.benefits b ON b.id = r.benefit_id
@@ -46,7 +52,7 @@ if ($action === 'list') {
         elseif (count($types) === 1) $note = 'All are ' . $types[0] . 's';
         elseif (count($stamps) === 1 && $stamps[0]) $note = 'All are size ' . $stamps[0];
     }
-    $totals = ['in_plan' => (int)round((float)$t['in_plan']), 'realised_ytd' => (int)round($realisedYtd), 'at_risk' => (int)round((float)$t['at_risk']), 'at_risk_count' => (int)$t['at_risk_count'],
+    $totals = ['in_plan' => (int)round((float)$t['in_plan']), 'in_pipeline' => (int)round((float)$t['in_pipeline']), 'realised_ytd' => (int)round($realisedYtd), 'at_risk' => (int)round((float)$t['at_risk']), 'at_risk_count' => (int)$t['at_risk_count'],
         'items_without_case' => count($without), 'items_without_case_note' => $note, 'items_total' => count($openItems), 'items_with_benefits' => (int)$t['items_with_benefits'], 'benefit_count' => (int)$t['benefit_count'],
         'added_this_quarter' => (int)round((float)$t['added_this_quarter']), 'target_annual' => (int)round($plannedYear), 'target_pct' => $plannedYear > 0 ? (int)round($realisedYtd / $plannedYear * 100) : null, 'year' => (int)$year];
 

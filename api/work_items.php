@@ -561,7 +561,13 @@ function item_detail($conn, $wsId, array $wi) {
     $avg = $total > 0 ? $weighted / $total : null;
     $item['benefit_confidence'] = $avg === null ? null : ($avg >= 2.5 ? 'high' : ($avg >= 1.5 ? 'medium' : 'low'));
     $item['benefit_realised_from'] = $bens ? min(array_filter(array_column($bens, 'realisation_from')) ?: [null]) : null;
-    $item['payback_months'] = ($item['estimate'] && $item['estimate']['cost_likely'] && $total > 0) ? round($item['estimate']['cost_likely'] / ($total / 12), 1) : null;
+    // Payback is the blended cost of the work (PERT expected days x day rate - the figure the item
+    // page shows as "Blended cost") divided by one month of the annual benefit. cost_likely is the
+    // cost at the most-likely estimate and is a narrower figure; it is not what payback is quoted on.
+    $est = $item['estimate'];
+    $blendedCost = ($est && $est['expected'] !== null && $est['day_rate'] !== null) ? (float)$est['expected'] * (float)$est['day_rate'] : null;
+    $item['blended_cost'] = $blendedCost === null ? null : (int)round($blendedCost);
+    $item['payback_months'] = ($blendedCost && $total > 0) ? round($blendedCost / ($total / 12), 1) : null;
     // Tasks, comments, readiness, history count
     $item['tasks'] = tasks_for($conn, $wi['id']);
     $item['tasks_rollup_days'] = round(array_sum(array_map(fn($t) => (float)($t['effort_days'] ?? 0), $item['tasks'])), 2);

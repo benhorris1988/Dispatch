@@ -34,6 +34,66 @@ echo "Wiped.\n";
 // ---------------------------------------------------------------- workspace, work types, sizes, policy
 $W = xid($conn, 'workspaces', ['name' => 'Data Platform', 'time_zone' => 'Europe/London', 'working_days' => 'Mon,Tue,Wed,Thu,Fri', 'hours_per_day' => 7.5, 'currency' => 'GBP', 'created_at' => '2026-03-30 09:00:00']);
 
+// Requirements templates (REQ-03): pre-populate the requirements tab of a new item of this type.
+$reqTemplates = [
+  'Project' => "## Problem
+What is wrong today, who feels it and how often.
+
+## Scope
+In scope:
+- 
+
+Out of scope:
+- 
+
+## Data and interfaces
+Source systems, target datasets, refresh frequency and owners.
+
+## Acceptance criteria
+- [ ] Agreed with the sponsor and the requesting team
+- [ ] Measurable, with the check written down
+- [ ] Non-functional needs stated (volume, refresh, retention, access)
+
+## Assumptions and exclusions
+- 
+
+## Benefit
+How the annual value is measured and who confirms it.",
+  'Small change' => "## Change
+What changes and where.
+
+## Reason
+Why now, and what happens if it is not done.
+
+## Acceptance criteria
+- [ ] Behaviour after the change, stated as a check
+- [ ] Regression check on the affected pipeline or report
+
+## Rollback
+How the change is backed out if it fails.",
+  'Incident' => "## What is happening
+Symptoms, affected services and when it started.
+
+## Impact
+Who is affected and what they cannot do.
+
+## Immediate mitigation
+- 
+
+## Acceptance criteria
+- [ ] Service restored and confirmed by the reporter
+- [ ] Root cause recorded and any follow-up raised as its own item",
+  'Service request' => "## Request
+What is being asked for.
+
+## Who it is for
+Requester, team and any approver.
+
+## Acceptance criteria
+- [ ] Access or resource in place and confirmed by the requester
+- [ ] Recorded in the access register",
+];
+
 $WT = []; // name => id
 $wtRows = [
   ['Project', 'Projects', 'WI', '#3B6BD6', 'planned', 1, 1, 'L', null, 'days', 'Planned work · scheduled by the engine · needs an estimate and a benefit case before scheduling'],
@@ -42,7 +102,8 @@ $wtRows = [
   ['Service request', 'Service requests', 'SR', '#6D5BD0', 'planned', 0, 0, 'S', 'S', 'days', 'Planned work · Small only · scheduled into gaps within 10 working days'],
 ];
 foreach ($wtRows as $i => $r) $WT[$r[0]] = xid($conn, 'work_types', ['workspace_id' => $W, 'name' => $r[0], 'plural' => $r[1], 'prefix' => $r[2], 'colour' => $r[3], 'policy' => $r[4],
-  'requires_estimate' => $r[5], 'requires_benefit' => $r[6], 'default_size_stamp' => $r[7], 'allowed_sizes' => $r[8], 'size_unit' => $r[9], 'description' => $r[10], 'sort_order' => $i + 1]);
+  'requires_estimate' => $r[5], 'requires_benefit' => $r[6], 'default_size_stamp' => $r[7], 'allowed_sizes' => $r[8], 'size_unit' => $r[9], 'description' => $r[10],
+  'requirements_template' => $reqTemplates[$r[0]] ?? null, 'sort_order' => $i + 1]);
 foreach ([['WI', 1072], ['INC', 4472], ['SR', 216]] as $rs) x($conn, "INSERT INTO dbo.ref_sequences (workspace_id, prefix, next_value) VALUES (?,?,?)", [$W, $rs[0], $rs[1]]);
 
 $SZ = []; // stamp => id (workspace scope)
