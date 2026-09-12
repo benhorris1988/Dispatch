@@ -94,14 +94,28 @@ function plan_check_constraints(array $assignments, array $model) {
         if ($item['earliest_start'] && $a['from_date'] < $item['earliest_start'] && $a['from_date'] >= $model['today']) $v[] = "{$item['ref']} starts before earliest start";
         $isPair = str_starts_with((string)($a['role_label'] ?? ''), 'pair');
         if (!$isPair && !$item['skill_effort'] && !pl_meets($p, $item['skills']) && !$a['locked']) $v[] = "{$p['name']} lacks skills for {$item['ref']}";
+        // An assignment is a date RANGE, not a per-day commitment: it legitimately spans
+        // days the person does not work (a four-day week, a half day, leave) and the
+        // planner simply places no effort on those. So a day is only counted when the
+        // nominal allocation could actually fit in it, and a day with no room is skipped
+        // rather than reported. Reading the range as "allocation_pct on every day in it"
+        // made this checker reject the heuristic's own plans — and since cpsat_solve()
+        // validates solver output with it, every CP-SAT plan was discarded as invalid.
+        $worked = 0;
         foreach (model_days_in($model, $a['from_date'], $a['to_date']) as $di) {
             $day = $model['days'][$di];
             $cap = $p['capacity'][$day] ?? ['available' => 0, 'reserve' => 0];
-            if ($cap['available'] <= 1e-6) $v[] = "{$p['name']} on {$item['ref']} on zero-capacity day $day";
-            $load[$pid][$di]['planned'] = ($load[$pid][$di]['planned'] ?? 0) + ($item['policy'] === 'interrupt' ? 0 : $a['allocation_pct'] / 100 * $model['hours_per_day']);
-            $load[$pid][$di]['all'] = ($load[$pid][$di]['all'] ?? 0) + $a['allocation_pct'] / 100 * $model['hours_per_day'];
+            $isInterrupt = $item['policy'] === 'interrupt';
+            $room = $cap['available'] - ($isInterrupt ? 0 : $cap['reserve']);
+            if ($room <= 1e-6) continue;   // not a day this person works
+            $worked++;
+            // Allocation is a share of that day's schedulable time (see planner.php).
+            $hours = $a['allocation_pct'] / 100 * $room;
+            $load[$pid][$di]['planned'] = ($load[$pid][$di]['planned'] ?? 0) + ($isInterrupt ? 0 : $hours);
+            $load[$pid][$di]['all'] = ($load[$pid][$di]['all'] ?? 0) + $hours;
             if ($item['counts_for_wip']) $items[$pid][$di][$iid] = true;
         }
+        if ($worked === 0) $v[] = "{$p['name']} on {$item['ref']}: no working day in {$a['from_date']}..{$a['to_date']}";
         if (!isset($finish[$iid]) || $a['to_date'] > $finish[$iid]) $finish[$iid] = $a['to_date'];
         if (!isset($start[$iid]) || $a['from_date'] < $start[$iid]) $start[$iid] = $a['from_date'];
     }

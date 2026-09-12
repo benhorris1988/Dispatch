@@ -106,8 +106,13 @@ check(is_array($changes), 'diff returns a change list (' . count($changes) . ')'
 $badCost = 0; $indicativeCharged = 0;
 foreach ($changes as $c) {
     if (($c['stability_cost_days'] ?? 0) < 0) $badCost++;
-    $after = $c['after'] ?? [];
-    if (!empty($after['from']) && $after['from'] > $model['windows']['planned_end'] && ($c['stability_cost_days'] ?? 0) > 0) $indicativeCharged++;
+    // STAB-06 charges nothing for a change that lives entirely beyond the planning horizon.
+    // A change whose *after* is out there but whose *before* was inside the planned window has
+    // still vacated planned days, and those days are real churn — so both ends are tested.
+    $before = $c['before'] ?? null; $after = $c['after'] ?? null;
+    $beforeOut = !$before || empty($before['from']) || $before['from'] > $model['windows']['planned_end'];
+    $afterOut = !$after || empty($after['from']) || $after['from'] > $model['windows']['planned_end'];
+    if ($beforeOut && $afterOut && ($c['stability_cost_days'] ?? 0) > 0) $indicativeCharged++;
 }
 check($badCost === 0, 'no change has a negative stability cost');
 check($indicativeCharged === 0, 'moves beyond the planning horizon cost nothing (STAB-06)');
@@ -233,15 +238,63 @@ section('Urgent cycles are scoped to the affected people (STAB-05)');
 $scopePid = (int)array_key_first($model['people']);   // keyed by person id, not positional
 $scoped = build_model($conn, $wsId, ['scope_person_ids' => [$scopePid]]);
 $scopedPlan = heuristic_plan($scoped);
+// Rows are matched by committed_id, not by (item, person): one person legitimately holds several
+// committed rows for the same item (a continuation split across windows), and matching on the pair
+// compared row A against row B's dates and called an untouched plan "moved".
+$planByCommitted = [];
+foreach ($scopedPlan['assignments'] as $a) if (!empty($a['committed_id'])) $planByCommitted[(int)$a['committed_id']] = $a;
 $outOfScopeMoved = [];
 foreach ($scoped['committed'] as $c) {
     if ($c['person_id'] === $scopePid) continue;
-    foreach ($scopedPlan['assignments'] as $a) {
-        if ($a['work_item_id'] !== $c['work_item_id'] || $a['person_id'] !== $c['person_id']) continue;
-        if ($a['from_date'] !== $c['from_date'] || $a['to_date'] !== $c['to_date']) $outOfScopeMoved[] = $c['work_item_id'];
+    if ($c['to_date'] < $scoped['today']) continue;                       // wholly in the past: not replanned
+    if (!isset($scoped['items'][$c['work_item_id']])) continue;           // delivered / cancelled: released
+    if (!isset($scoped['people'][$c['person_id']])) continue;
+    $a = $planByCommitted[(int)$c['id']] ?? null;
+    if ($a === null) { $outOfScopeMoved[] = "{$c['id']} dropped"; continue; }
+    if ($a['person_id'] !== $c['person_id'] || $a['from_date'] !== $c['from_date'] || $a['to_date'] !== $c['to_date'] || (int)$a['allocation_pct'] !== (int)$c['allocation_pct']) {
+        $outOfScopeMoved[] = "{$c['id']} {$c['from_date']}..{$c['to_date']}@{$c['allocation_pct']} -> {$a['from_date']}..{$a['to_date']}@{$a['allocation_pct']}";
     }
 }
-check(empty($outOfScopeMoved), 'an urgent cycle leaves everyone else\'s plan alone (' . count($outOfScopeMoved) . ' moved)');
+check(empty($outOfScopeMoved), 'an urgent cycle leaves everyone else\'s plan alone (' . count($outOfScopeMoved) . ' moved' . ($outOfScopeMoved ? ': ' . implode('; ', array_slice($outOfScopeMoved, 0, 3)) : '') . ')');
+
+// Regression (scope leak): an item held by BOTH a scoped and an unscoped person used to be marked
+// "preloaded" by the out-of-scope rows alone, which dropped the scoped person's rows from the plan
+// entirely — the urgent cycle silently deleted the very work it was called to re-plan.
+$scopedItems = [];
+foreach ($scoped['committed'] as $c) if ($c['person_id'] === $scopePid && $c['to_date'] >= $scoped['today'] && isset($scoped['items'][$c['work_item_id']])) $scopedItems[$c['work_item_id']] = true;
+$lostInScope = [];
+foreach (array_keys($scopedItems) as $iid) {
+    $found = false;
+    foreach ($scopedPlan['assignments'] as $a) if ($a['work_item_id'] === $iid && $a['person_id'] === $scopePid) { $found = true; break; }
+    foreach ($scopedPlan['unscheduled'] as $u) if ($u['work_item_id'] === $iid) { $found = true; break; }
+    if (!$found) $lostInScope[] = $scoped['items'][$iid]['ref'];
+}
+check(empty($lostInScope), 'the scoped person keeps (or is told about) every item they were committed to' . ($lostInScope ? ': ' . implode(', ', $lostInScope) : ''));
+
+// Regression (double booking): the candidate plan is a list of date RANGES, so the planner's own
+// occupancy grid and the rows it emits must agree. Re-derive per-day load here, independently of
+// plan_check_constraints(), at the documented reading: allocation_pct is a share of that day's
+// schedulable time (available − reserve; interrupts may eat the reserve).
+$overbooked = [];
+$dayLoad = [];
+foreach ($result['assignments'] as $a) {
+    $p = $model['people'][$a['person_id']] ?? null; $it = $model['items'][$a['work_item_id']] ?? null;
+    if (!$p || !$it) continue;
+    foreach (model_days_in($model, $a['from_date'], $a['to_date']) as $di) {
+        $day = $model['days'][$di];
+        $cap = $p['capacity'][$day] ?? ['available' => 0, 'reserve' => 0];
+        $room = $cap['available'] - ($it['policy'] === 'interrupt' ? 0 : $cap['reserve']);
+        if ($room <= 1e-6) continue;                       // not a day this person works
+        $dayLoad[$a['person_id']][$day] = ($dayLoad[$a['person_id']][$day] ?? 0) + $a['allocation_pct'] / 100 * $room;
+    }
+}
+foreach ($dayLoad as $pid => $days) {
+    $p = $model['people'][$pid];
+    foreach ($days as $day => $h) {
+        if ($h > $p['capacity'][$day]['available'] + 1e-6) $overbooked[] = "{$p['name']} " . round($h, 2) . "h on $day";
+    }
+}
+check(empty($overbooked), 'no one is booked past their day once the ranges are expanded' . ($overbooked ? ': ' . implode('; ', array_slice($overbooked, 0, 3)) : ''));
 
 // ---------------------------------------------------------------------------------
 section('Watch list carries what the scheduler cannot fix (SCH-05, 8.13)');

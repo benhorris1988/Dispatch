@@ -21,18 +21,49 @@ function heuristic_plan(array $model, array $opts = []) {
     foreach ($model['committed'] as $a) $committedByItem[$a['work_item_id']][] = $a;
 
     // Pass 1: pre-load locked assignments, and (urgent cycles) everything belonging to people outside scope.
-    $preloaded = []; // item id => true when fully covered by pre-loaded rows
+    // An item is only "preloaded" (taken out of the queue) when EVERY committed row of it was fixed
+    // here. A partly fixed item — one person's row locked or out of scope, another's still free to
+    // move — stays in the queue with the effort already covered by the fixed rows subtracted, so its
+    // remaining rows are re-planned instead of being silently dropped with the item.
+    $preloaded = [];             // item id => true when every committed row was pre-loaded
+    $fixedShare = [];            // item id => share of the item's effort already covered by pre-loaded rows
+    $fixedFinish = [];           // item id => last day index covered by pre-loaded rows
+    $fixedCount = []; $committedCount = []; $fixedWeight = []; $totalWeight = [];
+    foreach ($model['committed'] as $a) {
+        if (!isset($model['items'][$a['work_item_id']]) || !isset($model['people'][$a['person_id']])) continue;
+        $committedCount[$a['work_item_id']] = ($committedCount[$a['work_item_id']] ?? 0) + 1;
+        $totalWeight[$a['work_item_id']] = ($totalWeight[$a['work_item_id']] ?? 0) + pl_row_weight($model, $a);
+    }
     foreach ($model['committed'] as $a) {
         $item = $model['items'][$a['work_item_id']] ?? null;
         if (!$item) continue; // delivered / cancelled: released
         $outOfScope = $scopeSet !== null && !isset($scopeSet[$a['person_id']]);
         if (!$a['locked'] && !$outOfScope) continue;
         if (!isset($model['people'][$a['person_id']])) continue;
+        $iid = $item['id']; $pid = $a['person_id']; $isInc = $item['policy'] === 'interrupt';
+        $fixedCount[$iid] = ($fixedCount[$iid] ?? 0) + 1;
+        $fixedWeight[$iid] = ($fixedWeight[$iid] ?? 0) + pl_row_weight($model, $a);
         $dis = model_days_in($model, $a['from_date'], $a['to_date']);
-        if (!$dis) { $preloaded[$item['id']] = true; continue; }
-        foreach ($dis as $di) pl_consume($st, $a['person_id'], $di, $item['id'], $a['allocation_pct'] / 100 * $model['hours_per_day'], $item['policy'] === 'interrupt');
-        $out[] = pl_out_row($model, $item, $a['person_id'], $a['from_date'], $a['to_date'], $a['allocation_pct'], $a['role_label'], true, true, $a['id'], $a['is_reserve']);
-        $preloaded[$item['id']] = true;
+        if (!$dis) continue; // entirely in the past: nothing to occupy, nothing to emit
+        $last = -1;
+        foreach ($dis as $di) {
+            // Same reading as pl_try_run(): the allocation is a share of that day's schedulable
+            // time, and a day the person does not work carries no effort at all.
+            $room = $isInc ? $st['cap'][$pid][$di] : max(0.0, $st['cap'][$pid][$di] - $st['res'][$pid][$di]);
+            if ($room <= 1e-6) continue;
+            $h = $a['allocation_pct'] / 100 * $room;
+            pl_consume($st, $pid, $di, $iid, $h, $isInc);
+            $last = $di;
+        }
+        $out[] = pl_out_row($model, $item, $pid, $a['from_date'], $a['to_date'], $a['allocation_pct'], $a['role_label'], true, true, $a['id'], $a['is_reserve']);
+        $fixedFinish[$iid] = max($fixedFinish[$iid] ?? -1, $last);
+    }
+    foreach ($fixedCount as $iid => $n) {
+        if ($n >= ($committedCount[$iid] ?? 0)) { $preloaded[$iid] = true; continue; }
+        // Effort is shared across an item's committed rows in proportion to their weight (the same
+        // split pl_try_keep() uses), so the rows left to plan carry only what the fixed rows do not.
+        $tw = $totalWeight[$iid] ?? 0;
+        if ($tw > 0) $fixedShare[$iid] = min(1.0, ($fixedWeight[$iid] ?? 0) / $tw);
     }
 
     // Order: interrupt items first (by priority), then items by priority desc; small new items are
@@ -55,7 +86,8 @@ function heuristic_plan(array $model, array $opts = []) {
     }
 
     $ctx = ['model' => $model, 'committedByItem' => $committedByItem, 'scopeSet' => $scopeSet, 'placed' => [], 'visiting' => [],
-            'out' => &$out, 'unscheduled' => &$unscheduled, 'displacements' => &$displacements, 'queue' => $items, 'finish' => []];
+            'out' => &$out, 'unscheduled' => &$unscheduled, 'displacements' => &$displacements, 'queue' => $items, 'finish' => [],
+            'fixedShare' => $fixedShare, 'fixedFinish' => $fixedFinish];
     foreach ($preloaded as $iid => $_) { $ctx['placed'][$iid] = true; $ctx['finish'][$iid] = pl_item_finish_di($model, $out, $iid); }
 
     $i = 0;
@@ -135,6 +167,11 @@ function pl_counted(array $st, array $model, $pid, $di, $exceptIid = null) {
 }
 function pl_has_unscheduled(array $list, $iid) { foreach ($list as $u) if ($u['work_item_id'] === $iid) return true; return false; }
 
+/** Weight of a committed row when effort is shared across an item's rows (mirrors pl_try_keep). */
+function pl_row_weight(array $model, array $a) {
+    return max(0.25, count(model_days_in($model, $a['from_date'], $a['to_date']))) * $a['allocation_pct'];
+}
+
 function pl_out_row(array $model, array $item, $pid, $from, $to, $alloc, $role, $kept, $locked, $committedId = null, $isReserve = false) {
     return ['work_item_id' => $item['id'], 'ref' => $item['ref'], 'person_id' => $pid, 'from_date' => $from, 'to_date' => $to,
         'allocation_pct' => (int)$alloc, 'state' => model_state_for(max($from, $model['today']), $model['windows']),
@@ -181,18 +218,27 @@ function pl_try_run(array $st, array $model, array $item, $pid, $startDi, $alloc
     $n = count($model['days']);
     if ($startDi >= $n) return null;
     if ($item['granularity'] === 'week' && !pl_is_bucket_start($model, $startDi)) return null;
-    $perDay = $alloc / 100 * $model['hours_per_day'];
+    // Allocation is a share of the person's own schedulable time that day, not of a
+    // nominal 7.5-hour day. With an incident reserve held back, a 100% allocation could
+    // otherwise never fit anyone — yet full-time is the normal case, and the reserve
+    // exists precisely so that planned work stops short of it.
     $remaining = $needHours; $days = []; $di = $startDi; $last = $startDi;
     $maxConc = $model['people'][$pid]['max_concurrent'];
     $counts = $item['counts_for_wip'];
     while ($remaining > 1e-6 && $di < $n) {
         $cap = $st['cap'][$pid][$di];
         if ($cap <= 1e-6) { if ($di === $startDi) return null; $di++; continue; }
+        $schedulable = $allowReserve ? $cap : max(0.0, $cap - $st['res'][$pid][$di]);
+        $perDay = $alloc / 100 * $schedulable;
+        if ($perDay <= 1e-6) { if ($di === $startDi) return null; $di++; continue; }
         $free = pl_free($st, $pid, $di) + ($allowReserve ? pl_reserve_free($st, $pid, $di) : 0);
-        $take = min($perDay, $remaining);
-        if ($free + 1e-6 < $take) return null;
+        // The output is a date RANGE at one allocation, so every day in it claims the whole
+        // nominal share — including the last, where less effort may actually remain. Booking
+        // only the remainder on that day would let the next item start there while the emitted
+        // range still says otherwise: the grid and the plan must say the same thing.
+        if ($free + 1e-6 < $perDay) return null;
         if ($counts && !isset($st['grid'][$pid][$di]['items'][$item['id']]) && pl_counted($st, $model, $pid, $di, $item['id']) >= $maxConc) return null;
-        $days[$di] = $take; $remaining -= $take; $last = $di; $di++;
+        $days[$di] = $perDay; $remaining -= min($perDay, $remaining); $last = $di; $di++;
     }
     if ($remaining > 1e-6) return null;
     return ['pid' => $pid, 'from_di' => $startDi, 'to_di' => $last, 'days' => $days, 'alloc' => $alloc];
@@ -206,9 +252,13 @@ function pl_find_run(array $st, array $model, array $item, $pid, $minDi, $needHo
         for ($s = $minDi; $s < $n; $s++) {
             if ($best !== null && $s > $best['to_di']) break;
             if ($st['cap'][$pid][$s] <= 1e-6) continue;
-            $need = $alloc / 100 * $model['hours_per_day'];
+            // Cheap pre-filter, in the same currency as pl_try_run(): a share of that day's
+            // schedulable time, claimed in full for every day of the run.
+            $sched = $allowReserve ? $st['cap'][$pid][$s] : max(0.0, $st['cap'][$pid][$s] - $st['res'][$pid][$s]);
+            $need = $alloc / 100 * $sched;
+            if ($need <= 1e-6) continue;
             $free = pl_free($st, $pid, $s) + ($allowReserve ? pl_reserve_free($st, $pid, $s) : 0);
-            if ($free + 1e-6 < min($need, $needHours)) continue;
+            if ($free + 1e-6 < $need) continue;
             $run = pl_try_run($st, $model, $item, $pid, $s, $alloc, $needHours, $allowReserve);
             if ($run) { if ($best === null || $run['to_di'] < $best['to_di']) $best = $run; break; }
         }
@@ -243,7 +293,13 @@ function pl_place_item(array &$st, array &$ctx, array $item) {
     $isInc = $item['policy'] === 'interrupt';
     $eligible = pl_eligible($model, $item, $ctx['scopeSet']);
     $committedRows = array_values(array_filter($ctx['committedByItem'][$iid] ?? [], fn($a) => isset($model['people'][$a['person_id']]) && !$a['locked'] && ($ctx['scopeSet'] === null || isset($ctx['scopeSet'][$a['person_id']]))));
-    $needHours = $item['remaining_days'] * $model['hours_per_day'];
+    // Effort already covered by rows pre-loaded in pass 1 (locked, or out of scope on an urgent
+    // cycle) is not planned again — otherwise the same work is booked twice on the same grid.
+    $needHours = $item['remaining_days'] * $model['hours_per_day'] * (1 - ($ctx['fixedShare'][$iid] ?? 0));
+    if ($needHours <= 1e-6) {
+        $ctx['placed'][$iid] = true; $ctx['finish'][$iid] = $ctx['fixedFinish'][$iid] ?? -1;
+        unset($ctx['visiting'][$iid]); return;
+    }
 
     // 1) Keep the committed slot if it is still feasible (extend in place for upward re-estimates).
     $kept = null;
@@ -354,7 +410,8 @@ function pl_commit_runs(array &$st, array &$ctx, array $item, array $runs, $kept
         $ctx['out'][] = pl_out_row($model, $item, $run['pid'], $from, $to, $run['alloc'], $run['role_label'] ?? null, $kept, false, $run['committed_id'] ?? null, $usedReserve);
         $finish = max($finish, $run['to_di']);
     }
-    $ctx['placed'][$item['id']] = true; $ctx['finish'][$item['id']] = $finish;
+    $ctx['placed'][$item['id']] = true;
+    $ctx['finish'][$item['id']] = max($finish, $ctx['fixedFinish'][$item['id']] ?? -1);
 }
 
 /** Local cost used to choose between candidate placements (mirrors the objective terms in 8.6). */
@@ -441,10 +498,14 @@ function pl_try_pairing(array &$st, array &$ctx, array $item, array $runs) {
             if (!$dev || !$dev['pairing_enabled']) continue;
             if (($p['skills'][$s['skill_id']] ?? 0) >= $s['min_proficiency']) continue; // already qualified: not development
             if (($p['skills'][$s['skill_id']] ?? 0) < $s['min_proficiency'] - 1) continue; // one level below only
-            $ok = true; $need = 0.25 * $model['hours_per_day'];
-            foreach ($days as $di) { if ($st['cap'][$pid][$di] <= 1e-6 || pl_free($st, $pid, $di) + 1e-6 < $need || ($item['counts_for_wip'] && pl_counted($st, $model, $pid, $di) >= $p['max_concurrent'])) { $ok = false; break; } }
+            // 25% of the pair's own schedulable time on each day, matching how the emitted range reads.
+            $ok = true; $need = [];
+            foreach ($days as $di) {
+                $need[$di] = 0.25 * max(0.0, $st['cap'][$pid][$di] - $st['res'][$pid][$di]);
+                if ($need[$di] <= 1e-6 || pl_free($st, $pid, $di) + 1e-6 < $need[$di] || ($item['counts_for_wip'] && pl_counted($st, $model, $pid, $di) >= $p['max_concurrent'])) { $ok = false; break; }
+            }
             if (!$ok) continue;
-            foreach ($days as $di) pl_consume($st, $pid, $di, $item['id'], $need, false);
+            foreach ($days as $di) pl_consume($st, $pid, $di, $item['id'], $need[$di], false);
             $ctx['out'][] = pl_out_row($model, $item, $pid, $model['days'][$primary['from_di']], $model['days'][$primary['to_di']], 25, 'pair · ' . $s['name'], false, false, null, false);
             return;
         }
