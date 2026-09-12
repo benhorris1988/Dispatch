@@ -61,7 +61,12 @@ function cpsat_solve(array $model, array $cfg, $budgetSeconds = null) {
     if ($code < 200 || $code >= 300) return ['ok' => false, 'reason' => "engine HTTP $code"];
     $j = json_decode($body, true);
     if (!is_array($j) || !isset($j['assignments']) || !is_array($j['assignments'])) return ['ok' => false, 'reason' => 'engine returned no assignments'];
-    if (in_array($j['status'] ?? 'ok', ['infeasible', 'error', 'unknown'], true)) return ['ok' => false, 'reason' => 'engine status ' . $j['status']];
+    // Case-insensitively: CP-SAT reports OPTIMAL/FEASIBLE/INFEASIBLE/UNKNOWN in upper case,
+    // and this list was compared in lower case, so a failed solve sailed through as valid.
+    $engineStatus = strtolower((string)($j['status'] ?? 'ok'));
+    if (in_array($engineStatus, ['infeasible', 'error', 'unknown'], true)) return ['ok' => false, 'reason' => 'engine status ' . $j['status'] . (isset($j['message']) ? ': ' . $j['message'] : '')];
+    // An empty plan is a failure, not an answer: accepting it would unschedule the workspace.
+    if (!$j['assignments']) return ['ok' => false, 'reason' => 'engine returned an empty plan'];
     // Normalise to the heuristic's shape and validate hard constraints (never trust an external plan blindly).
     $out = [];
     foreach ($j['assignments'] as $a) {
