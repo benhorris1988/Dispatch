@@ -1,0 +1,13 @@
+# Secrets — copy api/config.example.php to api/config.php
+api/config.php
+api/db_error_log.txt
+engine/.venv/
+engine/.env
+__pycache__/
+*.pyc
+.claude/
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins*
+mobile/pubspec.lock
+*.apk

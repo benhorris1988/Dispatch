@@ -1,0 +1,5 @@
+# Dispatch scheduling engine (optional CP-SAT service)
+ortools>=9.10
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
