@@ -225,7 +225,7 @@ if ($action === 'save_policy') {
     $new['created_by'] = $userId;
     q($conn, "UPDATE dbo.scheduling_policies SET is_current = 0 WHERE workspace_id = ?", [$wsId]);
     $newId = insert($conn, 'scheduling_policies', $new);
-    $after = policy_shape(current_policy($conn, $wsId));
+    $after = policy_shape(current_policy($conn, $wsId, true));   // true: re-read past the memo
     audit($conn, $wsId, 'config', 'policy', $newId, $before, $after, 'Scheduling policy v' . $after['version']);
     add_trigger($conn, $wsId, 'policy', 'manual', 'Scheduling policy changed (v' . $after['version'] . ')', 'policy', $newId);
     ok(['policy' => $after]);

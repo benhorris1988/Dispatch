@@ -135,10 +135,14 @@ function add_trigger($conn, $wsId, $type, $class, $label, $entity = null, $entit
  * This lives in lib.php — which every endpoint loads through db_connect.php — because it
  * is needed by both the engine and the item/estimate layer. Declaring it in each of those
  * made the winner depend on include order, and the two bodies disagreed about defaults.
+ *
+ * The result is memoised because the engine reads it inside per-item loops. Anything that
+ * writes a new policy version MUST pass $fresh = true afterwards, or it will read back the
+ * superseded row it just replaced.
  */
-function current_policy($conn, $wsId) {
+function current_policy($conn, $wsId, $fresh = false) {
     static $cache = [];
-    if (array_key_exists($wsId, $cache)) return $cache[$wsId];
+    if (!$fresh && array_key_exists($wsId, $cache)) return $cache[$wsId];
     $p = row($conn, "SELECT TOP 1 * FROM dbo.scheduling_policies WHERE workspace_id = ? ORDER BY is_current DESC, version DESC, id DESC", [$wsId]);
     if (!$p) {
         $p = ['id' => null, 'version' => 0, 'is_current' => 1, 'freeze_horizon_days' => 10, 'planning_horizon_weeks' => 4, 'model_horizon_weeks' => 26,
