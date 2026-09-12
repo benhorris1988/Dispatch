@@ -1,0 +1,6 @@
+all rows feasible? False
+no rows feasible?  True
+
+minimal infeasible set: 1 rows
+   WI-1040    Hana Novak     2026-09-14..2026-09-18 100% locked=True remaining=5.75 skills=[6, 5, 8]
+      person skills: {1: 3, 2: 3, 3: 1, 4: 3, 5: 3, 6: 2, 7: 2, 9: 2, 10: 1, 11: 2}

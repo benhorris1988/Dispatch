@@ -1,0 +1,3 @@
+pinned entries 64; person-buckets over capacity: 0
+items whose pins exceed remaining effort: 0
+items with pins but zero eligible people: []

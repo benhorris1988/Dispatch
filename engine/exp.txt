@@ -1,0 +1,5 @@
+  committed kept, but nothing pinned             FEASIBLE       23 asg  15.927s
+  pins kept, stability weight 0                  INFEASIBLE      0 asg  0.839s
+  drop committed rows starting before 2026-09-08 INFEASIBLE      0 asg  0.845s
+  keep only rows starting on/before 2026-09-18   INFEASIBLE      0 asg  0.857s
+  committed rows total: 36 | starting before today: 7 | locked: 16
