@@ -36,8 +36,23 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 ```bash
 C:\xampp\php\php.exe tests\run_all.php     # all five PHP suites; re-seeds before and after
 python engine\test_solver.py               # CP-SAT hard-constraint checks (no server needed)
-"C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze     # in mobile/ — must be "No issues found"
+"C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze                        # in mobile/
+"C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/screens_smoke_test.dart
 ```
+
+**`analyze` is not enough on its own.** It proves the client compiles; it draws nothing.
+`screens_smoke_test.dart` renders all fifteen screens against the running API at desktop,
+tablet and phone widths and in dark theme, and fails on any framework exception, error
+state or blank screen. Its first run found 428 layout overflows that `analyze` and a
+green `build web` had both been perfectly happy with. It needs the server up and the demo
+seeded. Two things about it worth knowing before you change it:
+
+- It drives its pumps inside `tester.runAsync`, because the test binding fakes async and
+  the screens' real HTTP calls would otherwise never resolve.
+- There is no Manrope or Inter under `flutter test`, so every glyph is an em square and
+  strings measure 2–3× their real width. That makes it a strict overflow test, not a
+  faithful one: check a genuine near-miss in the browser against `docs/screens/` before
+  reworking a layout to satisfy it.
 
 `run_all.php` needs the local server up (`run_local.ps1`). The suites mutate the demo
 deliberately, so it re-seeds before and after; run `seed_demo.php` yourself if you
