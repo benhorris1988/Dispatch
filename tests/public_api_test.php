@@ -250,6 +250,67 @@ api('calendar', ['action' => 'revoke', 'person_id' => 1], $token);
 http('GET', $feed['url'], null, null, $code);
 check($code === 404, "a revoked feed stops resolving (HTTP $code)");
 
+// ---------------------------------------------------------------------------------------
+section('Inbound intake (INT-02)');
+[, $srcs] = api('intake', ['action' => 'list'], $adminToken);
+foreach ($srcs['sources'] ?? [] as $sx) api('intake', ['action' => 'delete', 'id' => $sx['id']], $adminToken);
+
+[$code, $src] = api('intake', ['action' => 'save', 'name' => 'ServiceNow test', 'system' => 'servicenow', 'severity_threshold' => 'P2'], $adminToken);
+check($code === 200 && !empty($src['secret']), 'an intake source is created with a secret');
+check(!empty($src['endpoint']), 'and an endpoint to post to');
+$srcId = $src['source']['id'] ?? null;
+$srcSecret = $src['secret'] ?? '';
+
+[$code] = api('intake', ['action' => 'list'], $token);
+check($code === 403, "a delivery lead cannot manage intake sources (HTTP $code)");
+
+/** Post an incident the way a ticket system would. */
+$post = function (array $payload, $secret = null) use ($BASE, &$srcId, &$srcSecret, &$code) {
+    $ch = curl_init("$BASE/api/intake.php?source=$srcId");
+    curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Dispatch-Intake-Secret: ' . ($secret ?? $srcSecret)],
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 60]);
+    $raw = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+    return json_decode($raw, true) ?? [];
+};
+
+$post(['number' => 'TEST0001', 'short_description' => 'x'], 'wrong-secret');
+check($code === 401, "a bad secret is refused (HTTP $code)");
+
+$r = $post(['number' => 'INC0099001', 'short_description' => 'Nightly finance load failing',
+    'priority' => '1', 'description' => 'Batch aborts at 02:10', 'caller_id' => 'Service Desk']);
+check($code === 200 && ($r['outcome'] ?? '') === 'created', 'a P1 incident is raised as work (' . ($r['ref'] ?? '-') . ')');
+check(($r['severity'] ?? '') === 'P1', "and ServiceNow's numeric priority maps to P1");
+$raisedId = $r['work_item_id'] ?? null;
+
+$r2 = $post(['number' => 'INC0099001', 'short_description' => 'Nightly finance load failing', 'priority' => '1']);
+check($code === 200 && ($r2['outcome'] ?? '') === 'duplicate', 'a retry of the same ticket creates nothing');
+check(($r2['work_item_id'] ?? null) === $raisedId, 'and points at the item already raised');
+
+$r3 = $post(['number' => 'INC0099002', 'short_description' => 'Printer offline', 'priority' => '4']);
+check($code === 200 && ($r3['outcome'] ?? '') === 'below_threshold', 'a P4 is recorded and ignored under a P2 threshold');
+
+$post(['number' => 'INC0099003', 'priority' => '1']);
+check($code === 422, "a payload with no title is refused (HTTP $code)");
+
+if ($raisedId) {
+    [, $item] = api('work_items', ['action' => 'get', 'id' => $raisedId], $token);
+    check(($item['item']['severity'] ?? '') === 'P1', 'the raised item carries its severity');
+    check((float)($item['item']['priority_score'] ?? 0) >= 90, 'and scores from severity, not a benefit case (' . ($item['item']['priority_score'] ?? '-') . ')');
+    check(!empty($item['item']['external_ref']), 'with the ticket reference kept for the round trip');
+}
+
+[, $logEntries] = api('intake', ['action' => 'log'], $adminToken);
+$outcomes = array_unique(array_column($logEntries['entries'] ?? [], 'outcome'));
+check(count(array_intersect(['created', 'duplicate', 'below_threshold'], $outcomes)) === 3,
+    'every outcome is logged for the administrator (' . implode(', ', $outcomes) . ')');
+[, $props] = api('changes', ['action' => 'list'], $token);
+$urgent = array_values(array_filter($props['proposals'] ?? [], fn($p) => ($p['kind'] ?? '') === 'urgent'));
+check(!empty($urgent), 'the arriving incident started an urgent replan cycle (STAB-05, journey 4.2.3)');
+
+api('intake', ['action' => 'delete', 'id' => $srcId], $adminToken);
+
+
 echo "\n$pass passed, $fail failed\n";
 echo "Re-seed before using the demo again: php seed_demo.php\n";
 exit($fail ? 1 : 0);

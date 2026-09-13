@@ -654,3 +654,49 @@ IF COL_LENGTH('dbo.workspaces', 'audit_retention_years') IS NULL
 IF COL_LENGTH('dbo.workspaces', 'retention_last_run_at') IS NULL
   ALTER TABLE dbo.workspaces ADD retention_last_run_at DATETIME2 NULL;
 GO
+
+-- ---------------------------------------------------------------------------------------
+-- Inbound intake (INT-02, and the pattern for INT-01 and INT-03).
+--
+-- The half of an incident integration that needs no ServiceNow instance: an endpoint that
+-- accepts an incident and turns it into interrupt-driven work. ServiceNow (or anything
+-- else) posts to it with a shared secret. external_ref makes a repost idempotent, because
+-- a ticket system that retries must not create the same incident twice.
+-- ---------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.intake_sources') IS NULL
+CREATE TABLE dbo.intake_sources (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  system NVARCHAR(30) NOT NULL,                -- servicenow | jira | other
+  name NVARCHAR(120) NOT NULL,
+  secret NVARCHAR(120) NOT NULL,               -- shared secret; never returned by the API
+  work_type_id INT NULL REFERENCES dbo.work_types(id),   -- NULL = the workspace's interrupt type
+  severity_threshold NVARCHAR(4) NULL,         -- e.g. 'P3': anything less urgent is ignored
+  field_map NVARCHAR(MAX) NULL,                -- json: {title: 'short_description', severity: 'priority', ...}
+  severity_map NVARCHAR(MAX) NULL,             -- json: {'1': 'P1', '2': 'P2', ...}
+  default_person_id INT NULL REFERENCES dbo.people(id),  -- NULL = whoever is on the incident rota
+  active BIT NOT NULL DEFAULT 1,
+  created_by INT NULL REFERENCES dbo.users(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_seen_at DATETIME2 NULL,
+  last_status NVARCHAR(200) NULL,
+  received_count INT NOT NULL DEFAULT 0,
+  created_count INT NOT NULL DEFAULT 0,
+  ignored_count INT NOT NULL DEFAULT 0
+);
+
+IF OBJECT_ID('dbo.intake_log') IS NULL
+CREATE TABLE dbo.intake_log (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL,
+  source_id INT NOT NULL REFERENCES dbo.intake_sources(id),
+  external_ref NVARCHAR(80) NULL,
+  outcome NVARCHAR(20) NOT NULL,               -- created | duplicate | below_threshold | rejected
+  work_item_id INT NULL REFERENCES dbo.work_items(id),
+  detail NVARCHAR(300) NULL,
+  payload NVARCHAR(MAX) NULL,
+  received_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_intake_log_ref')
+  CREATE INDEX ix_intake_log_ref ON dbo.intake_log(workspace_id, external_ref);
+GO

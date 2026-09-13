@@ -274,3 +274,15 @@ function benefit_shape(array $b) {
         'narrative' => $b['narrative'], 'status' => $b['status'], 'realised_value' => $b['realised_value'] !== null ? (int)round((float)$b['realised_value']) : null,
         'created_at' => substr($b['created_at'], 0, 19)];
 }
+
+/** Next ref for a prefix (PIP-02): WI-1072 / INC-4472 / SR-0216. Atomic on ref_sequences. */
+function allocate_ref($conn, $wsId, $prefix) {
+    $stmt = q($conn, "UPDATE dbo.ref_sequences SET next_value = next_value + 1 OUTPUT DELETED.next_value WHERE workspace_id = ? AND prefix = ?", [$wsId, $prefix]);
+    $n = null; if (sqlsrv_fetch($stmt)) $n = (int)sqlsrv_get_field($stmt, 0); sqlsrv_free_stmt($stmt);
+    if ($n === null) {
+        $max = (int)scalar($conn, "SELECT MAX(TRY_CAST(SUBSTRING(ref, LEN(?) + 2, 10) AS INT)) FROM dbo.work_items WHERE workspace_id = ? AND ref LIKE ?", [$prefix, $wsId, "$prefix-%"]);
+        $n = $max ? $max + 1 : 1000;
+        q($conn, "INSERT INTO dbo.ref_sequences (workspace_id, prefix, next_value) VALUES (?, ?, ?)", [$wsId, $prefix, $n + 1]);
+    }
+    return sprintf('%s-%04d', $prefix, $n);
+}

@@ -506,17 +506,8 @@ function notify_estimate_requested($conn, $wsId, array $wi, $why = '', $urgent =
 }
 function status_label($s) { return ['draft' => 'Draft', 'needs_estimate' => 'Needs estimate', 'needs_benefit' => 'Needs benefit case', 'ready' => 'Ready', 'scheduled' => 'Scheduled', 'in_progress' => 'In progress', 'blocked' => 'Blocked', 'delivered' => 'Delivered', 'cancelled' => 'Cancelled'][$s] ?? $s; }
 
-/** Next ref for a prefix (PIP-02): WI-1072 / INC-4472 / SR-0216. Atomic on ref_sequences. */
-function allocate_ref($conn, $wsId, $prefix) {
-    $stmt = q($conn, "UPDATE dbo.ref_sequences SET next_value = next_value + 1 OUTPUT DELETED.next_value WHERE workspace_id = ? AND prefix = ?", [$wsId, $prefix]);
-    $n = null; if (sqlsrv_fetch($stmt)) $n = (int)sqlsrv_get_field($stmt, 0); sqlsrv_free_stmt($stmt);
-    if ($n === null) {
-        $max = (int)scalar($conn, "SELECT MAX(TRY_CAST(SUBSTRING(ref, LEN(?) + 2, 10) AS INT)) FROM dbo.work_items WHERE workspace_id = ? AND ref LIKE ?", [$prefix, $wsId, "$prefix-%"]);
-        $n = $max ? $max + 1 : 1000;
-        q($conn, "INSERT INTO dbo.ref_sequences (workspace_id, prefix, next_value) VALUES (?, ?, ?)", [$wsId, $prefix, $n + 1]);
-    }
-    return sprintf('%s-%04d', $prefix, $n);
-}
+// allocate_ref() moved to items_lib.php: intake.php needs it too, and an endpoint is
+// not a library — including work_items.php to reach it would execute it.
 
 function tasks_for($conn, $itemId) {
     return array_map(fn($t) => ['id' => (int)$t['id'], 'title' => $t['title'], 'size_stamp' => $t['size_stamp'], 'effort_days' => $t['effort_days'] !== null ? (float)$t['effort_days'] : null, 'skill_id' => $t['skill_id'] !== null ? (int)$t['skill_id'] : null, 'skill_name' => $t['skill_name'], 'sequence' => (int)$t['sequence'], 'status' => $t['status']],
