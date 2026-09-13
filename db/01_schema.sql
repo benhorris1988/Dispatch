@@ -639,3 +639,18 @@ CREATE TABLE dbo.calendar_feeds (
   CONSTRAINT uq_calendar_feed_token UNIQUE (token)
 );
 GO
+
+-- ---------------------------------------------------------------------------------------
+-- Data retention (ADM-05, NFR-DATA-02). Plan history is kept for a configurable number of
+-- months (24 by default) and the audit trail for a configurable number of years (7 by
+-- default). Both are per workspace, and a purge records what it removed in the audit trail
+-- it is trimming — so there is always evidence that a purge happened, even once the rows
+-- it removed are gone.
+-- ---------------------------------------------------------------------------------------
+IF COL_LENGTH('dbo.workspaces', 'plan_history_months') IS NULL
+  ALTER TABLE dbo.workspaces ADD plan_history_months INT NOT NULL DEFAULT 24;
+IF COL_LENGTH('dbo.workspaces', 'audit_retention_years') IS NULL
+  ALTER TABLE dbo.workspaces ADD audit_retention_years INT NOT NULL DEFAULT 7;
+IF COL_LENGTH('dbo.workspaces', 'retention_last_run_at') IS NULL
+  ALTER TABLE dbo.workspaces ADD retention_last_run_at DATETIME2 NULL;
+GO
