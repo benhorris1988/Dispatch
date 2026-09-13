@@ -46,6 +46,7 @@ $suites = [
     'Work items, estimates, benefits'               => 'work_items_test.php',
     'Overview, reports, watch list'                 => 'overview_reports_test.php',
     'Plan, proposals, changes (HTTP smoke)'         => 'http_smoke.php',
+    'Public API, webhooks, calendar feed'          => 'public_api_test.php',
 ];
 
 $results = [];

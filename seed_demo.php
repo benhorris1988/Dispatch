@@ -17,17 +17,27 @@ function weekMonday($d) { return date('Y-m-d', strtotime('monday this week', str
 $TODAY = '2026-09-08';
 
 // ---------------------------------------------------------------- wipe (FK-safe order)
-$wipe = ['item_comments','notifications','notification_prefs','person_change_log','progress_logs','replan_triggers',
+// webhook_deliveries before its subscriptions, and the cursor with them: a cursor left
+// pointing past a rebuilt audit log would stop every webhook silently (webhook_lib.php
+// rewinds defensively, but the demo should not depend on that).
+$wipe = ['webhook_deliveries','webhook_subscriptions','webhook_cursor','calendar_feeds',
+  'item_comments','notifications','notification_prefs','person_change_log','progress_logs','replan_triggers',
   'change_proposals','proposals','assignments','plan_versions','benefit_realisations','benefits','estimates',
   'skill_requirements','dependencies','tasks','work_items','ref_sequences','capacity_days','incident_rota','availability',
   'person_skills','skills','day_rates','stability_weeks','audit_events','integrations','scheduling_policies','size_classes','work_types'];
+// Tables added by later features carry foreign keys into the rows below. An unlisted one makes the
+// wipe fail part way through, which leaves the database EMPTY rather than re-seeded — so clear
+// anything that is present and not already in $wipe first, children before parents.
+foreach (['webhook_deliveries', 'webhook_subscriptions', 'calendar_feeds'] as $t)
+    x($conn, "IF OBJECT_ID('dbo.$t') IS NOT NULL DELETE FROM dbo.$t");
 // users <-> people <-> teams are circular: null the links first
 x($conn, "UPDATE dbo.users SET person_id = NULL"); x($conn, "UPDATE dbo.teams SET lead_person_id = NULL");
 foreach ($wipe as $t) x($conn, "DELETE FROM dbo.$t");
 foreach (['people','users','teams','workspaces'] as $t) x($conn, "DELETE FROM dbo.$t");
 $identityTables = ['workspaces','users','work_types','size_classes','scheduling_policies','teams','people','skills','availability','incident_rota',
   'work_items','tasks','dependencies','skill_requirements','estimates','day_rates','benefits','benefit_realisations','plan_versions','assignments',
-  'proposals','change_proposals','replan_triggers','audit_events','notifications','item_comments','person_change_log','progress_logs','integrations'];
+  'proposals','change_proposals','replan_triggers','audit_events','notifications','item_comments','person_change_log','progress_logs','integrations',
+  'webhook_subscriptions','webhook_deliveries','calendar_feeds'];
 foreach ($identityTables as $t) x($conn, "DBCC CHECKIDENT ('dbo.$t', RESEED, 0) WITH NO_INFOMSGS");
 echo "Wiped.\n";
 

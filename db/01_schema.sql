@@ -430,8 +430,12 @@ CREATE TABLE dbo.change_proposals (
   decided_at DATETIME2 NULL,
   decision_reason NVARCHAR(300) NULL,
   acknowledged_at DATETIME2 NULL,
+  ack_required BIT NOT NULL DEFAULT 0,          -- CHG-06: set at commit when require_ack_inside_horizon is on
   sort_order INT NOT NULL DEFAULT 0
 );
+-- CHG-06. Added after the table existed, so it is applied separately for an existing database.
+IF COL_LENGTH('dbo.change_proposals', 'ack_required') IS NULL
+  ALTER TABLE dbo.change_proposals ADD ack_required BIT NOT NULL CONSTRAINT df_change_proposals_ack_required DEFAULT 0;
 
 IF OBJECT_ID('dbo.replan_triggers') IS NULL
 CREATE TABLE dbo.replan_triggers (
@@ -571,4 +575,67 @@ JOIN dbo.work_types wt ON wt.id = wi.work_type_id
 LEFT JOIN dbo.size_classes sc ON sc.id = wi.size_class_id
 OUTER APPLY (SELECT TOP 1 * FROM dbo.estimates x WHERE x.work_item_id = wi.id ORDER BY x.version DESC) e
 WHERE wi.status = 'delivered' AND wi.actual_effort_days IS NOT NULL;
+GO
+
+-- ---------------------------------------------------------------------------------------
+-- Outbound webhooks and the public API (INT-07).
+--
+-- Events are DERIVED from dbo.audit_events rather than emitted by each endpoint: every
+-- mutation already writes an audit row with its before and after, so the audit log is a
+-- natural outbox and no endpoint has to remember to fire anything. webhook_cursor records
+-- how far each workspace has been scanned.
+-- ---------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.webhook_subscriptions') IS NULL
+CREATE TABLE dbo.webhook_subscriptions (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  url NVARCHAR(400) NOT NULL,
+  secret NVARCHAR(120) NOT NULL,               -- HMAC-SHA256 signing secret; never returned by the API
+  events NVARCHAR(300) NOT NULL,               -- comma list, or '*' for every event
+  description NVARCHAR(200) NULL,
+  active BIT NOT NULL DEFAULT 1,
+  created_by INT NULL REFERENCES dbo.users(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_delivery_at DATETIME2 NULL,
+  last_status NVARCHAR(200) NULL,
+  consecutive_failures INT NOT NULL DEFAULT 0
+);
+
+IF OBJECT_ID('dbo.webhook_deliveries') IS NULL
+CREATE TABLE dbo.webhook_deliveries (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL,
+  subscription_id INT NOT NULL REFERENCES dbo.webhook_subscriptions(id),
+  event NVARCHAR(40) NOT NULL,                 -- plan.committed | proposal.created | change.decided | workitem.statusChanged
+  payload NVARCHAR(MAX) NOT NULL,
+  source_audit_id INT NULL,
+  status NVARCHAR(12) NOT NULL DEFAULT 'pending',  -- pending|delivered|failed|abandoned
+  attempts INT NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_status NVARCHAR(200) NULL,
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  delivered_at DATETIME2 NULL
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_webhook_deliveries_due')
+  CREATE INDEX ix_webhook_deliveries_due ON dbo.webhook_deliveries(status, next_attempt_at);
+
+IF OBJECT_ID('dbo.webhook_cursor') IS NULL
+CREATE TABLE dbo.webhook_cursor (
+  workspace_id INT NOT NULL PRIMARY KEY,
+  last_audit_id INT NOT NULL DEFAULT 0,
+  scanned_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+);
+
+-- Per-person iCalendar feed tokens (VIEW-09, and the publish half of INT-04).
+IF OBJECT_ID('dbo.calendar_feeds') IS NULL
+CREATE TABLE dbo.calendar_feeds (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  person_id INT NOT NULL REFERENCES dbo.people(id),
+  token NVARCHAR(64) NOT NULL,
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_read_at DATETIME2 NULL,
+  revoked BIT NOT NULL DEFAULT 0,
+  CONSTRAINT uq_calendar_feed_token UNIQUE (token)
+);
 GO

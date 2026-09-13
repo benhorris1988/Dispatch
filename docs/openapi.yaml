@@ -1,0 +1,480 @@
+openapi: 3.1.0
+info:
+  title: Dispatch public API
+  version: "1.0.0"
+  summary: Read-only access to a Dispatch workspace's pipeline, people and committed plan.
+  description: |
+    The public surface of Dispatch (INT-07). The application's own API is one endpoint per
+    resource called with `POST {"action": …}`; that suits the client and is not a contract
+    anyone else should have to code against. This is.
+
+    **It is read-only on purpose.** Changing a plan is a deliberate act with guardrails and a
+    named approver behind it. An integration that could move someone's week without going
+    through a proposal would defeat the point of the product, so writes are not exposed.
+    Integrations that need to react to change should subscribe to the webhooks below rather
+    than poll.
+
+    Errors are RFC 9457 problem details with `application/problem+json`.
+  license:
+    name: See the repository
+    url: https://github.com/benhorris1988/Dispatch
+servers:
+  - url: http://localhost:8090/v1
+    description: Local development
+  - url: https://{host}/v1
+    description: A deployment
+    variables:
+      host:
+        default: dispatch.example.org
+security:
+  - bearerAuth: []
+tags:
+  - name: Work
+  - name: People
+  - name: Plan
+  - name: Value
+  - name: Reports
+
+paths:
+  /:
+    get:
+      tags: [Plan]
+      summary: Index — the resources this deployment exposes
+      responses:
+        "200":
+          description: Service description
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api: { type: string }
+                  version: { type: string }
+                  workspace_id: { type: integer }
+                  read_only: { type: boolean }
+                  resources: { type: array, items: { type: string } }
+                  webhooks: { type: array, items: { type: string } }
+
+  /work-items:
+    get:
+      tags: [Work]
+      summary: The pipeline
+      parameters:
+        - { name: status, in: query, schema: { type: string }, description: "draft, needs_estimate, needs_benefit, ready, scheduled, in_progress, blocked, delivered, cancelled" }
+        - { name: type, in: query, schema: { type: string }, description: Work type name as configured in this workspace }
+        - { name: updated_since, in: query, schema: { type: string, format: date-time }, description: For incremental sync }
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of work items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  work_items: { type: array, items: { $ref: "#/components/schemas/WorkItem" } }
+                  page: { $ref: "#/components/schemas/Page" }
+        "401": { $ref: "#/components/responses/Unauthorised" }
+
+  /work-items/{ref}:
+    get:
+      tags: [Work]
+      summary: One work item by its reference
+      parameters:
+        - { name: ref, in: path, required: true, schema: { type: string }, example: WI-1042 }
+      responses:
+        "200":
+          description: The work item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  work_item: { $ref: "#/components/schemas/WorkItem" }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /people:
+    get:
+      tags: [People]
+      summary: The team
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of people
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  people: { type: array, items: { $ref: "#/components/schemas/Person" } }
+                  page: { $ref: "#/components/schemas/Page" }
+
+  /skills:
+    get:
+      tags: [People]
+      summary: The skills catalogue
+      responses:
+        "200":
+          description: Skills
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        name: { type: string }
+                        category: { type: string, nullable: true }
+                        retired: { type: boolean }
+
+  /plan:
+    get:
+      tags: [Plan]
+      summary: The current committed plan version
+      description: |
+        The plan people are working to. `committed_through` is the last day inside the freeze
+        horizon — assignments up to that date are locked and will not move without a named
+        approver.
+      responses:
+        "200":
+          description: The committed plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan: { $ref: "#/components/schemas/PlanVersion" }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /assignments:
+    get:
+      tags: [Plan]
+      summary: Assignments on a plan version
+      description: Defaults to the current committed version. Each assignment is a person on a work item for a date range at an allocation.
+      parameters:
+        - { name: plan_version_id, in: query, schema: { type: integer } }
+        - { name: person_id, in: query, schema: { type: integer } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of assignments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments: { type: array, items: { $ref: "#/components/schemas/Assignment" } }
+                  plan_version_id: { type: integer }
+                  page: { $ref: "#/components/schemas/Page" }
+
+  /proposals:
+    get:
+      tags: [Plan]
+      summary: Replan proposals, newest first
+      parameters:
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposals:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        kind: { type: string, enum: [nightly, urgent, manual, preview] }
+                        status: { type: string, enum: [open, decided, expired, superseded] }
+                        generated_at: { type: string }
+                        improvement_pct: { type: number, nullable: true }
+                        below_threshold: { type: boolean }
+                        changes: { type: integer }
+
+  /benefits:
+    get:
+      tags: [Value]
+      summary: The benefits register
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of benefits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  benefits: { type: array, items: { $ref: "#/components/schemas/Benefit" } }
+                  page: { $ref: "#/components/schemas/Page" }
+
+  /estimates:
+    get:
+      tags: [Value]
+      summary: Estimate versions, newest first
+      parameters:
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: Estimates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estimates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        ref: { type: string }
+                        version: { type: integer }
+                        method: { type: string, enum: [size, three_point, rollup] }
+                        optimistic: { type: number, nullable: true }
+                        likely: { type: number, nullable: true }
+                        pessimistic: { type: number, nullable: true }
+                        estimate_class: { type: integer, minimum: 1, maximum: 5 }
+
+  /reports/stability:
+    get:
+      tags: [Reports]
+      summary: Plan stability by week
+      description: |
+        `stability_index_pct` is 1 − (assignment-days changed inside the committed and planned
+        windows ÷ total assignment-days in those windows), as a percentage.
+      responses:
+        "200":
+          description: Weekly stability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  weeks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        week_start: { type: string, format: date }
+                        total_assignment_days: { type: number }
+                        moved_assignment_days: { type: number }
+                        changes_inside_freeze: { type: integer }
+                        stability_index_pct: { type: number, nullable: true }
+                  definition: { type: string }
+
+webhooks:
+  plan.committed:
+    post:
+      summary: A new plan version was committed
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+      responses:
+        "200": { description: Acknowledged. Any non-2xx is retried. }
+  proposal.created:
+    post:
+      summary: A replan cycle produced a proposal
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+      responses:
+        "200": { description: Acknowledged }
+  change.decided:
+    post:
+      summary: A proposed change was accepted or rejected
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+      responses:
+        "200": { description: Acknowledged }
+  workitem.statusChanged:
+    post:
+      summary: A work item moved to a different status
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+      responses:
+        "200": { description: Acknowledged }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The same token the application uses. A request without one is refused with 401.
+
+  parameters:
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+    cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque cursor from the previous page's `page.next_cursor`. Absent when there are no more.
+
+  responses:
+    Unauthorised:
+      description: No token, or a token that has expired
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+
+    Page:
+      type: object
+      properties:
+        limit: { type: integer }
+        next_cursor: { type: string, nullable: true }
+
+    WorkItem:
+      type: object
+      properties:
+        id: { type: integer }
+        ref: { type: string, example: WI-1042 }
+        title: { type: string }
+        type_name: { type: string }
+        type_policy: { type: string, enum: [planned, interrupt] }
+        size_stamp: { type: string, nullable: true, description: "S, M, L or C" }
+        is_custom: { type: boolean }
+        status: { type: string }
+        health: { type: string, nullable: true }
+        priority_score: { type: number, nullable: true, description: 0 to 100 }
+        benefit_value: { type: number, description: Sum of annual benefit values }
+        rom_low: { type: number, nullable: true }
+        rom_high: { type: number, nullable: true }
+        rom_unit: { type: string, enum: [days, hours] }
+        needed_by: { type: string, format: date, nullable: true }
+        earliest_start: { type: string, format: date, nullable: true }
+        planned_from: { type: string, format: date, nullable: true }
+        planned_to: { type: string, format: date, nullable: true }
+        skills:
+          type: array
+          items:
+            type: object
+            properties:
+              skill_id: { type: integer }
+              name: { type: string }
+              min_proficiency: { type: integer, minimum: 1, maximum: 4 }
+        assignees:
+          type: array
+          items:
+            type: object
+            properties:
+              person_id: { type: integer }
+              name: { type: string }
+              initials: { type: string, nullable: true }
+
+    Person:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        initials: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        role_title: { type: string, nullable: true }
+        days_per_week: { type: number }
+        team: { type: string, nullable: true }
+        active: { type: boolean }
+
+    PlanVersion:
+      type: object
+      properties:
+        id: { type: integer }
+        version: { type: integer }
+        status: { type: string, enum: [proposed, committed, superseded, discarded, scenario] }
+        committed_at: { type: string, nullable: true }
+        committed_through: { type: string, format: date, nullable: true, description: Last locked day of the freeze horizon }
+        objective_score: { type: number, nullable: true }
+        stability_cost_days: { type: number, nullable: true }
+        assignments: { type: integer }
+
+    Assignment:
+      type: object
+      properties:
+        id: { type: integer }
+        work_item_id: { type: integer }
+        ref: { type: string }
+        title: { type: string }
+        person_id: { type: integer }
+        person: { type: string }
+        from_date: { type: string, format: date }
+        to_date: { type: string, format: date }
+        allocation_pct: { type: integer, description: Share of that person's schedulable time }
+        state: { type: string, enum: [committed, planned, indicative] }
+        role_label: { type: string, nullable: true }
+
+    Benefit:
+      type: object
+      properties:
+        id: { type: integer }
+        ref: { type: string }
+        title: { type: string }
+        type: { type: string, enum: [cost_avoidance, productivity, revenue, risk_reduction, compliance, other] }
+        annual_value: { type: number }
+        currency: { type: string }
+        confidence: { type: string, enum: [low, medium, high] }
+        realisation_from: { type: string, format: date, nullable: true }
+        status: { type: string }
+        realised_value: { type: number, nullable: true }
+        owner_name: { type: string, nullable: true }
+
+    WebhookEnvelope:
+      type: object
+      description: |
+        Every delivery carries `X-Dispatch-Event`, `X-Dispatch-Delivery` and
+        `X-Dispatch-Signature: sha256=<HMAC-SHA256 of the raw body with your subscription
+        secret>`. Verify it with a constant-time comparison before trusting the body.
+        A non-2xx response or a transport failure is retried after roughly 1 minute, 5
+        minutes, 30 minutes, 2 hours and 6 hours, then abandoned. Deliveries are at-least-once,
+        so make your handler idempotent on `X-Dispatch-Delivery`.
+      properties:
+        event: { type: string, enum: [plan.committed, proposal.created, change.decided, workitem.statusChanged, ping] }
+        workspace_id: { type: integer }
+        occurred_at: { type: string }
+        actor: { type: string, nullable: true }
+        entity:
+          type: object
+          properties:
+            type: { type: string }
+            id: { type: integer, nullable: true }
+            label: { type: string, nullable: true }
+        work_item: { $ref: "#/components/schemas/WorkItem" }
+        plan_version: { $ref: "#/components/schemas/PlanVersion" }
+        from: { type: string, nullable: true, description: Previous status, on workitem.statusChanged }
+        to: { type: string, nullable: true, description: New status, on workitem.statusChanged }

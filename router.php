@@ -4,6 +4,14 @@
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 if ($path === '/' || $path === '') { header('Location: /mobile/build/web/'); exit; }
 if (preg_match('#^/(tests|db|engine|docs)/#', $path) || preg_match('#/(seed|migrate)_[^/]*\.php$#', $path)) { http_response_code(404); exit; }
+// Public REST API (INT-07): /v1/<resource> is served by api/v1.php with the rest of the
+// path handed over, so the public surface has real resource paths rather than an action body.
+if (preg_match('#^/v1(/.*)?$#', $path, $m)) {
+    $_GET['_path'] = $m[1] ?? '';
+    require __DIR__ . '/api/v1.php';
+    exit;
+}
+
 $file = __DIR__ . $path;
 if (is_dir($file) && file_exists(rtrim($file, '/') . '/index.html')) { $file = rtrim($file, '/') . '/index.html'; }
 if (is_file($file)) {
