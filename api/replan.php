@@ -97,6 +97,11 @@ function run_nightly($conn, $wsId) {
     $model = build_model($conn, $wsId);
     $steps['stability_week'] = rollup_stability_week($conn, $wsId, $model);
     audit($conn, $wsId, 'create', 'nightly_run', $r['proposal_id'], null, ['changes' => count($r['changes']), 'held' => count($r['held']), 'seconds' => round(microtime(true) - $t0, 2)], 'Nightly replan');
+    // The priority step returns a full term-by-term breakdown for every item, which is
+    // useful in an API reply and 30KB of noise in a nightly log. Keep the counts.
+    if (is_array($steps['priority'] ?? null)) {
+        $steps['priority'] = ['updated' => $steps['priority']['updated'] ?? 0, 'max_raw' => $steps['priority']['max_raw'] ?? null, 'p90' => $steps['priority']['p90'] ?? null];
+    }
     return ['workspace_id' => $wsId, 'proposal_id' => $r['proposal_id'], 'changes' => count($r['changes']), 'held' => count($r['held']), 'improvement_pct' => $r['improvement_pct'], 'below_threshold' => $r['below_threshold'], 'solver_stats' => $r['solver_stats'], 'steps' => $steps, 'seconds' => round(microtime(true) - $t0, 2)];
 }
 
