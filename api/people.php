@@ -218,7 +218,16 @@ if ($action === 'deactivate') {
     q($conn, "DELETE FROM dbo.capacity_days WHERE workspace_id = ? AND person_id = ? AND day >= ?", [$wsId, $id, $today]);
     $after = person_row($conn, $wsId, $id);
     audit($conn, $wsId, 'update', 'person', $id, ['active' => true], ['active' => false, 'flagged_assignments' => count($flagged)], $before['name'], 'Deactivated (ADM-03)');
-    ok(['person' => person_shape($after), 'flagged_assignments' => $flagged]);
+    // STAB-05: the leaver's future work is an urgent trigger. The scope is everyone still active
+    // *plus* the leaver, because a cycle scoped to the leaver alone could only report their work
+    // as unschedulable — the point of this cycle is to offer it to somebody else.
+    $replan = null;
+    if ($flagged) {
+        $scope = array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.people WHERE workspace_id = ? AND active = 1", [$wsId]));
+        $scope[] = $id;
+        $replan = start_urgent_cycle($conn, $wsId, $scope);
+    }
+    ok(['person' => person_shape($after), 'flagged_assignments' => $flagged] + ($replan ? ['urgent_replan' => $replan] : []));
 }
 
 if ($action === 'set_skill') {
@@ -287,7 +296,12 @@ if ($action === 'add_availability') {
     $class = $from <= $freezeEnd ? 'urgent' : 'batched';
     $days = working_days_between($from, $to, workspace_working_days($conn, $wsId));
     $triggerId = add_trigger($conn, $wsId, $type === 'sickness' ? 'sickness' : 'leave', $class, "{$p['name']} " . ucfirst($type) . ' ' . fmt_range($from, $to) . " ($days " . ($days === 1 ? 'day' : 'days') . ')', 'availability', $id, [$pid]);
-    ok(['availability' => $shape, 'days_written' => $written, 'trigger' => ['id' => $triggerId, 'class' => $class], 'freeze_horizon_end' => $freezeEnd]);
+    // STAB-05: sickness or leave inside the freeze horizon is urgent, and an urgent trigger starts
+    // an immediate cycle scoped to the affected person. Everything above is already committed, and
+    // start_urgent_cycle() never throws, so a replan problem cannot fail this request.
+    $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
+    ok(['availability' => $shape, 'days_written' => $written, 'trigger' => ['id' => $triggerId, 'class' => $class], 'freeze_horizon_end' => $freezeEnd]
+        + ($replan ? ['urgent_replan' => $replan] : []));
 }
 
 if ($action === 'delete_availability') {

@@ -16,6 +16,10 @@ function ok(array $data = []) {
     exit;
 }
 function fail($message, $code = 400, array $extra = []) {
+    // Inside a best-effort side job (see start_urgent_cycle) a failure must not end the
+    // request that triggered it: throw so the caller can swallow it, rather than printing
+    // an error envelope over a response that has not been written yet.
+    if (!empty($GLOBALS['dp_soft_fail'])) throw new RuntimeException($message, $code);
     http_response_code($code);
     echo json_encode(array_merge(['status' => 'error', 'message' => $message], $extra), JSON_UNESCAPED_UNICODE);
     exit;
@@ -108,24 +112,111 @@ function audit($conn, $wsId, $action, $entity, $entityId, $before, $after, $labe
         'reason' => $reason,
     ]);
 }
+/**
+ * A user's channel preferences for one notification kind (NOT-02). A missing row is not
+ * "no preference": it is the documented default that notifications.php also shows, so the
+ * two never disagree about what an untouched account receives.
+ */
+function notification_pref($conn, $userId, $kind) {
+    static $cache = [];
+    $key = "$userId:$kind";
+    if (!array_key_exists($key, $cache)) {
+        $r = $userId === null ? null : row($conn, "SELECT in_app, push, email_digest, teams, digest FROM dbo.notification_prefs WHERE user_id = ? AND kind = ?", [$userId, $kind]);
+        $cache[$key] = ['in_app' => $r ? (int)$r['in_app'] : 1, 'push' => $r ? (int)$r['push'] : 1,
+            'email_digest' => $r ? (int)$r['email_digest'] : 0, 'teams' => $r ? (int)$r['teams'] : 0,
+            'digest' => $r ? $r['digest'] : 'daily', 'is_default' => $r === null];
+    }
+    return $cache[$key];
+}
 // NOTE: ids are compared against null, never for truthiness. SQL Server identity columns
 // can legitimately hand out 0 (a RESEED on a never-used table), and `if (!$id)` would then
 // silently drop every notification aimed at that row.
+/**
+ * Raise an in-app notification, honouring the recipient's per-kind preferences (NOT-01/02/03).
+ *
+ * The row IS the in-app copy, so in-app is the floor: when a user has turned in-app off for
+ * that kind nothing is written at all. `channel` records the route their own switches select:
+ *   'digest' — an email digest on a daily or weekly cadence will carry it, so it is not immediate;
+ *   'teams'  — routed to Microsoft Teams;
+ *   'in_app' — delivered now, in the app.
+ * An urgent notification never rides a digest (NOT-03) and therefore stays 'in_app'.
+ * Push is deliberately never claimed here: there is no APNs/FCM sender in this build (MOB-04),
+ * and a channel value is a statement about where a notification went.
+ *
+ * @return int|null the new notification id, or null when a preference suppressed it.
+ */
 function notify($conn, $wsId, $toUserId, $kind, $title, $body = null, $link = null, $urgent = 0) {
-    if ($toUserId === null || $toUserId === '') return;
-    insert($conn, 'notifications', ['workspace_id' => $wsId, 'user_id' => $toUserId, 'kind' => $kind,
-        'title' => $title, 'body' => $body, 'link' => $link, 'urgent' => $urgent ? 1 : 0]);
+    if ($toUserId === null || $toUserId === '') return null;
+    $pref = notification_pref($conn, $toUserId, $kind);
+    if (!$pref['in_app']) return null;
+    $channel = 'in_app';
+    if (!$urgent) {
+        if ($pref['email_digest'] && in_array($pref['digest'], ['daily', 'weekly'], true)) $channel = 'digest';
+        elseif ($pref['teams']) $channel = 'teams';
+    }
+    return insert($conn, 'notifications', ['workspace_id' => $wsId, 'user_id' => $toUserId, 'kind' => $kind,
+        'title' => mb_substr((string)$title, 0, 200), 'body' => $body === null ? null : mb_substr((string)$body, 0, 600),
+        'link' => $link, 'urgent' => $urgent ? 1 : 0, 'channel' => $channel]);
 }
 /** Notify the user linked to a person (if any). */
 function notify_person($conn, $wsId, $personId, $kind, $title, $body = null, $link = null, $urgent = 0) {
-    if ($personId === null || $personId === '') return;
+    if ($personId === null || $personId === '') return null;
     $uid = scalar($conn, "SELECT id FROM dbo.users WHERE person_id = ? AND workspace_id = ? AND active = 1", [$personId, $wsId]);
-    notify($conn, $wsId, $uid, $kind, $title, $body, $link, $urgent);
+    return notify($conn, $wsId, $uid, $kind, $title, $body, $link, $urgent);
+}
+/** Active user ids in the workspace holding $minRole or better (ADM-02 ranking). */
+function users_with_role($conn, $wsId, $minRole) {
+    $min = DP_ROLE_RANK[$minRole] ?? 99;
+    $roles = array_keys(array_filter(DP_ROLE_RANK, fn($rank) => $rank >= $min));
+    if (!$roles) return [];
+    $in = "'" . implode("','", $roles) . "'";   // from a constant, never from input
+    return array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.users WHERE workspace_id = ? AND active = 1 AND role IN ($in)", [$wsId]));
 }
 function add_trigger($conn, $wsId, $type, $class, $label, $entity = null, $entityId = null, $personIds = null) {
     return insert($conn, 'replan_triggers', ['workspace_id' => $wsId, 'type' => $type, 'class' => $class,
         'label' => $label, 'source_entity' => $entity, 'source_id' => $entityId,
         'person_ids' => $personIds ? implode(',', (array)$personIds) : null]);
+}
+
+/**
+ * STAB-05: an urgent trigger starts an immediate cycle limited to the affected people.
+ *
+ * Called by the endpoints that raise an urgent trigger, AFTER they have committed their own
+ * change, so the engine plans against the new facts. It is synchronous and cheap (the
+ * heuristic runs in tens of milliseconds on demo-sized data) and it is best-effort in the
+ * strongest sense: nothing it does may fail the request that triggered it. `dp_soft_fail`
+ * turns lib.php's fail() into an exception for the duration so a database or model problem
+ * inside the engine cannot print an error envelope over the caller's own response.
+ *
+ * A dry run decides whether to persist. A scoped cycle that finds nothing to change would
+ * otherwise supersede the standing proposal (CHG-08) and replace it with an empty one, which
+ * is a worse outcome than not running at all.
+ *
+ * @param array $personIds scope; empty lets run_propose() derive it from the unprocessed urgent triggers.
+ * @return array|null {proposal_id, changes, held} — or null/skipped when nothing was raised.
+ */
+function start_urgent_cycle($conn, $wsId, array $personIds = []) {
+    static $ran = [];
+    if (isset($ran[$wsId])) return null;      // at most one scoped cycle per request
+    $ran[$wsId] = true;
+    $scope = array_values(array_unique(array_map('intval', $personIds)));
+    $prev = $GLOBALS['dp_soft_fail'] ?? false;
+    $GLOBALS['dp_soft_fail'] = true;
+    try {
+        require_once __DIR__ . '/engine/proposals.php';
+        if (!function_exists('run_propose')) return null;
+        $opts = ['kind' => 'urgent', 'scope_person_ids' => $scope, 'engine' => 'heuristic'];
+        $dry = run_propose($conn, $wsId, $opts + ['persist' => false]);
+        if (empty($dry['changes']) && empty($dry['held'])) return ['proposal_id' => null, 'changes' => 0, 'held' => 0, 'skipped' => 'nothing to replan'];
+        $r = run_propose($conn, $wsId, $opts);
+        return ['proposal_id' => $r['proposal_id'] ?? null, 'changes' => count($r['changes'] ?? []), 'held' => count($r['held'] ?? []),
+                'scope_person_ids' => $r['scope_person_ids'] ?? $scope];
+    } catch (Throwable $e) {
+        error_log('Urgent replan cycle failed (the originating request is unaffected): ' . $e->getMessage());
+        return ['proposal_id' => null, 'changes' => 0, 'held' => 0, 'error' => $e->getMessage()];
+    } finally {
+        $GLOBALS['dp_soft_fail'] = $prev;
+    }
 }
 
 /**

@@ -124,7 +124,11 @@ if ($action === 'create') {
     compute_priority_for_item($conn, $wsId, $id);
     audit($conn, $wsId, 'create', 'work_item', $id, null, array_merge($data, ['status' => $status]), $ref);
     add_trigger($conn, $wsId, 'intake', $isInterrupt ? 'urgent' : 'batched', "$ref added" . ($isInterrupt ? " ({$data['severity']} {$type['name']})" : ''), 'work_item', $id);
-    ok(['item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$id]))]);
+    if ($status === 'needs_estimate') notify_estimate_requested($conn, $wsId, ['id' => $id, 'ref' => $ref, 'title' => $title, 'owner_person_id' => $data['owner_person_id']], "$userName added it and it cannot be scheduled until it is estimated.");
+    // STAB-05 / journey 4.2.3: an incident is an urgent trigger, and an urgent trigger starts an
+    // immediate cycle. Best-effort — a replan that fails must not fail the intake.
+    $replan = $isInterrupt ? start_urgent_cycle($conn, $wsId) : null;
+    ok(['item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$id]))] + ($replan ? ['urgent_replan' => $replan] : []));
 }
 
 if ($action === 'update') {
@@ -203,8 +207,28 @@ if ($action === 'set_status') {
     if ($to === 'cancelled') add_trigger($conn, $wsId, 'manual', 'batched', "{$wi['ref']} cancelled", 'work_item', $wi['id']);
     update($conn, 'work_items', $set, 'id = ?', [$wi['id']]);
     audit($conn, $wsId, 'status', 'work_item', $wi['id'], ['field' => 'status', 'value' => $from], ['field' => 'status', 'value' => $to], $wi['ref'], param('reason'));
+    // NOT-01 estimate_requested: the item has just landed in the estimate queue.
+    if ($to === 'needs_estimate') notify_estimate_requested($conn, $wsId, $wi, "$userName moved it to the estimate queue" . (param('reason') ? ': ' . param('reason') : '.'));
     compute_priority_for_item($conn, $wsId, $wi['id']);
     ok(['item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$wi['id']]))]);
+}
+
+/**
+ * EST-* / NOT-01: a delivery lead asks for an estimate on a specific item.
+ * Distinct from the status transition above, which fires when an item lands in the queue by
+ * policy: this is a person asking, with an optional note, and it works whatever the status.
+ */
+if ($action === 'request_estimate') {
+    require_role('team_lead');
+    $wi = load_item($conn, $wsId);
+    if (in_array($wi['status'], ['delivered', 'cancelled'], true)) fail("{$wi['ref']} is " . status_label($wi['status']) . " and needs no estimate", 409);
+    $note = trim((string)param('note', ''));
+    // Not urgent: `estimate_requested` is not one of the urgent-capable kinds in notifications.php,
+    // and marking it urgent here would let it jump a digest the recipient deliberately chose (NOT-03).
+    $sent = notify_estimate_requested($conn, $wsId, $wi, $note !== '' ? $note : "$userName has asked for an estimate.");
+    touch_item($conn, $wi['id']);
+    audit($conn, $wsId, 'request', 'estimate', $wi['id'], null, ['kind' => 'estimate_requested', 'notifications' => $sent['ids'], 'to' => $sent['to']], $wi['ref'], $note !== '' ? mb_substr($note, 0, 300) : null);
+    ok(['requested' => true, 'notified' => count($sent['ids']), 'to' => $sent['to'], 'item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$wi['id']]))]);
 }
 
 if ($action === 'history') {
@@ -456,6 +480,30 @@ function load_item($conn, $wsId) {
     return $wi;
 }
 function touch_item($conn, $id) { q($conn, "UPDATE dbo.work_items SET updated_at = SYSDATETIME() WHERE id = ?", [$id]); }
+
+/**
+ * NOT-01 `estimate_requested`. The item's owner is the person who can produce the estimate;
+ * when nobody owns it the request goes to the team leads, who decide who does.
+ *
+ * @return array {to:'owner'|'team_lead'|'nobody', ids:[notification ids]} — ids lists the rows
+ *         actually written, so a recipient who has turned this kind off is not reported as told.
+ */
+function notify_estimate_requested($conn, $wsId, array $wi, $why = '', $urgent = false) {
+    $ref = $wi['ref']; $title = $wi['title'] ?? '';
+    $subject = "Estimate requested for $ref" . ($title !== '' ? " $title" : '');
+    $link = "/items/$ref";
+    $ownerPid = array_key_exists('owner_person_id', $wi) && $wi['owner_person_id'] !== null ? (int)$wi['owner_person_id'] : null;
+    if ($ownerPid !== null) {
+        $id = notify_person($conn, $wsId, $ownerPid, 'estimate_requested', $subject, $why, $link, $urgent ? 1 : 0);
+        return ['to' => 'owner', 'ids' => $id === null ? [] : [$id]];
+    }
+    $ids = [];
+    foreach (users_with_role($conn, $wsId, 'team_lead') as $uid) {
+        $id = notify($conn, $wsId, $uid, 'estimate_requested', $subject, $why, $link, $urgent ? 1 : 0);
+        if ($id !== null) $ids[] = $id;
+    }
+    return ['to' => $ids ? 'team_lead' : 'nobody', 'ids' => $ids];
+}
 function status_label($s) { return ['draft' => 'Draft', 'needs_estimate' => 'Needs estimate', 'needs_benefit' => 'Needs benefit case', 'ready' => 'Ready', 'scheduled' => 'Scheduled', 'in_progress' => 'In progress', 'blocked' => 'Blocked', 'delivered' => 'Delivered', 'cancelled' => 'Cancelled'][$s] ?? $s; }
 
 /** Next ref for a prefix (PIP-02): WI-1072 / INC-4472 / SR-0216. Atomic on ref_sequences. */

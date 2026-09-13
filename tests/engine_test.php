@@ -310,6 +310,59 @@ $singlePoint = array_values(array_filter($watch, fn($w) => ($w['kind'] ?? '') ==
 check(!empty($singlePoint), 'the single-point-of-failure skill is flagged (spec 13.1 skills gap)');
 
 // ---------------------------------------------------------------------------------
+section('Small incoming work fills gaps first, at the configured threshold (STAB-10)');
+$threshold = (float)$policy['small_fill_threshold_days'];
+$flagWrong = 0;
+foreach ($model['items'] as $it) if ((bool)$it['small'] !== ((float)$it['remaining_days'] <= $threshold)) $flagWrong++;
+check($flagWrong === 0, "every item's small flag is remaining effort <= small_fill_threshold_days ($threshold): $flagWrong disagree");
+
+/**
+ * Refs of the items NOT already on the committed plan, in the order the planner first placed
+ * them. Interrupts are excluded: they are ordered ahead of everything by policy, not by size.
+ */
+$incomingOrder = function (array $assignments, array $model, array $committedIds) {
+    $seen = []; $order = [];
+    foreach ($assignments as $a) {
+        $iid = $a['work_item_id'];
+        if (isset($committedIds[$iid]) || isset($seen[$iid])) continue;
+        $seen[$iid] = true;
+        $it = $model['items'][$iid] ?? null;
+        if (!$it || $it['policy'] === 'interrupt') continue;
+        $order[] = $it['ref'];
+    }
+    return $order;
+};
+/** True when every small item in the placement order comes before every large one. */
+$smallFirst = function (array $order, array $model) {
+    $bySmall = []; foreach ($model['items'] as $it) $bySmall[$it['ref']] = !empty($it['small']);
+    $seenLarge = false;
+    foreach ($order as $ref) { if (!$bySmall[$ref]) $seenLarge = true; elseif ($seenLarge) return false; }
+    return true;
+};
+$committedIds = []; foreach ($model['committed'] as $c) $committedIds[$c['work_item_id']] = true;
+$incomingSmall = []; $incomingLarge = [];
+foreach ($model['items'] as $it) {
+    if (isset($committedIds[$it['id']]) || !$it['schedulable'] || $it['policy'] === 'interrupt') continue;
+    if ($it['small']) $incomingSmall[] = $it['ref']; else $incomingLarge[] = $it['ref'];
+}
+check($incomingSmall && $incomingLarge, 'the demo has both small and large incoming work (' . count($incomingSmall) . ' small, ' . count($incomingLarge) . ' large)');
+$orderReal = $incomingOrder($result['assignments'], $model, $committedIds);
+check($smallFirst($orderReal, $model), 'small incoming work is placed before large incoming work (' . implode(', ', $orderReal) . ')');
+
+// On this demo the small item also happens to outrank the large ones, so the order above alone
+// cannot tell the rule apart from plain priority ordering. Invert the flags — nothing else — and
+// the order must invert with them: that is what proves the planner reads `small`, and `small` is
+// model.php's reading of small_fill_threshold_days (asserted above).
+$flipped = $model;
+foreach ($flipped['items'] as $k => $it) if (!isset($committedIds[$it['id']]) && $it['policy'] !== 'interrupt') $flipped['items'][$k]['small'] = !$it['small'];
+$flippedRes = heuristic_plan($flipped);
+$orderFlipped = $incomingOrder($flippedRes['assignments'], $flipped, $committedIds);
+check($orderReal !== $orderFlipped, 'inverting the threshold inverts the order (' . implode(', ', $orderReal) . '  ->  ' . implode(', ', $orderFlipped) . ')');
+check($smallFirst($orderFlipped, $flipped), 'and the inverted model is still placed small-first');
+// Filling gaps must not cost completeness: no more work goes unplanned than without the rule.
+check(count($result['unscheduled']) <= count($flippedRes['unscheduled']), 'gap-filling leaves no more work unscheduled (' . count($result['unscheduled']) . ' vs ' . count($flippedRes['unscheduled']) . ')');
+
+// ---------------------------------------------------------------------------------
 section('CP-SAT client degrades to the heuristic rather than failing (10.4)');
 $bad = cpsat_solve($model, ['engine_url' => 'http://127.0.0.1:9'], 2);
 check(($bad['ok'] ?? true) === false, 'an unreachable solver reports failure rather than throwing');

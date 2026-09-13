@@ -59,6 +59,9 @@ if ($action === 'save') {
     }
     $secret = bin2hex(random_bytes(24));
     $data += ['workspace_id' => $wsId, 'secret' => $secret, 'created_by' => $userId];
+    // Start the cursor before the subscription exists, so the very next event is delivered
+    // rather than being skipped until the first scan happens to run.
+    webhook_ensure_cursor($conn, $wsId);
     $newId = insert($conn, 'webhook_subscriptions', $data);
     $row = row($conn, "SELECT * FROM dbo.webhook_subscriptions WHERE id = ?", [$newId]);
     audit($conn, $wsId, 'create', 'webhook', $newId, null, webhook_public($row), $url);

@@ -13,11 +13,11 @@ columns that nothing reads are recorded as such. The status column is deliberate
 
 | Scope | Done | Partial | Not done | Not applicable here | Total |
 |---|---|---|---|---|---|
-| All functional requirements | 60 | 47 | 11 | 9 | 127 |
-| R1 (the MVP) | 57 | 23 | 0 | 0 | 80 |
-| Must priority | 54 | 27 | 3 | 1 | 85 |
-| Must **and** R1 | 54 | 22 | 0 | 0 | 76 |
-| Should priority | 5 | 20 | 6 | 7 | 38 |
+| All functional requirements | 65 | 43 | 10 | 9 | 127 |
+| R1 (the MVP) | 61 | 19 | 0 | 0 | 80 |
+| Must priority | 58 | 23 | 3 | 1 | 85 |
+| Must **and** R1 | 58 | 18 | 0 | 0 | 76 |
+| Should priority | 6 | 20 | 5 | 7 | 38 |
 | Could priority | 1 | 0 | 2 | 1 | 4 |
 
 Non-functional: of the 18 NFRs, three are structurally met, seven are partly met, and eight are
@@ -36,15 +36,18 @@ be run, previous plan versions cannot be viewed or restored, scenarios cannot be
 cannot be assigned, day rates cannot be edited. A code-only pass over `api/` would score this system
 several points higher than it deserves; a user sitting in front of the app would score it lower.
 
-Outside R1 the picture is thinner and honestly so. Notifications generate three of their seven kinds
-and only ever in-app. Reporting exists but has no work-type dimension, no PDF, and definitions on
+Outside R1 the picture is thinner and honestly so. Notifications now generate all seven kinds and
+`notify()` honours the preference table, but in-app is still the only delivery route there is: no
+push, email or Teams sender exists, so `channel` records the route a user chose rather than one
+anything acted on. Reporting exists but has no work-type dimension, no PDF, and definitions on
 four metrics out of a dozen. There are no integrations at all: the `integrations` table is seeded and
 never read by a single line of PHP, and the Settings panel that appears to configure them is a
 hardcoded list of cards with disabled switches. There are no native mobile apps; the phone
 experience is a responsive layout in the same Flutter web build, which covers the MOB-01 feature
-list but is not what MOB-01 asks for. Two policy switches that the Settings screen offers —
-`auto_apply_outside_horizon` and `require_ack_inside_horizon` — are stored, versioned and audited,
-and then never read by any code.
+list but is not what MOB-01 asks for. The four policy switches that were stored, versioned, audited
+and never read — `auto_apply_outside_horizon`, `require_ack_inside_horizon`,
+`reestimate_class_threshold` and `small_fill_threshold_days` — now each do what their label says;
+only `reestimate_class_threshold` still has no Settings control to set it.
 
 Three places where the mockups and the specification contradict each other are already recorded in
 `README.md` (WI-1042's priority score, the benefits register totals, and the changes screen header
@@ -124,7 +127,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | EST-06 | Estimates versioned with author, date and reason; latest used; changes visible | Must | R1 | Done | New row per save with author and reason; every read takes the top version; the estimate screen has a versions sheet and a history panel |
 | EST-07 | Calibration: actual ÷ most-likely by size class and work type over 12 months, with a plan-at recommendation | Should | R2 | Partial | Twelve-month medians by size stamp and the most-likely/P80 recommendation are both real and shown on the estimate and estimates screens. **The work-type dimension is absent — grouping is by size stamp only** |
 | EST-08 | Find similar delivered items and copy their estimate | Should | R2 | Done | `similar_for()` matches size stamp and overlapping skills; the "Copy from similar" sheet and its "Use" button populate the three-point form for a new version |
-| EST-09 | Policy can require a re-estimate before an item enters the committed window when the class is worse than a threshold | Should | R2 | Not done | `reestimate_class_threshold` is written by `save_policy` and parsed into `config.dart`, and that is the end of it. Nothing in `planner.php`, `guardrails.php`, `model.php` or `work_items.php` reads it, nothing blocks entry to the committed window, and there is no Settings field to set it |
+| EST-09 | Policy can require a re-estimate before an item enters the committed window when the class is worse than a threshold | Should | R2 | Done | `engine/commit.php` `reestimate_blocked_changes()` gates the commit: an accepted change that would move an item whose latest estimate class is worse than the threshold into the freeze window makes `changes.php commit` return 409 naming the item and its class, and the nightly auto-apply skips it. `replan.php watch_list` reports the same items with a `reestimate` entry. Asserted on and off by `tests/policy_notifications_test.php`. **Still no Settings field to set the threshold** — it is API-only |
 | EST-10 | Assumptions and exclusions recorded and shown wherever the estimate is shown | Must | R1 | Done | Stored per version, edited on the estimate screen, displayed on the item's ROM panel and estimate detail |
 
 ### 2.6 Business benefits and prioritisation (BEN)
@@ -133,8 +136,8 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 |---|---|---|---|---|---|
 | BEN-01 | Benefits with type, value, currency, confidence, realisation start, owner, narrative | Must | R1 | Done | `benefits.php` `save` validates and stores all of them; the add/edit dialog covers each. Currency is fixed to GBP in the dialog |
 | BEN-02 | Non-financial benefits on a qualitative scale with an optional proxy value, still influencing priority | Should | R2 | Not done | `qualitative_scale` exists as a column and the API will store it, but no UI control sets it, the seed always writes null, and `engine/priority.php` scales `annual_value` alone — so a qualitative benefit cannot influence priority. There is no proxy-value concept at all |
-| BEN-03 | Priority score from value × confidence, urgency, risk, leverage and age; weights configurable; formula shown on the item | Must | R1 | Partial | The formula is a faithful implementation of section 8.4, including P90 normalisation, confidence scaling and the nightly rescale, and the weights are genuinely editable in Settings with a "must total 100" check. **The item shows each term's contribution as a bar and a number plus one prose sentence — not the weights or the normalised inputs — so a reader cannot reproduce the score from the item page. The breakdown's label map also omits `severity`, so an incident renders an all-zero breakdown** |
-| BEN-04 | Interrupt items take priority from severity and bypass the benefit case | Must | R1 | Done | `priority.php` scores interrupts from `severityScores` and marks the other terms "skipped: interrupt policy"; severity is set at intake |
+| BEN-03 | Priority score from value × confidence, urgency, risk, leverage and age; weights configurable; formula shown on the item | Must | R1 | Partial | The formula is a faithful implementation of section 8.4, including P90 normalisation, confidence scaling and the nightly rescale, and the weights are genuinely editable in Settings with a "must total 100" check. **The item shows each term's contribution as a bar and a number plus one prose sentence — not the weights or the normalised inputs — so a reader cannot reproduce the score from the item page.** The incident case is fixed: `priority.php` republishes the severity contribution as the `urgency` term (flagged `alias_of`), so an interrupt's breakdown now sums to its score instead of drawing five empty bars |
+| BEN-04 | Interrupt items take priority from severity and bypass the benefit case | Must | R1 | Done | `priority.php` scores interrupts from `severityScores` and marks the other terms "skipped: interrupt policy"; severity is set at intake. The breakdown is now readable too: the severity contribution is also published as the `urgency` term with `alias_of: 'severity'`, asserted by `tests/policy_notifications_test.php` to sum to the item's score |
 | BEN-05 | Benefits register with filters by type, owner, status and quarter, and totals in plan, realised and at risk | Must | R1 | Partial | The register, the three totals, and the by-type and by-owner views are all real. **The filters are API-only — the client calls `list` with no parameters and the Register tab has no type, owner, status or quarter control** |
 | BEN-06 | Benefit owner records realised value at the configured cadence; planned against realised by quarter | Should | R2 | Partial | `record_realisation`, the "Record realisation" dialog and the planned-versus-realised quarterly chart all exist. **There is no configured cadence anywhere — no column, no setting — quarters are hardcoded, and nothing prompts an owner when a period falls due** |
 | BEN-07 | Delivery lead can pin or override priority with a reason and an expiry | Must | R1 | Done | `override_priority` / `clear_override` with a mandatory reason and expiry, honoured and expired by `priority.php`; dialog, in-force note and Clear on the item page |
@@ -167,12 +170,12 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | STAB-02 | Each moved assignment-day carries a stability cost, penalised in the objective | Must | R1 | Done | `diff_change()` costs moved allocation-days inside committed and planned windows; `pl_item_cost()` charges `stabilityPlanned × moved` when choosing a placement |
 | STAB-03 | Change budget per person per week; proposals over it held with the reason | Must | R1 | Done | `apply_guardrails` accumulates per person-week (including prior usage from committed changes), holds the excess as `held_budget` and returns a sentence naming the person, the days and the week. Asserted by the engine suite |
 | STAB-04 | Minimum improvement threshold; proposals below it shown but never applied automatically | Must | R1 | Done | `below_threshold` from `improvement_pct`; every change becomes `held_threshold`; the Changes screen says so in the header. Verified live on a negative-improvement preview: 23 of 23 held |
-| STAB-05 | Cadence of propose nightly, commit weekly; urgent triggers start an immediate cycle limited to the affected people | Must | R1 | Partial | The cadence is configured and `cron.php` runs the nightly cycle; urgent scoped cycles are properly implemented (`kind: 'urgent'` derives its scope from unprocessed urgent triggers and the planner honours `scope_person_ids`). **Nothing starts one: an urgent trigger is recorded and then waits for the nightly run, and all three client call sites post `kind: 'manual'`. The commit cadence is a stored string that nothing enforces** |
+| STAB-05 | Cadence of propose nightly, commit weekly; urgent triggers start an immediate cycle limited to the affected people | Must | R1 | Done | The cadence is configured and `cron.php` runs the nightly cycle. `lib.php start_urgent_cycle()` runs the scoped cycle synchronously wherever an urgent trigger is raised — an incident arriving (`work_items.php create`), sickness or leave inside the freeze horizon and a leaver's flagged work (`people.php`) — after the originating change is committed, and never fails that request (a `dp_soft_fail` guard turns `fail()` into an exception it swallows). A dry run decides whether to persist, so an empty cycle cannot supersede the standing proposal. Asserted end-to-end by `tests/policy_notifications_test.php`. **The commit cadence is still a stored string that nothing enforces**, and the client's own call sites still post `kind: 'manual'` |
 | STAB-06 | Assignments beyond the planning horizon are indicative and cost nothing | Must | R1 | Done | `diff_change()` and `summary_total_days()` both clamp at `planned_end`, so indicative days score zero stability cost and zero budget |
 | STAB-07 | Per-person stability view over 8 weeks with reasons; team and workspace stability trend | Must | R1 | Done | `people.php get` returns `change_history` and a stability note; the person page renders "Plan changes affecting …" and "Plan changes by week"; `changes.php mine` feeds My week; the trend is on Overview and Reports |
 | STAB-08 | Plan stability index, rolling four weeks, on the overview and in reports | Must | R1 | Done | `stability_index()` in `summary.php` implements the formula against `stability_weeks`; shown on Overview with its definition and as the Reports trend |
 | STAB-09 | Upward re-estimate extends the same assignment unless it breaks the needed-by date | Must | R1 | Done | `pl_try_keep()` reproduces the committed slot and extends it; `pl_breaks_needed_by()` is the only thing that abandons it — and inside the freeze horizon not even that |
-| STAB-10 | Small incoming work fills existing gaps in the planned window before displacement is considered | Must | R1 | Partial | The outcome holds: new items are queued after kept committed ones and `pl_find_run()` places them in the earliest feasible gap, and nothing except an incident ever displaces. **The configurable threshold is inert — `model.php` computes `small` from `small_fill_threshold_days` and neither the PHP planner nor the CP-SAT solver reads it, so a Large new item is treated exactly like a Small one** |
+| STAB-10 | Small incoming work fills existing gaps in the planned window before displacement is considered | Must | R1 | Done | New items are queued after kept committed ones and `pl_find_run()` places them in the earliest feasible gap, and nothing except an incident ever displaces. The threshold now drives the order: `planner.php`'s queue sort puts incoming items flagged `small` by `model.php` (remaining effort ≤ `small_fill_threshold_days`) ahead of larger incoming work. `tests/engine_test.php` asserts the flag tracks the policy value and that inverting it inverts the placement order. **The CP-SAT solver still ignores `small`**, so a `cpsat` run does not honour the threshold |
 | STAB-11 | Non-urgent triggers batched until the next scheduled proposal | Must | R1 | Done | Every mutation writes a `replan_triggers` row with a class; nothing replans on edit; the nightly cycle consumes them |
 | STAB-12 | Mark an item or a person protected for a period, raising the stability cost | Should | R2 | Partial | The engine half is complete: `protected_until` becomes `protected` in the model, doubles the cost in both `diff.php` and `pl_item_cost()`, and produces a "Protected · stability cost doubled" chip. **No screen sets it or shows it — `protectedUntil` is parsed into the Dart models and rendered nowhere** |
 
@@ -185,8 +188,8 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | CHG-03 | Held changes cannot be accepted without an override permission and a reason | Must | R1 | Done | `decide_change()` refuses `held_budget` and `held_threshold` without the admin role *and* a reason, returning the guardrail sentence; the client shows an override confirmation |
 | CHG-04 | Before-and-after summary of late items, quarterly value, people over 100%, single-skill dependencies, days changed and stability index | Must | R1 | Done | `plan_summary()` computes all six; stored on the proposal and rendered on the Changes screen. Verified live |
 | CHG-05 | Accepting creates a new committed version; the previous remains viewable and restorable | Must | R1 | Partial | The commit half is done — a new committed version is written and the previous is marked superseded and kept. **`plan.php` `versions`, `version` and `restore` are all implemented and no screen calls any of them, so from the app a previous version can be neither viewed nor restored** |
-| CHG-06 | Affected people notified before the change takes effect, with the reason, and can comment; policy can require acknowledgement inside the horizon | Must | R1 | Partial | Notification happens at propose time with the reason, comments work, `acknowledge` exists and My week surfaces pending acknowledgements. **`require_ack_inside_horizon` is stored, versioned, audited and editable in Settings, and no code reads it — acknowledgement is always requested for inside-freeze changes regardless of the switch** |
-| CHG-07 | Approval roles configurable: who approves inside the horizon, who overrides guardrails, whether auto-apply is allowed outside it | Must | R1 | Partial | The rules are enforced, but hardcoded: `require_role('delivery_lead')` to approve and `has_role('admin')` to override. **Neither is configurable, and `auto_apply_outside_horizon` is stored and editable and never read** |
+| CHG-06 | Affected people notified before the change takes effect, with the reason, and can comment; policy can require acknowledgement inside the horizon | Must | R1 | Done | Notification happens at propose time with the reason, comments work, and `acknowledge` exists. `require_ack_inside_horizon` is now read at commit time and recorded per change as `change_proposals.ack_required`, so turning it off stops asking rather than hiding the ask; `changes.php current`/`get` expose `awaiting_ack` and `counts.awaiting_ack`, and `mine` drives My week's `pending_ack` from the same flag. Tested on and off in `tests/policy_notifications_test.php` |
+| CHG-07 | Approval roles configurable: who approves inside the horizon, who overrides guardrails, whether auto-apply is allowed outside it | Must | R1 | Partial | The approval rules are enforced but hardcoded: `require_role('delivery_lead')` to approve and `has_role('admin')` to override, **neither configurable**. The auto-apply clause is done: `auto_apply_outside_horizon` is read by `run_nightly`, which accepts and commits every pending change that passes all guardrails and falls wholly outside the freeze horizon, audits each as `auto_apply`, refuses when the proposal is below `min_improvement_pct` (STAB-04), and re-proposes whatever is left so it still reaches a reviewer |
 | CHG-08 | A proposal expires at the next cycle, which notes what was carried over | Should | R1 | Done | `run_propose` supersedes every open proposal, collects the undecided headlines and writes `carried_over_note`; the candidate version is discarded |
 
 ### 2.10 Schedule and overview views (VIEW)
@@ -207,9 +210,9 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 
 | ID | Requirement | Pri | Rel | Status | Evidence, or what is missing |
 |---|---|---|---|---|---|
-| NOT-01 | Notifications for seven events | Must | R1 | Partial | **Three of the seven are ever generated:** `change_proposed`, `change_committed` and `approval_requested`. `item_assigned`, `estimate_requested` and `realisation_due` exist only as preference labels and seeded demo rows; `watch_list` is never produced at all |
-| NOT-02 | Channels in-app, push, email digest and Teams, chosen per kind with a cadence | Must | R2 | Partial | `notification_prefs` persists all four switches and the cadence per kind, and the Notifications screen edits them. **`notify()` never reads the table; every row is inserted `channel = 'in_app'`; there is no push, email or Teams sender** |
-| NOT-03 | Urgent notifications bypass digests | Must | R2 | Partial | The `urgent` flag is set correctly for inside-freeze changes and rendered as a red chip. **The bypass is vacuous: there are no digests to bypass and no delivery code branches on the flag** |
+| NOT-01 | Notifications for seven events | Must | R1 | Done | All seven are generated: `change_proposed` and `approval_requested` by `run_propose`; `change_committed` and `item_assigned` by `engine/commit.php` (a commit that gives someone work they did not hold); `estimate_requested` by `work_items.php` `request_estimate{id, note?}` and by any move into `needs_estimate`; `realisation_due` and `watch_list` by `run_nightly`, deduplicated once per benefit and once per watch-list entry per week. Covered by `tests/policy_notifications_test.php`. **A manual assignment change in `plan.php move_assignment` still raises no `item_assigned`** — that file was out of this change's remit |
+| NOT-02 | Channels in-app, push, email digest and Teams, chosen per kind with a cadence | Must | R2 | Partial | `notification_prefs` persists all four switches and the cadence per kind, the Notifications screen edits them, and `notify()` now reads the table: in-app off for a kind writes no row at all, and `channel` is set to `digest`, `teams` or `in_app` from the user's own choices. **There is still no push, email or Teams sender**, so `channel` records the route chosen rather than a delivery that happened; push is deliberately never claimed |
+| NOT-03 | Urgent notifications bypass digests | Must | R2 | Partial | The `urgent` flag is set correctly for inside-freeze changes, rendered as a red chip, and `notify()` now branches on it: an urgent notification is never given `channel = 'digest'` even when the recipient has a daily or weekly digest configured for that kind (asserted in `tests/policy_notifications_test.php`). **There is still no digest job to bypass** (NOT-04) |
 | NOT-04 | Weekly digest of next week's plan and changes since the last one | Should | R2 | Not done | No digest job, no mail transport in the repository; `cron.php` runs only the replan cycle. The stored `digest` preference is never consumed |
 | NOT-05 | Comments on items and proposals support @mentions and link to the exact change | Should | R2 | Partial | @mentions are parsed on **work-item** comments only, and link to the item, not to a change. **Change-proposal comments do not parse mentions — they notify everyone affected — and `mention` is not a notification kind, so it has no preferences** |
 
@@ -335,14 +338,19 @@ depends on — open proposal, accept all passing, commit — is in place.
 
 ## 4 What is actually verified
 
-The verification bar in `CLAUDE.md` is real and it passes. All five PHP suites ran green during this
+The verification bar in `CLAUDE.md` is real and it passes. Every PHP suite ran green during this
 audit (engine; workspace config, people and skills; work items, estimates and benefits; overview,
-reports and watch list; and the plan, proposals and changes HTTP smoke), re-seeding before and after.
+reports and watch list; the plan, proposals and changes HTTP smoke; and the policy switches,
+notifications and urgent cycle), re-seeding before and after.
 The assertions are requirement-aware rather than cosmetic: the change budget holding at the limit, an
 improvement below the threshold being held as information, the rota person's reserve rising to the
 rota percentage while everyone else holds the standard percentage back, every watch-list entry
 carrying a suggestion, nothing outside the freeze horizon being labelled committed, and every lane
-header carrying a load percentage.
+header carrying a load percentage. `tests/policy_notifications_test.php` holds each policy switch to
+the same standard — every one is asserted with it on and again with it off — and follows an urgent
+trigger through to the scoped proposal it produces, a turned-off preference through to the
+notification row that is consequently never written, and an incident's priority breakdown through to
+the score it has to add up to.
 
 `engine/test_solver.py` checks the CP-SAT model's hard constraints against a hand-built model: level-4
 work going to the only qualified person, nobody over 100% on any day, an unqualified item reported
@@ -366,29 +374,24 @@ In the order that buys the most, if someone picked this up tomorrow.
    editor (TEAM-08, Must R1), day rates (EST-05, and it unblocks half of ADM-06), scenarios
    (SCH-11), bulk actions (PIP-10), and `deactivate` (ADM-03). Each is one screen affordance.
 
-2. **Finish the notification set and give it a channel.** Three of seven kinds fire (NOT-01, Must
-   R1), and `notify()` ignores the preference table it was clearly designed around. Generating
-   `item_assigned`, `estimate_requested`, `realisation_due` and `watch_list`, and then having
-   `notify()` read `notification_prefs` before inserting, would close NOT-01 and give NOT-02 and
-   NOT-03 something real to sit on — even with in-app as the only delivery channel.
+2. **Give the notification set a delivery channel.** All seven kinds now fire and `notify()` reads
+   `notification_prefs` (NOT-01 closed, NOT-02 and NOT-03 given something real to sit on), but in-app
+   is still the only route: `channel` says `digest` or `teams` when a user asks for it and nothing
+   sends either. A weekly digest job (NOT-04) is the cheapest thing that would make the preference
+   mean something; push (MOB-04) and Teams (INT-06) need a tenant.
 
-3. **Make the three inert policy switches do something, or remove them.** `auto_apply_outside_horizon`
-   (CHG-07), `require_ack_inside_horizon` (CHG-06) and `reestimate_class_threshold` (EST-09) are
-   stored, versioned, audited and offered in Settings, and no code reads any of them. A switch that
-   does nothing is worse than an absent one, because it tells an administrator a lie. The same applies
-   to `small_fill_threshold_days`, which the model computes `small` from and neither planner reads
-   (STAB-10).
+3. **Give `reestimate_class_threshold` a Settings control.** The four switches that were inert now
+   all do what their label says, but this one can still only be set through the API, so an
+   administrator cannot reach the behaviour at all. Also worth doing: teach the CP-SAT solver the
+   `small` flag, which only the PHP planner currently reads (STAB-10).
 
-4. **Start the urgent cycle automatically.** STAB-05 is a Must in R1 and section 4.2.3 is one of the
-   four core journeys. The scoped urgent replan is implemented and correct; nothing ever invokes it.
-   Firing `run_propose(kind: 'urgent')` when an urgent trigger is recorded — or at minimum offering it
-   as a control when unprocessed urgent triggers exist — would make the incident journey work as
-   written.
+4. **Make the approval roles configurable (CHG-07).** Who may approve inside the horizon and who may
+   override a guardrail are still `require_role('delivery_lead')` and `has_role('admin')` in code.
+   The auto-apply half of the requirement is done; this half is the remainder.
 
 5. **Close the Must-priority client gaps in configuration and intake.** `earliest_start` has no
    control anywhere despite the scheduler honouring it, and tags are missing from the add form
-   (PIP-01); the benefits register has no filters (BEN-05); the priority breakdown omits `severity`,
-   so every incident shows an all-zero score (BEN-04's display); work types cannot have their default
+   (PIP-01); the benefits register has no filters (BEN-05); work types cannot have their default
    size set (CFG-02); the schedule cannot be grouped (VIEW-04); and objective weights are shown but
    not editable (SCH-02).
 

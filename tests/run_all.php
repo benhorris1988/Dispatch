@@ -47,6 +47,9 @@ $suites = [
     'Overview, reports, watch list'                 => 'overview_reports_test.php',
     'Plan, proposals, changes (HTTP smoke)'         => 'http_smoke.php',
     'Public API, webhooks, calendar feed'          => 'public_api_test.php',
+    // Last: it edits the scheduling policy, commits plan versions and runs the nightly cycle,
+    // so it leaves the demo furthest from its seeded state.
+    'Policy switches, notifications, urgent cycle'  => 'policy_notifications_test.php',
 ];
 
 $results = [];

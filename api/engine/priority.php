@@ -63,10 +63,20 @@ function compute_priority_scores($conn, $wsId, $itemIds = null) {
         $isInterrupt = $it['policy'] === 'interrupt';
         $terms = [];
         if ($isInterrupt) {
+            // BEN-04: an interrupt item takes its priority from severity and bypasses the benefit case.
             $sev = $it['severity'] ?: 'P3';
             $raw = (float)($sevScores[$sev] ?? 70);
-            $terms['severity'] = ['input' => $sev, 'normalised' => $raw / 100, 'weight' => 100, 'contribution' => $raw];
+            $terms['severity'] = ['input' => $sev, 'label' => "Severity $sev", 'normalised' => $raw / 100, 'weight' => 100, 'contribution' => $raw];
             foreach (['value','urgency','risk','leverage','age'] as $k) $terms[$k] = ['input' => null, 'normalised' => 0, 'weight' => $W[$k], 'contribution' => 0, 'skipped' => 'interrupt policy'];
+            // The breakdown must add up to the score the item is actually carrying. A reader — or a
+            // client with a fixed list of term names — that only knows the five planned terms saw an
+            // incident as five zero bars against a score of 100, which reads as a bug in the scorer
+            // rather than as "this one is scored a different way". The severity contribution is
+            // therefore also published as the urgency term (an incident's priority IS its response
+            // urgency), flagged `alias_of` so anything summing the terms counts it once.
+            $terms['urgency'] = ['input' => ['severity' => $sev, 'score' => $raw], 'label' => "Severity $sev",
+                'source' => 'severity (interrupt policy)', 'alias_of' => 'severity',
+                'normalised' => round($raw / 100, 2), 'weight' => 100, 'contribution' => $raw];
         } else {
             // Value
             $v = $value[$id] ?? 0.0;

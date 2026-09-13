@@ -5,12 +5,13 @@
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/auth_middleware.php';
 require_once __DIR__ . '/engine/proposals.php';
+require_once __DIR__ . '/engine/commit.php';
 $action = param('action', 'current');
 
 if ($action === 'current') {
     $p = row($conn, "SELECT TOP 1 * FROM dbo.proposals WHERE workspace_id = ? AND status = 'open' ORDER BY generated_at DESC", [$wsId])
       ?: row($conn, "SELECT TOP 1 * FROM dbo.proposals WHERE workspace_id = ? AND kind <> 'preview' ORDER BY generated_at DESC", [$wsId]);
-    if (!$p) ok(['proposal' => null, 'changes' => [], 'held' => [], 'guardrails' => guardrail_descriptions(current_policy_arr($conn, $wsId)), 'counts' => ['proposed' => 0, 'held' => 0, 'pending' => 0]]);
+    if (!$p) ok(['proposal' => null, 'changes' => [], 'held' => [], 'awaiting_ack' => [], 'guardrails' => guardrail_descriptions(current_policy_arr($conn, $wsId)), 'counts' => ['proposed' => 0, 'held' => 0, 'pending' => 0, 'awaiting_ack' => 0]]);
     ok(proposal_payload($conn, $wsId, $p));
 }
 if ($action === 'list') {
@@ -32,7 +33,7 @@ if ($action === 'decide') {
     if (!in_array($decision, ['accepted', 'rejected'], true)) fail('decision must be accepted or rejected', 400);
     $reason = trim((string)param('reason', ''));
     decide_change($conn, $wsId, $c, $decision, $reason);
-    ok(['change' => change_shape($conn, load_change_row($conn, $c['id']), $wsId), 'proposal_counts' => proposal_shape($conn, row($conn, "SELECT * FROM dbo.proposals WHERE id = ?", [$c['proposal_id']]), $wsId)['counts']]);
+    ok(['change' => change_x($conn, load_change_row($conn, $c['id']), $wsId), 'proposal_counts' => proposal_shape($conn, row($conn, "SELECT * FROM dbo.proposals WHERE id = ?", [$c['proposal_id']]), $wsId)['counts']]);
 }
 
 if ($action === 'commit') {
@@ -94,7 +95,7 @@ if ($action === 'edit') {
         'decision' => 'edited', 'decided_by' => $userId, 'decided_at' => date('Y-m-d H:i:s'), 'decision_reason' => mb_substr($reason, 0, 300),
     ], 'id = ?', [(int)$c['id']]);
     audit($conn, $wsId, 'update', 'change_proposal', (int)$c['id'], ['after' => json_col($old['after_json'], null)], ['after' => $newAfter], $re['headline'], $reason);
-    ok(['change' => change_shape($conn, load_change_row($conn, $c['id']), $wsId), 'warnings' => $warnings]);
+    ok(['change' => change_x($conn, load_change_row($conn, $c['id']), $wsId), 'warnings' => $warnings]);
 }
 
 if ($action === 'acknowledge') {
@@ -102,8 +103,8 @@ if ($action === 'acknowledge') {
     $affected = csv_ids($c['affected_person_ids']);
     if (!$personId || (!in_array($personId, $affected, true) && (int)$c['person_id'] !== $personId)) { if (!has_role('team_lead')) fail('Only an affected person can acknowledge this change', 403); }
     update($conn, 'change_proposals', ['acknowledged_at' => date('Y-m-d H:i:s')], 'id = ?', [(int)$c['id']]);
-    audit($conn, $wsId, 'update', 'change_proposal', (int)$c['id'], null, ['acknowledged' => true], $c['headline']);
-    ok(['change' => change_shape($conn, load_change_row($conn, $c['id']), $wsId)]);
+    audit($conn, $wsId, 'update', 'change_proposal', (int)$c['id'], null, ['acknowledged' => true, 'ack_required' => (bool)$c['ack_required']], $c['headline']);
+    ok(['change' => change_x($conn, load_change_row($conn, $c['id']), $wsId)]);
 }
 if ($action === 'comment') {
     $c = load_change($conn, $wsId, (int)require_param('change_id'));
@@ -121,9 +122,12 @@ if ($action === 'mine') {
                               WHERE c.workspace_id = ? AND p.generated_at >= ? AND (c.person_id = ? OR ',' + ISNULL(c.affected_person_ids,'') + ',' LIKE ?) ORDER BY p.generated_at DESC, c.sort_order", [$wsId, $since, $personId, "%,$personId,%"]);
     $changes = []; $pending = [];
     foreach ($rowsMine as $r) {
-        $s = change_shape($conn, $r, $wsId); $s['proposal_status'] = $r['proposal_status']; $s['proposal_kind'] = $r['proposal_kind']; $s['generated_at'] = $r['generated_at'];
+        $s = change_x($conn, $r, $wsId); $s['proposal_status'] = $r['proposal_status']; $s['proposal_kind'] = $r['proposal_kind']; $s['generated_at'] = $r['generated_at'];
         $changes[] = $s;
-        if (in_array($r['decision'], ['accepted', 'edited'], true) && $r['proposal_status'] === 'decided' && (int)$r['inside_freeze'] && !$r['acknowledged_at']) $pending[] = $s;
+        // CHG-06: an acknowledgement is pending only when the commit actually asked for one.
+        // `require_ack_inside_horizon` is read at commit time and recorded on the row, so turning
+        // the switch off stops asking instead of merely hiding the request.
+        if (awaiting_ack($r)) $pending[] = $s;
     }
     ok(['changes' => $changes, 'pending_ack' => $pending]);
 }
@@ -131,12 +135,34 @@ fail('Unknown action', 400);
 
 // ---------------------------------------------------------------------------------------------------------------
 function current_policy_arr($conn, $wsId) { return model_policy(row($conn, "SELECT TOP 1 * FROM dbo.scheduling_policies WHERE workspace_id = ? ORDER BY is_current DESC, version DESC", [$wsId]) ?: []); }
+
+/**
+ * CHG-06. A committed change is awaiting acknowledgement when the commit recorded that one was
+ * required (`ack_required`, written from `require_ack_inside_horizon`) and nobody has given it.
+ */
+function awaiting_ack(array $r) {
+    return (int)($r['ack_required'] ?? 0) === 1 && $r['acknowledged_at'] === null
+        && in_array($r['decision'], ['accepted', 'edited'], true);
+}
+/** Change shape + the acknowledgement state, which engine/proposals.php's change_shape() does not carry. */
+function change_x($conn, array $r, $wsId) {
+    $s = change_shape($conn, $r, $wsId);
+    $s['ack_required'] = (int)($r['ack_required'] ?? 0) === 1;
+    $s['awaiting_ack'] = awaiting_ack($r);
+    return $s;
+}
+function load_changes_x($conn, $wsId, $proposalId) {
+    return array_map(fn($r) => change_x($conn, $r, $wsId), rows($conn, "SELECT * FROM dbo.change_proposals WHERE proposal_id = ? AND workspace_id = ? ORDER BY sort_order, id", [$proposalId, $wsId]));
+}
 function proposal_payload($conn, $wsId, array $p) {
-    $all = load_changes($conn, $wsId, (int)$p['id']);
+    $all = load_changes_x($conn, $wsId, (int)$p['id']);
     $shape = proposal_shape($conn, $p, $wsId);
+    $awaiting = array_values(array_filter($all, fn($c) => $c['awaiting_ack']));
+    $shape['counts']['awaiting_ack'] = count($awaiting);
     return ['proposal' => $shape,
         'changes' => array_values(array_filter($all, fn($c) => in_array($c['guardrail_status'], ['ok', 'needs_approval']))),
         'held' => array_values(array_filter($all, fn($c) => !in_array($c['guardrail_status'], ['ok', 'needs_approval']))),
+        'awaiting_ack' => $awaiting,
         'guardrails' => guardrail_descriptions(current_policy_arr($conn, $wsId)),
         'counts' => $shape['counts'],
         'comments' => rows($conn, "SELECT id, change_proposal_id, author_name, body, created_at FROM dbo.item_comments WHERE change_proposal_id IN (SELECT id FROM dbo.change_proposals WHERE proposal_id = ?) ORDER BY created_at", [(int)$p['id']])];
@@ -168,40 +194,5 @@ function decide_change($conn, $wsId, array $c, $decision, $reason) {
     audit($conn, $wsId, $decision === 'accepted' ? 'approve' : 'reject', 'change_proposal', (int)$c['id'], ['decision' => $c['decision']], ['decision' => $decision, 'guardrail_status' => $c['guardrail_status']], $c['headline'], $reason ?: null);
 }
 
-/** Materialise accepted changes into a new committed version (CHG-05/06), notify, log, roll up stability. */
-function commit_proposal($conn, $wsId, array $p) {
-    global $userId, $userName;
-    $accepted = rows($conn, "SELECT * FROM dbo.change_proposals WHERE proposal_id = ? AND decision IN ('accepted','edited') ORDER BY sort_order", [(int)$p['id']]);
-    $model = build_model($conn, $wsId);
-    $vid = null; $movedDays = 0; $insideCount = 0;
-    if ($accepted) {
-        $changes = array_map(fn($r) => ['work_item_id' => (int)$r['work_item_id'], 'kind' => $r['kind'], 'before' => json_col($r['before_json'], null), 'after' => json_col($r['after_json'], null)], $accepted);
-        $vid = new_committed_version($conn, $wsId, $model, function (&$rows) use ($changes) { foreach ($changes as $c) apply_change_to_rows($rows, $c); },
-            ['engine' => $p['engine'] ?: 'heuristic', 'notes' => 'Committed from proposal #' . $p['id'] . ' (' . count($accepted) . ' change' . (count($accepted) === 1 ? '' : 's') . ')']);
-        $wk = week_start($model['today']);
-        $items = load_item_map($conn, $wsId);
-        foreach ($accepted as $r) {
-            $before = json_col($r['before_json'], null); $after = json_col($r['after_json'], null);
-            $week = week_start(($after['from'] ?? null) ?: ($before['from'] ?? $model['today']));
-            $pids = array_unique(array_filter([(int)($before['person_id'] ?? 0), (int)($after['person_id'] ?? 0)]));
-            $days = (float)$r['stability_cost_days']; $movedDays += $days; if ((int)$r['inside_freeze']) $insideCount++;
-            foreach ($pids as $pid) {
-                insert($conn, 'person_change_log', ['workspace_id' => $wsId, 'person_id' => $pid, 'work_item_id' => $r['work_item_id'], 'week_start' => $week, 'inside_freeze' => (int)$r['inside_freeze'], 'assignment_days' => $days / count($pids), 'reason' => mb_substr((string)$r['reason'], 0, 300), 'change_proposal_id' => (int)$r['id']]);
-            }
-            $ref = $items[(int)$r['work_item_id']]['ref'] ?? '';
-            foreach (csv_ids($r['affected_person_ids']) as $pid) notify_person($conn, $wsId, $pid, 'change_committed', $r['headline'], $r['reason'], "/changes/{$p['id']}", (int)$r['inside_freeze']);
-            // requester of a displaced / delayed item (13.1 incident handling)
-            if (in_array($r['kind'], ['move', 'remove', 'reassign'], true) && $r['work_item_id']) {
-                $creator = scalar($conn, "SELECT created_by FROM dbo.work_items WHERE id = ?", [(int)$r['work_item_id']]);
-                if ($creator) notify($conn, $wsId, (int)$creator, 'change_committed', "$ref: {$r['headline']}", $r['reason'], "/items/$ref", 0);
-            }
-        }
-    }
-    update($conn, 'proposals', ['status' => 'decided', 'decided_at' => date('Y-m-d H:i:s')], 'id = ?', [(int)$p['id']]);
-    if ($p['candidate_plan_version_id']) update($conn, 'plan_versions', ['status' => 'discarded'], 'id = ? AND status = ?', [(int)$p['candidate_plan_version_id'], 'proposed']);
-    $model2 = build_model($conn, $wsId);
-    $stab = rollup_stability_week($conn, $wsId, $model2);
-    audit($conn, $wsId, 'commit', 'proposal', (int)$p['id'], ['status' => 'open'], ['status' => 'decided', 'accepted' => count($accepted), 'plan_version_id' => $vid, 'moved_days' => $movedDays, 'inside_freeze' => $insideCount], "Proposal #{$p['id']}");
-    $newVersion = $vid ? row($conn, "SELECT id, version_no, status, committed_at, committed_through FROM dbo.plan_versions WHERE id = ?", [$vid]) : null;
-    return ['proposal' => proposal_shape($conn, row($conn, "SELECT * FROM dbo.proposals WHERE id = ?", [(int)$p['id']]), $wsId), 'plan_version' => $newVersion, 'committed' => count($accepted), 'stability_week' => $stab];
-}
+// commit_proposal() lives in engine/commit.php: replan.php's nightly auto-apply (CHG-07) needs
+// the same materialisation, and duplicating it would be two things to keep in step.

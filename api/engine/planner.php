@@ -66,13 +66,21 @@ function heuristic_plan(array $model, array $opts = []) {
         if ($tw > 0) $fixedShare[$iid] = min(1.0, ($fixedWeight[$iid] ?? 0) / $tw);
     }
 
-    // Order: interrupt items first (by priority), then items by priority desc; small new items are
-    // placed after the kept ones so they fill remaining gaps rather than taking slots from committed work.
+    // Order: interrupt items first (by priority), then everything already on the committed plan, then
+    // incoming work. STAB-10: within the incoming work, items the policy counts as *small* go first.
+    //
+    // `small` is model.php's reading of the policy value `small_fill_threshold_days` — an item whose
+    // remaining effort is at or below it. Taking the small ones first is what makes them fill the gaps
+    // that the kept committed work leaves behind: a short run fits between two booked blocks, where a
+    // large item would have to push something to find a contiguous window. Before this, every new item
+    // was ordered by priority alone, so the threshold was computed and never read and a Large new item
+    // was treated exactly like a Small one.
     $items = array_values(array_filter($model['items'], fn($i) => $i['schedulable'] && !isset($preloaded[$i['id']])));
     usort($items, function ($a, $b) use ($committedByItem) {
         if (($a['policy'] === 'interrupt') !== ($b['policy'] === 'interrupt')) return $a['policy'] === 'interrupt' ? -1 : 1;
         $ka = isset($committedByItem[$a['id']]) ? 0 : 1; $kb = isset($committedByItem[$b['id']]) ? 0 : 1;
         if ($ka !== $kb) return $ka - $kb;
+        if ($ka === 1 && !empty($a['small']) !== !empty($b['small'])) return !empty($a['small']) ? -1 : 1;
         if ($a['priority'] != $b['priority']) return $b['priority'] <=> $a['priority'];
         return $a['id'] <=> $b['id'];
     });

@@ -80,6 +80,22 @@ function webhook_payload($conn, $wsId, $event, array $a) {
 }
 
 /**
+ * Start the delivery cursor at the present moment.
+ *
+ * Called when a workspace gains its first subscription. Without it the cursor is only
+ * created by the first scan, so every event between subscribing and that first dispatch
+ * was skipped in silence — exactly the events a new subscriber is most likely to be
+ * waiting for. Starting from "now" is the right default either way: a new subscriber
+ * wants what happens next, not a replay of the workspace's history.
+ */
+function webhook_ensure_cursor($conn, $wsId) {
+    if (row($conn, "SELECT workspace_id FROM dbo.webhook_cursor WHERE workspace_id = ?", [$wsId])) return false;
+    $latest = (int)(scalar($conn, "SELECT ISNULL(MAX(id), 0) FROM dbo.audit_events WHERE workspace_id = ?", [$wsId]) ?? 0);
+    q($conn, "INSERT INTO dbo.webhook_cursor (workspace_id, last_audit_id) VALUES (?, ?)", [$wsId, $latest]);
+    return true;
+}
+
+/**
  * Turn audit rows newer than the cursor into queued deliveries.
  * Returns ['scanned' => n, 'queued' => n, 'last_audit_id' => id].
  */

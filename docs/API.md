@@ -35,8 +35,13 @@ Assignment   {id, plan_version_id, work_item_id, ref, title, type_colour, type_n
               allocation_pct, state, role_label, locked, fixed_person, fixed_dates, is_reserve, note}
 Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,ref,title}, kind, headline, before:{label,person_id,from,to,allocation_pct},
               after:{...}, reason, stability_cost_days, inside_freeze, impact_chips:[{label,tone}], affected_people:[Person-lite],
-              guardrail_status, guardrail_reason, decision, decided_by_name, decided_at, decision_reason, acknowledged_at}
+              guardrail_status, guardrail_reason, decision, decided_by_name, decided_at, decision_reason, acknowledged_at,
+              ack_required, awaiting_ack}
 ```
+
+`ack_required` is written at commit time from the policy switch `require_ack_inside_horizon`
+(CHG-06); `awaiting_ack` is `ack_required && !acknowledged_at` on an accepted or edited change.
+Both are added by `changes.php`; other endpoints' Change shapes omit them.
 
 ## auth.php  (exists)
 `list_dev_users`, `dev_login{user_id}`, `oidc_login{id_token}`, `me`.
@@ -58,10 +63,10 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 - `list` → `{people:[Person + {load_pct (next 4 weeks, from committed plan), skills:[{skill_id, proficiency}], on_rota_weeks:[...]}], teams:[{id,name,lead_person_id}]}`
 - `get{id}` → `{person, skills:[{skill_id,name,category,proficiency,endorsed_by:[names],certified,development_target,pairing_enabled,single_point (bool: this person is the only one ≥3)}], assignments:[Assignment (committed plan, from today)], availability:[...], rota:[week_start...], stats:{load_pct_4w, concurrent_now, concurrent_max, changes_8w, team_median_changes_8w, next_rota_week}, change_history:[{week_start, changes, inside_freeze}] (8 weeks), stability_note}`
 - `save{id?, ...Person fields, team_id}` (team_lead; a team_member may save only their own person) → `{person}`
-- `deactivate{id}` (admin): sets active=0; flags future assignments → returns `{flagged_assignments}`.
+- `deactivate{id}` (admin): sets active=0; flags future assignments → returns `{flagged_assignments}` and, when there were any, `urgent_replan` (STAB-05; scoped to everyone still active plus the leaver, so their work can be offered to somebody else).
 - `set_skill{person_id, skill_id, proficiency, certified?, development_target?, pairing_enabled?}` (own or team_lead)
 - `endorse_skill{person_id, skill_id}` (team_lead) appends endorser.
-- `add_availability{person_id, from_date, to_date, type, fraction?}` (own or team_lead) → recompute capacity_days for the range; add trigger `leave` (class urgent if from_date within freeze horizon, else batched). NEVER store a reason (ADM-05).
+- `add_availability{person_id, from_date, to_date, type, fraction?}` (own or team_lead) → recompute capacity_days for the range; add trigger `leave` (class urgent if from_date within freeze horizon, else batched). NEVER store a reason (ADM-05). An urgent trigger also starts a scoped replan cycle immediately (STAB-05) and the reply carries `urgent_replan:{proposal_id, changes, held, scope_person_ids}` (or `{skipped}` when there was nothing to replan). A failure there never fails this request.
 - `delete_availability{id}` (409 if source != manual — imported records can be corrected not deleted, TEAM-07)
 - `set_rota{week_start, person_id}` / `clear_rota{week_start, person_id}` (team_lead) → recompute capacity.
 - `capacity{person_id?, from, to}` → `{days:[{person_id, day, available_hours, reserve_hours, assigned_hours}]}`
@@ -84,7 +89,7 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
    tasks:[{id,title,size_stamp,effort_days,skill_name,sequence,status}], tasks_rollup_days,
    assignments:[Assignment (committed plan)], comments:[{id,author_name,body,created_at}],
    readiness:{items:[{key,label,done}], ready:bool}, history_count}`
-- `create{title, work_type_id, size_stamp?, custom_effort_days?, summary?, tags?, requested_by?, sponsor?, needed_by?, earliest_start?, skills:[{skill_id,min_proficiency}]?, benefit?:{type,annual_value,confidence,realisation_from,owner_name}, severity?}` (requester) → allocates ref from ref_sequences (PIP-02), status per policy (needs_estimate if requires_estimate else needs_benefit if requires_benefit else ready; interrupt types → ready with priority from severity), computes priority, audit, trigger intake (urgent for interrupt types). → `{item}`
+- `create{title, work_type_id, size_stamp?, custom_effort_days?, summary?, tags?, requested_by?, sponsor?, needed_by?, earliest_start?, skills:[{skill_id,min_proficiency}]?, benefit?:{type,annual_value,confidence,realisation_from,owner_name}, severity?}` (requester) → allocates ref from ref_sequences (PIP-02), status per policy (needs_estimate if requires_estimate else needs_benefit if requires_benefit else ready; interrupt types → ready with priority from severity), computes priority, audit, trigger intake (urgent for interrupt types). → `{item}`, plus `urgent_replan` for an interrupt type (STAB-05: an incident starts a scoped cycle immediately instead of waiting for the nightly run; a failure there never fails the intake).
 - `update{id, ...fields}` (requester on own draft; team_lead otherwise) → history via audit with before/after per field (PIP-11).
 - `set_status{id, status, reason?}` validates transitions against type policy (PIP-04): e.g. ready requires readiness complete; delivered requires actual_effort_days → sets delivered_at, trigger `delivered`; blocked/cancelled OK any time. 409 with message when invalid.
 - `history{id}` → `{events:[{occurred_at, actor_name, action, field?, before, after, reason}]}` (from audit_events entity 'work_item' + estimates/benefits/assignments touching the item)
@@ -92,6 +97,11 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 - `add_dependency{from_id, to_id, type}` (cycle detection → 409), `remove_dependency{id}`
 - `set_skill_requirement{id, skill_id, min_proficiency, effort_days?, note?}` / `remove_skill_requirement{id, skill_id}`
 - `add_comment{id, body}` → `{comment}`; @mentions of person names create notifications.
+- `request_estimate{id, note?}` (team_lead) → `{requested:true, notified:int, to:'owner'|'team_lead'|'nobody', item}`; raises
+  `estimate_requested` (NOT-01) to the item's owner, or to every team lead when it has none. 409 when the item is
+  delivered or cancelled. `notified` counts the rows actually written, so a recipient who has turned the kind off
+  in-app is not reported as told. The same notification is raised automatically whenever `set_status` or `create`
+  leaves an item in `needs_estimate`.
 - `override_priority{id, points?|pinned_score?, reason, expires}` (delivery_lead) / `clear_override{id}`; recompute score.
 - `log_progress{id, progress_pct, effort_days?, note?}` (team_member) → progress_logs + item progress_pct.
 - `similar{id}` → `{items:[{ref,title,size_stamp,estimated_days,actual_days,delivered_at,estimate_id}]}` (same size + overlapping skills, delivered) (EST-08)
@@ -123,13 +133,32 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 - `preview{changes:[...hypothetical: add_item{work_item_id}, remove_item, person_away{person_id,from,to}]}` → heuristic what-if within 2 s → `{summary_before, summary_after, changes:[Change-lite]}` (SCH-08, SCH-11 lite)
 - `scenario_save{name, ...preview payload}` → plan_versions status scenario; `scenarios` list; `scenario_adopt{id}` → becomes a proposal.
 - `run_nightly` (CLI or cron_key) — same as propose kind nightly, plus priority recompute + capacity derivation + stability_weeks roll-up. Also `cron.php` CLI wrapper.
-- `watch_list` → `{items:[{kind:'skills_gap'|'no_estimate'|'over_capacity'|'late'|'single_point', title, body, suggestion, link, tone}]}` (SCH-05, edge cases 8.13)
+  `steps` additionally carries:
+  `auto_apply:{enabled, applied, leftover, plan_version_id?, skipped?, blocked?}` (CHG-07 — when `auto_apply_outside_horizon`
+  is on, pending changes that pass every guardrail and fall wholly outside the freeze horizon are accepted and
+  committed without review, each audited with action `auto_apply`; a proposal below `min_improvement_pct` is never
+  auto-applied (STAB-04), and anything left over is re-proposed so it still reaches a reviewer);
+  `realisation_due:{due, notified, already_told}` (NOT-01 — a benefit whose `realisation_from` has passed with no
+  confirmed realisation, once per benefit ever, to the benefit owner or else to the delivery leads);
+  `watch_list_notices:{entries, notified, repeats_suppressed}` (NOT-01 — a watch-list entry naming a person, or an
+  item they own, at most once per entry per week).
+- `watch_list` → `{items:[{kind:'skills_gap'|'no_estimate'|'over_capacity'|'late'|'single_point'|'reestimate', title, body, suggestion, link, tone}]}` (SCH-05, edge cases 8.13)
+  `reestimate` entries (EST-09) are added by this endpoint only, from `reestimate_class_threshold`; `overview.php`
+  builds its watch list from `engine/watchlist.php` and does not carry them.
 
 ## changes.php — proposals and review (CHG-*)
-- `current` → `{proposal:{id, kind, generated_at, status, triggers:[{type,label}], summary_before, summary_after, improvement_pct, below_threshold, carried_over_note, budget:{used, limit, per_person:[{person, used}]}}, changes:[Change], held:[Change], guardrails:[{key,label,detail,enabled}], counts:{proposed, held, pending}}` — the open proposal (or the latest decided one with `status`).
+- `current` → `{proposal:{id, kind, generated_at, status, triggers:[{type,label}], summary_before, summary_after, improvement_pct, below_threshold, carried_over_note, budget:{used, limit, per_person:[{person, used}]}}, changes:[Change], held:[Change], awaiting_ack:[Change], guardrails:[{key,label,detail,enabled}], counts:{proposed, held, pending, awaiting_ack}}` — the open proposal (or the latest decided one with `status`).
+  `awaiting_ack` lists the committed changes whose affected person has not acknowledged them yet (CHG-06); it is
+  empty when `require_ack_inside_horizon` is off, because the switch is read at commit time and recorded per change.
 - `list{status?}` → past proposals; `get{id}`.
 - `decide{change_id, decision:'accepted'|'rejected', reason?}` (delivery_lead): a change with guardrail_status needs_approval requires `reason`; held_budget/held_threshold require admin (override) + reason else 409 with the guardrail message. Accepting applies the change into a new committed plan version (or accumulates: see `commit`).
    Implementation: decisions are recorded on the change; `commit{proposal_id}` (delivery_lead) materialises all accepted changes into a new committed plan version (copy current committed → apply each accepted change's after_json), marks proposal decided, notifies affected people (kind change_committed; urgent if inside_freeze), writes person_change_log + stability_weeks, audit. `decide` returns `{change, proposal_counts}`; the client calls `commit` when done ("Accept N selected" = decide each then commit).
+   `commit` also: sets `ack_required` on every accepted inside-freeze change when `require_ack_inside_horizon` is on (CHG-06);
+   raises `item_assigned` (NOT-01) for anyone the commit gives work they did not already hold; and refuses with **409**
+   `{message:"Re-estimate required before entering the committed window: …", reestimate_blocked:[{change_id, work_item_id, ref, estimate_class, threshold}]}`
+   when `reestimate_class_threshold` is set and an accepted change would move an item with a worse estimate class into
+   the committed window (EST-09). Returns `{proposal, plan_version, committed, stability_week, ack_required, items_assigned}`.
+   The implementation is `api/engine/commit.php`, shared with replan.php's nightly auto-apply.
 - `accept_all_passing{proposal_id}` → decides accepted for every pending change with guardrail_status ok, then commits.
 - `reject_all{proposal_id}`.
 - `edit{change_id, after:{person_id?, from, to, allocation_pct?}, reason}` → recost stability (engine), decision 'edited' + accepted.
@@ -145,7 +174,16 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 - `export_csv{report}` → `{csv}`
 
 ## notifications.php
-- `list` → `{notifications:[...], unread}`; `mark_read{id|all}`; `prefs` / `save_prefs{kind, in_app, push, email_digest, teams, digest}`
+- `list` → `{notifications:[{id, kind, title, body, link, urgent, channel, created_at, read_at, read}], unread}`; `mark_read{id|all}`; `prefs` / `save_prefs{kind, in_app, push, email_digest, teams, digest}`
+- Seven kinds (NOT-01), all of them generated: `change_proposed` and `approval_requested` by `replan.php propose`;
+  `change_committed` and `item_assigned` by `changes.php commit`; `estimate_requested` by `work_items.php`
+  (`request_estimate`, or any move into `needs_estimate`); `realisation_due` and `watch_list` by `replan.php run_nightly`.
+- `lib.php notify()` reads `dbo.notification_prefs` before writing (NOT-02). The row is the in-app copy, so in-app is
+  the floor: **with in-app off for that kind nothing is written at all**, and `notify()` returns null. `channel` records
+  the route the user's switches select — `digest` when an email digest on a daily or weekly cadence will carry it,
+  `teams` when Teams is on, otherwise `in_app`. An urgent notification never rides a digest and stays `in_app` (NOT-03).
+  Push is never claimed: there is no APNs/FCM sender in this build (MOB-04). A user with no preference row for a kind
+  gets the documented default (in-app on), which is the same default `prefs` shows.
 
 ## audit.php
 - `list{entity?, q?, from?, to?, limit?, offset?}` (admin) → `{events, total}`; `export_csv`.
@@ -153,8 +191,14 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 ## Engine library (api/engine/) — pure PHP, no HTTP
 - `capacity.php`: `derive_capacity($conn,$wsId,$from,$to,$personIds=null)` writes capacity_days.
 - `priority.php`: `compute_priority_scores($conn,$wsId)` implements section 8.4 (value 40 / urgency 25 / risk 15 / leverage 10 / age 10, confidence scale, P90 normalisation, severity for interrupt types, override, nightly rescale so top ≈ 100). Stores priority_score + priority_terms JSON `{value:{input,normalised,weight,contribution}, urgency:{...}, risk:{...}, leverage:{...}, age:{...}, override:{...}, raw_total, scaled}`.
+  For an **interrupt** item (BEN-04) the five planned terms are marked `skipped:'interrupt policy'` with a zero
+  contribution, and the score comes from `severity:{input:'P1', label, normalised, weight:100, contribution}`. The same
+  contribution is republished as the `urgency` term with `alias_of:'severity'`, so a breakdown that renders only the
+  five planned terms reproduces the score instead of drawing five empty bars; anything summing the terms must skip a
+  term carrying `alias_of`.
 - `model.php`: `build_model($conn,$wsId,$opts)` → arrays: people (capacity per day incl. reserve, skills, maxConcurrent, minFocus, prefs), items (remaining effort per policy planAt, granularity, required skills, deps, earliest start, needed_by, priority, interrupt flag), committed assignments, policy, windows.
-- `planner.php`: `heuristic_plan($model, $opts)` list scheduling per 8.9 (respects all hard constraints in 8.5; fills gaps for small work first (STAB-10); never moves committed/locked; extend-in-place for upward re-estimates (STAB-09); incidents consume reserve then displace lowest-priority planned work of that person (SCH-10); `scope_person_ids` for urgent cycles) → candidate assignments + unscheduled reasons + objective terms (8.6).
+- `commit.php`: `commit_proposal($conn,$wsId,$proposal,$opts)` materialises accepted changes into a new committed version (CHG-05/06, EST-09, NOT-01); `auto_apply_outside_horizon($conn,$wsId,$proposalId)` is the nightly CHG-07 pass; `reestimate_blocked_changes(...)` is the EST-09 gate. Shared by changes.php and replan.php.
+- `planner.php`: `heuristic_plan($model, $opts)` list scheduling per 8.9 (respects all hard constraints in 8.5; incoming work the policy counts as small — `remaining_days <= small_fill_threshold_days` — is queued ahead of larger incoming work so it fills the gaps the kept committed work leaves (STAB-10); never moves committed/locked; extend-in-place for upward re-estimates (STAB-09); incidents consume reserve then displace lowest-priority planned work of that person (SCH-10); `scope_person_ids` for urgent cycles) → candidate assignments + unscheduled reasons + objective terms (8.6).
 - `diff.php`: `diff_plans($committed,$candidate,$model)` → list of changes with kind, before/after, stability_cost_days (assignment-days moved inside committed+planned windows; indicative = 0), inside_freeze, affected people; `objective_delta`.
 - `guardrails.php`: `apply_guardrails($changes,$proposalImprovementPct,$policy)` → guardrail_status per change (needs_approval inside freeze; held_budget when a person's moved days in a week exceed change_budget_days; held_threshold when improvement < min_improvement_pct) + budget usage.
 - `explain.php`: `explain_change($change,$model,$triggers)` → headline + plain-English reason + impact chips (e.g. "Stability cost 2 assignment-days", "Due date unchanged", "Inside freeze horizon · needs your approval", "Skills risk reduced", "Benefit realised 1 week earlier").
