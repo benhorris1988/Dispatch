@@ -468,7 +468,7 @@ class _ChangesScreenState extends State<ChangesScreen> {
           ),
         ),
         const SizedBox(height: Sp.lg),
-        Panel(title: 'Before and after', child: _beforeAfterTable(p)),
+        Panel(title: 'Before and after', child: SchSummaryTable(before: p.summaryBefore, after: p.summaryAfter)),
         const SizedBox(height: Sp.lg),
         Panel(
           title: 'Guardrails applied',
@@ -508,122 +508,6 @@ class _ChangesScreenState extends State<ChangesScreen> {
         ),
       ],
     );
-  }
-
-  Widget _beforeAfterTable(SchProposal p) {
-    final before = p.summaryBefore;
-    final after = p.summaryAfter;
-    String num(Map<String, dynamic> m, String key) {
-      final v = asDouble(schSummary(m, key));
-      if (v == null) return '—';
-      return v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
-    }
-
-    final rows = <BeforeAfterRow>[
-      BeforeAfterRow('Items late against due date', num(before, 'late_items'), num(after, 'late_items')),
-      BeforeAfterRow(
-        'Value landing this quarter',
-        fmtMoneyK(asDouble(schSummary(before, 'value_quarter'))),
-        fmtMoneyK(asDouble(schSummary(after, 'value_quarter'))),
-        improvementIsDown: false,
-      ),
-      BeforeAfterRow('People over 100%', num(before, 'people_over_100'), num(after, 'people_over_100')),
-      BeforeAfterRow('Single-skill dependencies', num(before, 'single_skill_deps'), num(after, 'single_skill_deps')),
-      BeforeAfterRow(
-        'Assignment-days changed',
-        '—',
-        '${num(after, 'assignment_days_changed')} of ${num(after, 'total_assignment_days')}',
-        improvementIsDown: true,
-      ),
-      BeforeAfterRow(
-        'Plan stability (4 wk)',
-        fmtPct(asDouble(schSummary(before, 'stability_index'))),
-        fmtPct(asDouble(schSummary(after, 'stability_index'))),
-        improvementIsDown: false,
-      ),
-    ];
-
-    return Column(
-      children: [
-        Row(
-          children: [
-            const Expanded(flex: 5, child: SizedBox()),
-            const SizedBox(width: Sp.sm),
-            Expanded(flex: 2, child: Text('Now', textAlign: TextAlign.right, style: context.text.labelMedium?.copyWith(color: context.mutedColor))),
-            const SizedBox(width: Sp.sm),
-            Expanded(flex: 3, child: Text('Proposed', textAlign: TextAlign.right, style: context.text.labelMedium?.copyWith(color: context.mutedColor))),
-          ],
-        ),
-        const SizedBox(height: Sp.sm),
-        for (final r in rows) _beforeAfterRow(r, before, after),
-      ],
-    );
-  }
-
-  Widget _beforeAfterRow(BeforeAfterRow r, Map<String, dynamic> before, Map<String, dynamic> after) {
-    final b = _numeric(r.before);
-    final a = _numeric(r.after);
-    Color? tone;
-    String direction = '';
-    if (b != null && a != null && a != b) {
-      final better = r.improvementIsDown ? a < b : a > b;
-      tone = better ? DispatchColors.green : DispatchColors.orange;
-      direction = better ? ' (better)' : ' (worse)';
-    }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.sm),
-      child: Semantics(
-        label: '${r.label}: now ${r.before}, proposed ${r.after}$direction',
-        excludeSemantics: true,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(flex: 5, child: Text(r.label, style: context.text.bodyMedium)),
-            const SizedBox(width: Sp.sm),
-            Expanded(
-              flex: 2,
-              child: Text(
-                r.before,
-                textAlign: TextAlign.right,
-                maxLines: 2,
-                style: DispatchTheme.numeric(size: 13, color: context.mutedColor),
-              ),
-            ),
-            const SizedBox(width: Sp.sm),
-            Expanded(
-              flex: 3,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (tone != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 3, right: 2),
-                      child: Icon(tone == DispatchColors.green ? Icons.arrow_downward : Icons.arrow_upward, size: 12, color: tone),
-                    ),
-                  Flexible(
-                    child: Text(
-                      r.after,
-                      textAlign: TextAlign.right,
-                      maxLines: 2,
-                      style: DispatchTheme.numeric(size: 13, color: tone ?? context.inkColor),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  double? _numeric(String s) {
-    final cleaned = s.replaceAll(RegExp(r'[^0-9.\-]'), '');
-    if (cleaned.isEmpty) return null;
-    final v = double.tryParse(cleaned);
-    if (v == null) return null;
-    return s.contains('k') ? v * 1000 : v;
   }
 
   String _triggerTone(String type) => switch (type) {

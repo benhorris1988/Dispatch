@@ -11,8 +11,10 @@ import '../shell/breaks.dart';
 import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
+import '../widgets/adm_metrics.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/widgets.dart';
+import 'parts/adm_rota_panel.dart';
 
 /// Team & skills (TEAM-01, TEAM-04, spec 9.4.6).
 ///
@@ -51,7 +53,9 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
     try {
       final results = await Future.wait([
         Api.post('skills.php', 'matrix'),
-        Api.post('people.php', 'list'),
+        // ADM-03: deactivated people are shown distinctly rather than hidden, so
+        // a lead can see who has left and that their work still needs moving.
+        Api.post('people.php', 'list', {'include_inactive': true}),
       ]);
       final m = _Matrix.fromJson(results[0]);
       final people = asList(results[1]['people'], Person.fromJson);
@@ -63,12 +67,16 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
           rota[id] = (raw['on_rota_weeks'] as List? ?? const []).map((e) => asDate(e)).whereType<DateTime>().toList();
         }
       }
+      // The demo clock can differ from the browser's (config `fake_today`), so
+      // the rota weeks are anchored on the window the API reports.
+      final serverToday = asDate(asMap(results[1]['window'])['from']);
       if (!mounted) return;
       setState(() {
         _matrix = m;
         _people = people;
         _teams = teams;
         _rota = rota;
+        _today = serverToday ?? DateTime.now();
         _loading = false;
       });
     } on ApiException catch (e) {
@@ -81,6 +89,7 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
   }
 
   Map<int, List<DateTime>> _rota = const {};
+  DateTime _today = DateTime.now();
 
   bool _canEditSkill(Session s, int personId) => s.isTeamLead || s.user?.personId == personId;
 
@@ -154,7 +163,11 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
   }
 
   Future<void> _addLeave({int? personId}) async {
-    final saved = await showTmAddLeave(context, people: [for (final p in _people) (id: p.id, name: p.name)], personId: personId);
+    final saved = await showTmAddLeave(
+      context,
+      people: [for (final p in _people.where((p) => p.active)) (id: p.id, name: p.name)],
+      personId: personId,
+    );
     if (saved) await _load();
   }
 
@@ -168,6 +181,7 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
   @override
   Widget build(BuildContext context) {
     final session = context.watch<Session>();
+    final policy = context.watch<WorkspaceConfig>().policy;
     final m = _matrix;
 
     final actions = <Widget>[
@@ -200,12 +214,22 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
           const EmptyState(icon: Icons.groups_outlined, title: 'No team yet', message: 'Add people to the workspace to see the skills matrix.')
         else
           switch (_tab) {
-            1 => _PeopleTab(people: _people),
+            1 => _PeopleTab(people: _people, policy: policy),
             2 => _SkillsTab(matrix: m, canManage: session.isAdmin, onChanged: _load),
-            3 => _AvailabilityTab(matrix: m, people: _people, rota: _rota, canEdit: session.isTeamLead, onAddLeave: () => _addLeave()),
+            3 => _AvailabilityTab(
+                matrix: m,
+                people: _people,
+                rota: _rota,
+                today: _today,
+                policy: policy,
+                canEdit: session.isTeamLead,
+                onAddLeave: () => _addLeave(),
+                onReload: _load,
+              ),
             _ => _MatrixTab(
                 matrix: m,
                 session: session,
+                policy: policy,
                 canEdit: (pid) => _canEditSkill(session, pid),
                 onCellTap: (p, s) => _pickLevel(m, p, s),
                 onPairing: _togglePairing,
@@ -219,9 +243,17 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
 // ─── Matrix tab ───────────────────────────────────────────────────────────
 
 class _MatrixTab extends StatelessWidget {
-  const _MatrixTab({required this.matrix, required this.session, required this.canEdit, required this.onCellTap, required this.onPairing});
+  const _MatrixTab({
+    required this.matrix,
+    required this.session,
+    required this.policy,
+    required this.canEdit,
+    required this.onCellTap,
+    required this.onPairing,
+  });
   final _Matrix matrix;
   final Session session;
+  final Policy policy;
   final bool Function(int personId) canEdit;
   final void Function(_MatrixPerson, _SkillRow) onCellTap;
   final void Function(_Development, bool) onPairing;
@@ -231,7 +263,17 @@ class _MatrixTab extends StatelessWidget {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       _SummaryStrip(matrix: matrix),
       const SizedBox(height: Sp.lg),
-      Panel(padding: EdgeInsets.zero, child: _MatrixTable(matrix: matrix, canEdit: canEdit, onCellTap: onCellTap)),
+      TmMetricPanel(
+        title: 'Skills matrix',
+        subtitle: 'Proficiency 0–4',
+        // The table carries two metrics: the coverage footers and the load
+        // column, so both definitions sit behind the one info icon.
+        definition: '${AdmMetrics.skillsMatrix}\n\n${AdmMetrics.coverage}\n\n'
+            '${AdmMetrics.load(targetMin: policy.targetLoadMin, targetMax: policy.targetLoadMax)}',
+        padding: EdgeInsets.zero,
+        dividerAfterHeader: true,
+        child: _MatrixTable(matrix: matrix, canEdit: canEdit, onCellTap: onCellTap),
+      ),
       const SizedBox(height: Sp.lg),
       LayoutBuilder(builder: (context, c) {
         final panels = [
@@ -512,8 +554,9 @@ class _AvailabilityPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Panel(
+    return TmMetricPanel(
       title: 'Availability, next 4 weeks',
+      definition: AdmMetrics.availability,
       child: matrix.availability.isEmpty
           ? const EmptyState(
               icon: Icons.event_available_outlined,
@@ -553,9 +596,10 @@ class _DevelopmentPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Panel(
+    return TmMetricPanel(
       title: 'Development plans',
       subtitle: 'Skills people want to grow',
+      definition: AdmMetrics.development,
       child: matrix.development.isEmpty
           ? const EmptyState(icon: Icons.school_outlined, title: 'No development targets', message: 'Set a target level on a person to plan pairing.', compact: true)
           : Column(children: [
@@ -596,9 +640,10 @@ class _DemandSupplyPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rows = matrix.demandVsSupply;
-    return Panel(
+    return TmMetricPanel(
       title: 'Skill demand vs supply',
       subtitle: 'Person-days, next 6 weeks',
+      definition: AdmMetrics.demandVsSupply,
       child: rows.isEmpty
           ? const EmptyState(icon: Icons.bar_chart_rounded, title: 'Nothing to compare', message: 'No skill demand in the next six weeks.', compact: true)
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -631,52 +676,85 @@ class _DemandSupplyPanel extends StatelessWidget {
 // ─── People tab ───────────────────────────────────────────────────────────
 
 class _PeopleTab extends StatelessWidget {
-  const _PeopleTab({required this.people});
+  const _PeopleTab({required this.people, required this.policy});
   final List<Person> people;
+  final Policy policy;
 
   @override
   Widget build(BuildContext context) {
     if (people.isEmpty) {
       return const EmptyState(icon: Icons.groups_outlined, title: 'No people yet', message: 'Add someone to the team to start planning.');
     }
-    return LayoutBuilder(builder: (context, c) {
-      final cols = (c.maxWidth / 340).floor().clamp(1, 4);
-      return Wrap(
-        spacing: Sp.lg,
-        runSpacing: Sp.lg,
-        children: [
-          for (final p in people)
-            SizedBox(
-              width: cols == 1 ? c.maxWidth : (c.maxWidth - Sp.lg * (cols - 1)) / cols,
-              child: DispatchCard(
-                onTap: () => context.go(Routes.person(p.id)),
-                padding: const EdgeInsets.all(Sp.lg),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                  Row(children: [
-                    PersonAvatar.person(p, size: 40),
-                    const SizedBox(width: Sp.md),
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                        Text(p.name, style: context.text.titleMedium, overflow: TextOverflow.ellipsis),
-                        Text(dotJoin([p.roleTitle, p.teamName]), style: context.text.bodySmall?.copyWith(color: context.mutedColor), overflow: TextOverflow.ellipsis),
+    // ADM-03: deactivated people stay in the list, after the active ones and
+    // visibly different, so their flagged assignments are not forgotten.
+    final active = people.where((p) => p.active).toList();
+    final inactive = people.where((p) => !p.active).toList();
+    final ordered = [...active, ...inactive];
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      TmMetricTitle(
+        title: 'People and load',
+        subtitle: dotJoin([
+          '${active.length} active',
+          if (inactive.isNotEmpty) '${inactive.length} deactivated',
+        ]),
+        definition: AdmMetrics.load(targetMin: policy.targetLoadMin, targetMax: policy.targetLoadMax),
+      ),
+      const SizedBox(height: Sp.md),
+      LayoutBuilder(builder: (context, c) {
+        final cols = (c.maxWidth / 340).floor().clamp(1, 4);
+        return Wrap(
+          spacing: Sp.lg,
+          runSpacing: Sp.lg,
+          children: [
+            for (final p in ordered)
+              SizedBox(
+                width: cols == 1 ? c.maxWidth : (c.maxWidth - Sp.lg * (cols - 1)) / cols,
+                child: Opacity(
+                  opacity: p.active ? 1 : 0.68,
+                  child: DispatchCard(
+                    onTap: () => context.go(Routes.person(p.id)),
+                    padding: const EdgeInsets.all(Sp.lg),
+                    dashed: !p.active,
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                      Row(children: [
+                        PersonAvatar.person(p, size: 40, outlined: !p.active),
+                        const SizedBox(width: Sp.md),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                            Text(p.name, style: context.text.titleMedium, overflow: TextOverflow.ellipsis),
+                            Text(dotJoin([p.roleTitle, p.teamName]),
+                                style: context.text.bodySmall?.copyWith(color: context.mutedColor), overflow: TextOverflow.ellipsis),
+                          ]),
+                        ),
+                        if (!p.active) ...[
+                          const SizedBox(width: Sp.sm),
+                          const ToneChip('Deactivated', compact: true, icon: Icons.person_off_outlined),
+                        ],
                       ]),
-                    ),
-                  ]),
-                  const SizedBox(height: Sp.md),
-                  if (p.tagline != null && p.tagline!.isNotEmpty) ...[
-                    Text(p.tagline ?? '', style: context.text.bodyMedium, maxLines: 2, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: Sp.md),
-                  ],
-                  Row(children: [
-                    Expanded(child: Text('${p.daysPerWeek.toStringAsFixed(1)} days/week', style: context.text.bodySmall?.copyWith(color: context.mutedColor))),
-                    TmLoadBar(p.loadPct),
-                  ]),
-                ]),
+                      const SizedBox(height: Sp.md),
+                      if (p.tagline != null && p.tagline!.isNotEmpty) ...[
+                        Text(p.tagline ?? '', style: context.text.bodyMedium, maxLines: 2, overflow: TextOverflow.ellipsis),
+                        const SizedBox(height: Sp.md),
+                      ],
+                      Row(children: [
+                        Expanded(
+                          child: Text(
+                            p.active ? '${p.daysPerWeek.toStringAsFixed(1)} days/week' : 'No longer available to plan',
+                            style: context.text.bodySmall?.copyWith(color: context.mutedColor),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (p.active) TmLoadBar(p.loadPct),
+                      ]),
+                    ]),
+                  ),
+                ),
               ),
-            ),
-        ],
-      );
-    });
+          ],
+        );
+      }),
+    ]);
   }
 }
 
@@ -741,9 +819,10 @@ class _SkillsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Panel(
+    return TmMetricPanel(
       title: 'Skills catalogue',
       subtitle: '${matrix.skills.length} tracked skills',
+      definition: '${AdmMetrics.coverage}\n\n${AdmMetrics.demandVsSupply}',
       trailing: canManage ? PrimaryButton('Add skill', icon: Icons.add_rounded, onPressed: () => _edit(context)) : null,
       padding: EdgeInsets.zero,
       dividerAfterHeader: true,
@@ -898,12 +977,24 @@ class _SkillDialogState extends State<_SkillDialog> {
 // ─── Availability tab ─────────────────────────────────────────────────────
 
 class _AvailabilityTab extends StatelessWidget {
-  const _AvailabilityTab({required this.matrix, required this.people, required this.rota, required this.canEdit, required this.onAddLeave});
+  const _AvailabilityTab({
+    required this.matrix,
+    required this.people,
+    required this.rota,
+    required this.today,
+    required this.policy,
+    required this.canEdit,
+    required this.onAddLeave,
+    required this.onReload,
+  });
   final _Matrix matrix;
   final List<Person> people;
   final Map<int, List<DateTime>> rota;
+  final DateTime today;
+  final Policy policy;
   final bool canEdit;
   final VoidCallback onAddLeave;
+  final Future<void> Function() onReload;
 
   @override
   Widget build(BuildContext context) {
@@ -917,19 +1008,12 @@ class _AvailabilityTab extends StatelessWidget {
     }
     final weeks = byWeek.keys.toList()..sort();
 
-    final rotaRows = <({String person, DateTime week})>[];
-    for (final p in people) {
-      for (final w in rota[p.id] ?? const <DateTime>[]) {
-        rotaRows.add((person: p.name, week: w));
-      }
-    }
-    rotaRows.sort((a, b) => a.week.compareTo(b.week));
-
     return LayoutBuilder(builder: (context, c) {
       final wide = c.maxWidth >= 900;
-      final left = Panel(
+      final left = TmMetricPanel(
         title: 'Availability by week',
         subtitle: 'Next four weeks',
+        definition: AdmMetrics.availability,
         trailing: canEdit ? SecondaryButton('Add leave', icon: Icons.event_busy_outlined, onPressed: onAddLeave) : null,
         child: weeks.isEmpty
             ? const EmptyState(
@@ -961,23 +1045,19 @@ class _AvailabilityTab extends StatelessWidget {
               ]),
       );
 
-      final right = Panel(
-        title: 'Incident rota',
-        subtitle: 'Reserve rises to ${(matrix.rotaReservePct ?? context.read<WorkspaceConfig>().policy.rotaReservePct).round()}% on a rota week',
-        child: rotaRows.isEmpty
-            ? const EmptyState(icon: Icons.shield_outlined, title: 'No rota weeks set', message: 'A team lead can put someone on the rota from their page.', compact: true)
-            : Column(children: [
-                for (final r in rotaRows)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: Sp.sm),
-                    child: Row(children: [
-                      PersonAvatar(initialsOf(r.person), seed: r.person.hashCode, size: 26),
-                      const SizedBox(width: Sp.md),
-                      Expanded(child: Text(r.person, style: context.text.bodyMedium)),
-                      Text(fmtWeekCommencing(r.week), style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
-                    ]),
-                  ),
-              ]),
+      // TEAM-08: the rota is assigned here, not just listed. set_rota and
+      // clear_rota recompute that person's capacity for the week.
+      final right = AdmRotaPanel(
+        people: [
+          for (final p in people)
+            AdmRotaPerson(id: p.id, name: p.name, initials: p.initials, colourHex: p.colourHex, active: p.active),
+        ],
+        rota: rota,
+        today: today,
+        canEdit: canEdit,
+        onChanged: onReload,
+        incidentReservePct: policy.incidentReservePct,
+        rotaReservePct: matrix.rotaReservePct ?? policy.rotaReservePct,
       );
 
       if (!wide) {
@@ -1096,11 +1176,11 @@ class _MatrixSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Row(children: [
-        for (var i = 0; i < 3; i++) ...[
-          if (i > 0) const SizedBox(width: Sp.md),
-          const Skeleton(width: 180, height: 26),
-        ],
+      // A Row of three fixed 180px bars is 564px wide and overflowed a phone.
+      const Wrap(spacing: Sp.md, runSpacing: Sp.sm, children: [
+        Skeleton(width: 180, height: 26),
+        Skeleton(width: 180, height: 26),
+        Skeleton(width: 180, height: 26),
       ]),
       const SizedBox(height: Sp.lg),
       const SkeletonPanel(rows: 8),

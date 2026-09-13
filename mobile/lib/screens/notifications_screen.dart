@@ -257,13 +257,12 @@ class _PrefRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = pref;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Expanded(child: Text(p.label, style: context.text.titleSmall)),
+      // A Wrap rather than a Row: on a phone the label and two chips do not share a line,
+      // and a Row would simply overflow rather than letting the chips drop below.
+      Wrap(spacing: Sp.sm, runSpacing: Sp.xs, crossAxisAlignment: WrapCrossAlignment.center, children: [
+        Text(p.label, style: context.text.titleSmall),
         if (p.isDefault) const ToneChip('Default', compact: true),
-        if (p.urgentBypassesDigest) ...[
-          const SizedBox(width: Sp.sm),
-          const ToneChip('Urgent bypasses the digest', tone: 'warn', compact: true),
-        ],
+        if (p.urgentBypassesDigest) const ToneChip('Urgent bypasses the digest', tone: 'warn', compact: true),
       ]),
       const SizedBox(height: Sp.sm),
       Wrap(spacing: Sp.xl, runSpacing: Sp.sm, crossAxisAlignment: WrapCrossAlignment.center, children: [

@@ -14,7 +14,9 @@ import 'screens/notifications_screen.dart';
 import 'screens/overview_screen.dart';
 import 'screens/person_screen.dart';
 import 'screens/pipeline_screen.dart';
+import 'screens/plan_versions_screen.dart';
 import 'screens/reports_screen.dart';
+import 'screens/scenarios_screen.dart';
 import 'screens/schedule_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/sign_in_screen.dart';
@@ -60,6 +62,10 @@ GoRouter buildRouter(Session session) {
           _page('/items/:ref', (s) => WorkItemScreen(ref: s.pathParameters['ref']!)),
           _page('/items/:ref/estimate', (s) => EstimateScreen(ref: s.pathParameters['ref']!)),
           _page(Routes.schedule, (s) => const ScheduleScreen()),
+          // Plan version history and what-if scenarios hang off the schedule,
+          // so the sidebar keeps Schedule highlighted while they are open.
+          _page(PlanVersionsScreen.route, (s) => PlanVersionsScreen(versionId: int.tryParse(s.uri.queryParameters['v'] ?? ''))),
+          _page(ScenariosScreen.route, (s) => const ScenariosScreen()),
           _page(Routes.changes, (s) => const ChangesScreen()),
           _page('/changes/:id', (s) => ChangeDetailScreen(id: s.pathParameters['id']!)),
           _page(Routes.team, (s) => const TeamSkillsScreen()),

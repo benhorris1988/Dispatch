@@ -10,6 +10,7 @@ import '../shell/app_shell.dart';
 import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
+import '../widgets/adm_metrics.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/widgets.dart';
 
@@ -137,6 +138,47 @@ class _PersonScreenState extends State<PersonScreen> {
     }
   }
 
+  /// ADM-03. `people.php deactivate` marks the person and their user inactive,
+  /// notes every future assignment as needing reassignment, raises an urgent
+  /// replan trigger and deletes their capacity from today. None of that is
+  /// reversible from the app, so the confirmation says how much work is
+  /// affected before it happens.
+  Future<void> _deactivate() async {
+    final d = _detail;
+    if (d == null) return;
+    final n = d.assignments.length;
+    final ok = await showTmConfirm(
+      context,
+      title: 'Deactivate ${d.person.name}?',
+      message: n == 0
+          ? '${d.person.firstName} has no future assignments.\n\n'
+              'Deactivating marks the person and their sign-in inactive and removes their capacity from today, so the scheduler stops planning work for them. '
+              'This cannot be undone from the app.'
+          : '${d.person.firstName} has $n future ${n == 1 ? 'assignment' : 'assignments'} in the committed plan.\n\n'
+              'Deactivating flags ${n == 1 ? 'it' : 'them'} as needing reassignment and starts an urgent replan for the people affected. '
+              'It also marks the person and their sign-in inactive and removes their capacity from today, so the scheduler stops planning work for them. '
+              'This cannot be undone from the app.',
+      confirmLabel: 'Deactivate',
+      danger: true,
+    );
+    if (!ok || !mounted) return;
+    try {
+      final r = await Api.post('people.php', 'deactivate', {'id': _personId});
+      final raw = r['flagged_assignments'];
+      final flagged = raw is List ? raw.length : asIntOr(raw, n);
+      if (!mounted) return;
+      tmToast(
+        context,
+        flagged == 0
+            ? '${d.person.name} deactivated'
+            : '${d.person.name} deactivated · $flagged future ${flagged == 1 ? 'assignment' : 'assignments'} flagged for reassignment',
+      );
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) tmToast(context, e.message, bad: true);
+    }
+  }
+
   Future<void> _endorse(_PersonSkillRow s) async {
     try {
       await Api.post('people.php', 'endorse_skill', {'person_id': _personId, 'skill_id': s.skillId});
@@ -151,6 +193,7 @@ class _PersonScreenState extends State<PersonScreen> {
   @override
   Widget build(BuildContext context) {
     final session = context.watch<Session>();
+    final policy = context.watch<WorkspaceConfig>().policy;
     final d = _detail;
 
     return PageBody(
@@ -168,8 +211,12 @@ class _PersonScreenState extends State<PersonScreen> {
           _Header(
             detail: d,
             canEdit: _canEdit(session),
+            // ADM-03 is admin-only server-side; the control is omitted for
+            // everyone else rather than shown and 403'd.
+            canDeactivate: session.isAdmin && d.person.active && session.user?.personId != d.person.id,
             onAddLeave: _addLeave,
             onEditProfile: _editProfile,
+            onDeactivate: _deactivate,
             onOpenSchedule: () => context.go(Routes.schedule),
           ),
           const SizedBox(height: Sp.lg),
@@ -183,11 +230,18 @@ class _PersonScreenState extends State<PersonScreen> {
           const SizedBox(height: Sp.lg),
           switch (_tab) {
             1 => _SkillsTab(detail: d, canEdit: _canEdit(session), isLead: session.isTeamLead, onSetLevel: _setLevel, onEndorse: _endorse),
-            2 => _AssignmentsTab(detail: d),
-            3 => _AvailabilityTab(detail: d, canEdit: _canEdit(session), onAddLeave: _addLeave),
+            2 => _AssignmentsTab(detail: d, policy: policy),
+            3 => _AvailabilityTab(detail: d, policy: policy, canEdit: _canEdit(session), onAddLeave: _addLeave),
             4 => _PreferencesTab(detail: d),
             5 => _HistoryTab(detail: d),
-            _ => _OverviewTab(detail: d, canEdit: _canEdit(session), isLead: session.isTeamLead, onSetLevel: _setLevel, onEndorse: _endorse),
+            _ => _OverviewTab(
+                detail: d,
+                policy: policy,
+                canEdit: _canEdit(session),
+                isLead: session.isTeamLead,
+                onSetLevel: _setLevel,
+                onEndorse: _endorse,
+              ),
           },
         ],
       ]),
@@ -218,11 +272,21 @@ class _Breadcrumb extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.detail, required this.canEdit, required this.onAddLeave, required this.onEditProfile, required this.onOpenSchedule});
+  const _Header({
+    required this.detail,
+    required this.canEdit,
+    required this.canDeactivate,
+    required this.onAddLeave,
+    required this.onEditProfile,
+    required this.onDeactivate,
+    required this.onOpenSchedule,
+  });
   final _PersonDetail detail;
   final bool canEdit;
+  final bool canDeactivate;
   final VoidCallback onAddLeave;
   final VoidCallback onEditProfile;
+  final VoidCallback onDeactivate;
   final VoidCallback onOpenSchedule;
 
   @override
@@ -235,34 +299,53 @@ class _Header extends StatelessWidget {
       p.tagline,
     ]);
     return LayoutBuilder(builder: (context, c) {
-      final titleBlock = Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        PersonAvatar.person(p, size: 56),
+      // Flexible, not Expanded: the block has to be able to shrink-wrap so the
+      // Wrap below can measure it against the width the header really has.
+      final titleBlock = Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.center, children: [
+        PersonAvatar.person(p, size: 56, outlined: !p.active),
         const SizedBox(width: Sp.lg),
-        Expanded(
+        Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-            Text(p.name, style: context.text.headlineLarge),
+            Wrap(spacing: Sp.md, runSpacing: Sp.sm, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              Text(p.name, style: context.text.headlineLarge),
+              if (!p.active) const ToneChip('Deactivated', tone: 'bad', icon: Icons.person_off_outlined),
+            ]),
             const SizedBox(height: 2),
-            Text(subtitle, style: context.text.bodyLarge?.copyWith(color: context.mutedColor)),
+            Text(
+              p.active ? subtitle : dotJoin([subtitle, 'no longer available to plan']),
+              style: context.text.bodyLarge?.copyWith(color: context.mutedColor),
+            ),
           ]),
         ),
       ]);
       final actions = <Widget>[
-        if (canEdit) SecondaryButton('Add leave', icon: Icons.event_busy_outlined, onPressed: onAddLeave),
+        if (canEdit && p.active) SecondaryButton('Add leave', icon: Icons.event_busy_outlined, onPressed: onAddLeave),
         if (canEdit) SecondaryButton('Edit profile', icon: Icons.edit_outlined, onPressed: onEditProfile),
+        if (canDeactivate) SecondaryButton('Deactivate', icon: Icons.person_off_outlined, danger: true, onPressed: onDeactivate),
         PrimaryButton('Open in schedule', icon: Icons.calendar_month_outlined, navy: true, onPressed: onOpenSchedule),
       ];
       if (c.maxWidth < 760) {
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          titleBlock,
+          SizedBox(width: c.maxWidth, child: titleBlock),
           const SizedBox(height: Sp.md),
           Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions),
         ]);
       }
-      return Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        Expanded(child: titleBlock),
-        const SizedBox(width: Sp.lg),
-        Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions),
-      ]);
+      // A Row hands a non-flex child unbounded width, so the action row was
+      // measured as if the header were infinitely wide and overflowed it once a
+      // fourth button (Deactivate) appeared. A Wrap measures both halves
+      // against the real width and drops the actions onto their own line when
+      // the two cannot share one — the same fix PageHeader carries.
+      return Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Sp.lg,
+        runSpacing: Sp.md,
+        children: [
+          titleBlock,
+          Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: actions),
+        ],
+      );
     });
   }
 }
@@ -270,8 +353,16 @@ class _Header extends StatelessWidget {
 // ─── Overview ─────────────────────────────────────────────────────────────
 
 class _OverviewTab extends StatelessWidget {
-  const _OverviewTab({required this.detail, required this.canEdit, required this.isLead, required this.onSetLevel, required this.onEndorse});
+  const _OverviewTab({
+    required this.detail,
+    required this.policy,
+    required this.canEdit,
+    required this.isLead,
+    required this.onSetLevel,
+    required this.onEndorse,
+  });
   final _PersonDetail detail;
+  final Policy policy;
   final bool canEdit;
   final bool isLead;
   final void Function(_PersonSkillRow) onSetLevel;
@@ -281,6 +372,10 @@ class _OverviewTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = detail.stats;
     final overTarget = (s.loadPct4w ?? 0) > s.targetLoadMax;
+    // REP-04: each figure carries its own definition. StatTile has no header of
+    // its own to hang TmMetricTitle on, so the tile itself opens the same
+    // dialog the info icon does.
+    void define(String title, String body) => showTmInfoDialog(context, title, body);
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       StatRow(tiles: [
         StatTile(
@@ -289,6 +384,7 @@ class _OverviewTab extends StatelessWidget {
           footnote: s.loadNote,
           tone: overTarget ? StatTone.warn : StatTone.good,
           footnoteIcon: overTarget ? Icons.warning_amber_rounded : Icons.check_rounded,
+          onTap: () => define('Load, next 4 weeks', AdmMetrics.load(targetMin: s.targetLoadMin, targetMax: s.targetLoadMax)),
         ),
         StatTile(
           label: 'Concurrent items',
@@ -296,6 +392,7 @@ class _OverviewTab extends StatelessWidget {
           unit: 'max ${s.concurrentMax}',
           footnote: s.concurrentNote,
           tone: s.concurrentNow >= s.concurrentMax ? StatTone.warn : StatTone.neutral,
+          onTap: () => define('Concurrent items', AdmMetrics.concurrentItems),
         ),
         StatTile(
           label: 'Changes to plan, last 8 weeks',
@@ -303,6 +400,7 @@ class _OverviewTab extends StatelessWidget {
           footnote: s.changesNote,
           tone: s.changes8w <= s.teamMedianChanges8w ? StatTone.good : StatTone.warn,
           footnoteIcon: s.changes8w <= s.teamMedianChanges8w ? Icons.south_east_rounded : Icons.north_east_rounded,
+          onTap: () => define('Changes to plan, last 8 weeks', '${AdmMetrics.personChanges}\n\n${AdmMetrics.stabilityIndex}'),
         ),
         StatTile(
           label: 'Incident rota',
@@ -310,12 +408,18 @@ class _OverviewTab extends StatelessWidget {
           footnote: s.nextRotaNote,
           tone: StatTone.neutral,
           footnoteIcon: Icons.shield_outlined,
+          onTap: () => define(
+            'Incident rota',
+            AdmMetrics.incidentRota(incidentReservePct: policy.incidentReservePct, rotaReservePct: policy.rotaReservePct),
+          ),
         ),
       ]),
-      const SizedBox(height: Sp.lg),
+      const SizedBox(height: Sp.sm),
+      Text('Select a figure for how it is measured.', style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+      const SizedBox(height: Sp.md),
       LayoutBuilder(builder: (context, c) {
         final left = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          _AssignmentsPanel(detail: detail, limit: 4),
+          _AssignmentsPanel(detail: detail, policy: policy, limit: 4),
           const SizedBox(height: Sp.lg),
           _ChangesPanel(detail: detail),
         ]);
@@ -338,16 +442,18 @@ class _OverviewTab extends StatelessWidget {
 }
 
 class _AssignmentsPanel extends StatelessWidget {
-  const _AssignmentsPanel({required this.detail, this.limit});
+  const _AssignmentsPanel({required this.detail, required this.policy, this.limit});
   final _PersonDetail detail;
+  final Policy policy;
   final int? limit;
 
   @override
   Widget build(BuildContext context) {
     final all = detail.assignments;
     final shown = limit == null ? all : all.take(limit!).toList();
-    return Panel(
+    return TmMetricPanel(
       title: 'Current and upcoming assignments',
+      definition: AdmMetrics.incidentReserve(incidentReservePct: policy.incidentReservePct, rotaReservePct: policy.rotaReservePct),
       trailing: (limit != null && all.length > limit!) ? Text('${all.length} in total', style: context.text.bodySmall?.copyWith(color: context.mutedColor)) : null,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         if (shown.isEmpty)
@@ -449,9 +555,10 @@ class _ChangesPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = detail.changeHistory;
-    return Panel(
+    return TmMetricPanel(
       title: 'Plan changes affecting ${detail.person.firstName}',
       subtitle: 'Last 8 weeks',
+      definition: '${AdmMetrics.personChanges}\n\n${AdmMetrics.stabilityIndex}',
       child: h.isEmpty
           ? const EmptyState(icon: Icons.timeline_outlined, title: 'No changes recorded', message: 'Their plan has not moved in the last eight weeks.', compact: true)
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -493,8 +600,9 @@ class _SkillsPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final skills = detail.skills.where((s) => s.proficiency > 0).toList()..sort((a, b) => b.proficiency.compareTo(a.proficiency));
-    return Panel(
+    return TmMetricPanel(
       title: 'Skills',
+      definition: '${AdmMetrics.coverage}\n\n${AdmMetrics.development}',
       trailing: canEdit ? SecondaryButton('Add', icon: Icons.add_rounded, onPressed: () => _addSkill(context)) : null,
       child: skills.isEmpty
           ? const EmptyState(icon: Icons.psychology_outlined, title: 'No skills recorded', message: 'Add a skill so the scheduler can match work.', compact: true)
@@ -651,25 +759,28 @@ class _SkillsTab extends StatelessWidget {
 }
 
 class _AssignmentsTab extends StatelessWidget {
-  const _AssignmentsTab({required this.detail});
+  const _AssignmentsTab({required this.detail, required this.policy});
   final _PersonDetail detail;
+  final Policy policy;
 
   @override
-  Widget build(BuildContext context) => _AssignmentsPanel(detail: detail);
+  Widget build(BuildContext context) => _AssignmentsPanel(detail: detail, policy: policy);
 }
 
 class _AvailabilityTab extends StatelessWidget {
-  const _AvailabilityTab({required this.detail, required this.canEdit, required this.onAddLeave});
+  const _AvailabilityTab({required this.detail, required this.policy, required this.canEdit, required this.onAddLeave});
   final _PersonDetail detail;
+  final Policy policy;
   final bool canEdit;
   final VoidCallback onAddLeave;
 
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Panel(
+      TmMetricPanel(
         title: 'Availability',
         subtitle: 'Leave, training and sickness — only the type is stored',
+        definition: AdmMetrics.availability,
         trailing: canEdit ? SecondaryButton('Add leave', icon: Icons.event_busy_outlined, onPressed: onAddLeave) : null,
         child: detail.availability.isEmpty
             ? const EmptyState(icon: Icons.event_available_outlined, title: 'No absence recorded', message: 'Nothing booked in the last 90 days or ahead.', compact: true)
@@ -691,12 +802,31 @@ class _AvailabilityTab extends StatelessWidget {
               ]),
       ),
       const SizedBox(height: Sp.lg),
-      Panel(
+      TmMetricPanel(
         title: 'Incident rota',
         subtitle: detail.stats.nextRotaNote,
-        child: detail.rota.isEmpty
-            ? const EmptyState(icon: Icons.shield_outlined, title: 'Not on the rota', message: 'No rota weeks scheduled for this person.', compact: true)
-            : Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [for (final w in detail.rota) ToneChip(fmtWeekCommencing(w), tone: 'bad')]),
+        definition: AdmMetrics.incidentRota(incidentReservePct: policy.incidentReservePct, rotaReservePct: policy.rotaReservePct),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (detail.rota.isEmpty)
+            const EmptyState(icon: Icons.shield_outlined, title: 'Not on the rota', message: 'No rota weeks scheduled for this person.', compact: true)
+          else ...[
+            Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [for (final w in detail.rota) ToneChip(fmtWeekCommencing(w), tone: 'bad')]),
+            const SizedBox(height: Sp.sm),
+            Text(
+              'Their incident reserve rises to ${policy.rotaReservePct.round()}% in each of these weeks, so they can take less planned work.',
+              style: context.text.bodySmall?.copyWith(color: context.mutedColor),
+            ),
+          ],
+          const SizedBox(height: Sp.sm),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SecondaryButton(
+              'Manage the rota',
+              icon: Icons.shield_outlined,
+              onPressed: () => context.go(Routes.team),
+            ),
+          ),
+        ]),
       ),
     ]);
   }
@@ -763,9 +893,10 @@ class _HistoryTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = detail.changeHistory;
-    return Panel(
+    return TmMetricPanel(
       title: 'Plan changes by week',
       subtitle: 'Last 8 weeks · team median ${detail.stats.teamMedianChanges8w}',
+      definition: '${AdmMetrics.personChanges}\n\n${AdmMetrics.stabilityIndex}',
       padding: EdgeInsets.zero,
       dividerAfterHeader: true,
       child: h.isEmpty

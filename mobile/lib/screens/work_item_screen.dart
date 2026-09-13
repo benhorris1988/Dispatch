@@ -13,6 +13,7 @@ import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/widgets.dart';
 import '../widgets/work_widgets.dart';
+import 'parts/wc_dependency_dialog.dart';
 
 /// Work item (web-03 / mobile-work-item): what it is, who can do it, what it
 /// depends on, when it is planned, how big it is and why it is worth doing.
@@ -187,6 +188,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     final requestedBy = TextEditingController(text: _row.requestedBy ?? '');
     final tags = TextEditingController(text: _row.tags.join(', '));
     DateTime? neededBy = _row.neededBy;
+    DateTime? earliestStart = _row.earliestStart;
 
     final saved = await showDialog<bool>(
       context: context,
@@ -209,24 +211,31 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                 const SizedBox(height: Sp.md),
                 TextField(controller: tags, decoration: const InputDecoration(labelText: 'Tags', hintText: 'Comma separated')),
                 const SizedBox(height: Sp.md),
-                Row(children: [
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Expanded(
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.calendar_today_rounded, size: 18),
-                      label: Align(alignment: Alignment.centerLeft, child: Text(neededBy == null ? 'Needed by: not set' : 'Needed by ${fmtDate(neededBy)}')),
-                      onPressed: () async {
-                        final now = DateTime.now();
-                        final picked = await showDatePicker(
-                          context: dialogContext,
-                          initialDate: neededBy ?? now,
-                          firstDate: DateTime(now.year - 2),
-                          lastDate: DateTime(now.year + 3),
-                        );
-                        if (picked != null) setLocal(() => neededBy = picked);
-                      },
+                    child: _DateField(
+                      label: 'Needed by',
+                      value: neededBy,
+                      helpText: 'Needed by',
+                      onPick: (d) => setLocal(() => neededBy = d),
+                    ),
+                  ),
+                  const SizedBox(width: Sp.md),
+                  Expanded(
+                    child: _DateField(
+                      label: 'Earliest start',
+                      value: earliestStart,
+                      helpText: 'Earliest start',
+                      onPick: (d) => setLocal(() => earliestStart = d),
                     ),
                   ),
                 ]),
+                const SizedBox(height: Sp.xs),
+                Text(
+                  'The scheduler will not place this work before its earliest start, '
+                  'so use it for a date the team genuinely cannot begin before.',
+                  style: dialogContext.text.bodySmall,
+                ),
               ]),
             ),
           ),
@@ -248,6 +257,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
         'requested_by': requestedBy.text.trim(),
         'tags': tags.text.trim(),
         'needed_by': neededBy == null ? '' : _iso(neededBy!),
+        'earliest_start': earliestStart == null ? '' : _iso(earliestStart!),
       });
       _snack('${_row.ref} updated.');
       await _load();
@@ -548,7 +558,9 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
             ]),
           ),
           const SizedBox(width: Sp.lg),
-          Wrap(spacing: Sp.sm, runSpacing: Sp.sm, alignment: WrapAlignment.end, children: actions),
+          // Flexible, because a Wrap handed unbounded width by a Row measures itself as if
+          // the header were infinitely wide and so never wraps — it just overflows.
+          Flexible(child: Wrap(spacing: Sp.sm, runSpacing: Sp.sm, alignment: WrapAlignment.end, children: actions)),
         ]),
     ]);
   }
@@ -687,7 +699,51 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     );
   }
 
+  /// Every item already on the other end of a dependency, so the picker cannot
+  /// offer one that would only come back as "That dependency already exists".
+  Set<int> get _linkedIds {
+    final deps = asMap(_item?['dependencies']);
+    return {
+      for (final d in [..._list('needs', deps), ..._list('unblocks', deps)]) asIntOr(d['id'], -1),
+    }..remove(-1);
+  }
+
+  Future<void> _addDependency() async {
+    final added = await showWcAddDependencyDialog(
+      context,
+      itemId: _row.id,
+      itemRef: _row.ref,
+      linkedIds: _linkedIds,
+    );
+    if (added == true) {
+      _snack('Dependency added to ${_row.ref}.');
+      await _load();
+    }
+  }
+
+  Future<void> _removeDependency(String direction, Map<String, dynamic> row) async {
+    final label = '${asStrOr(row['ref'], '')} ${asStrOr(row['title'], '')}'.trim();
+    final ok = await showWcConfirm(
+      context,
+      title: 'Remove this dependency?',
+      message: direction == 'Needs'
+          ? '${_row.ref} will no longer wait for $label. The scheduler may place it earlier at the next replan.'
+          : '$label will no longer wait for ${_row.ref}. The scheduler may place it earlier at the next replan.',
+      confirmLabel: 'Remove dependency',
+    );
+    if (ok != true) return;
+    try {
+      await Api.post('work_items.php', 'remove_dependency', {'id': asIntOr(row['dependency_id'], 0)});
+      _snack('Dependency removed.');
+      await _load();
+    } on ApiException catch (e) {
+      _snack(e.message);
+    }
+  }
+
   Widget _dependenciesPanel() {
+    final session = context.watch<Session>();
+    final canEdit = session.isTeamLead;
     final deps = asMap(_item?['dependencies']);
     final needs = _list('needs', deps);
     final unblocks = _list('unblocks', deps);
@@ -698,15 +754,18 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
 
     return Panel(
       title: 'Dependencies',
+      subtitle: all.isEmpty ? null : 'What this waits for, and what waits on it',
+      trailing: canEdit ? SecondaryButton('Add dependency', icon: Icons.add_link_rounded, onPressed: _addDependency) : null,
       padding: EdgeInsets.zero,
       child: all.isEmpty
-          ? const Padding(
-              padding: EdgeInsets.all(Sp.xl),
+          ? Padding(
+              padding: const EdgeInsets.all(Sp.xl),
               child: EmptyState(
                 icon: Icons.link_off_rounded,
                 title: 'Nothing depends on this, and it waits for nothing',
                 message: 'Add a dependency when this work cannot start until another item finishes.',
                 compact: true,
+                action: canEdit ? PrimaryButton('Add a dependency', icon: Icons.add_link_rounded, onPressed: _addDependency) : null,
               ),
             )
           : Column(children: [
@@ -725,6 +784,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                           const SizedBox(height: 2),
                           Text(
                             dotJoin([
+                              asStrOr(d.row['dep_type'], '') == 'soft' ? 'Soft' : 'Finish to start',
                               asDate(d.row['needed_by']) == null ? null : 'Due ${fmtDayMonth(asDate(d.row['needed_by']))}',
                               humanise(asStr(d.row['status'])),
                               asDate(d.row['cleared_at']) == null ? null : 'cleared',
@@ -738,6 +798,12 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                         size: 18,
                         color: asDate(d.row['cleared_at']) != null ? DispatchColors.green : context.mutedColor,
                       ),
+                      if (canEdit)
+                        IconButton(
+                          tooltip: 'Remove the dependency on ${asStrOr(d.row['ref'], '')}',
+                          icon: const Icon(Icons.link_off_rounded, size: 18),
+                          onPressed: () => _removeDependency(d.label, d.row),
+                        ),
                     ]),
                   ),
                 ),
@@ -787,6 +853,10 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
           ),
         MetaRow('Planned window', value: row.plannedFrom == null && row.plannedTo == null ? 'Not scheduled yet' : fmtDateRange(row.plannedFrom, row.plannedTo)),
         MetaRow('Needed by', value: dotJoin([row.neededBy == null ? 'Not set' : fmtShortDate(row.neededBy), asStr(plan['slack_label'])])),
+        MetaRow(
+          'Earliest start',
+          value: row.earliestStart == null ? 'Not set' : 'Not before ${fmtShortDate(row.earliestStart)}',
+        ),
         MetaRow('Assigned', child: assignees.isEmpty
             ? Text('No one yet', style: context.text.bodyMedium?.copyWith(color: context.mutedColor))
             : Row(children: [
@@ -814,47 +884,119 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     );
   }
 
+  /// Priority breakdown (BEN-04's display).
+  ///
+  /// Interrupt-driven work scores from its severity alone — `priority.php`
+  /// marks the five planned terms "skipped: interrupt policy" and they all read
+  /// zero — so an incident shows its severity term and a line saying the
+  /// benefit case is bypassed, never five empty bars. `severity` is read
+  /// defensively: an older API that does not send it still renders.
   Widget _priorityBreakdown(Map<String, dynamic> terms) {
-    const labels = {
+    const planned = {
       'value': 'Business value',
       'urgency': 'Urgency',
       'risk': 'Risk',
       'leverage': 'Leverage',
       'age': 'Age in the queue',
-      'override': 'Override',
     };
+    final severity = asMap(terms['severity']);
+    final marked = planned.keys.any((k) => asStr(asMap(terms[k])['skipped']) != null);
+    final allZero = planned.keys.every((k) => (asDouble(asMap(terms[k])['contribution']) ?? 0) == 0);
+    final isInterrupt = severity.isNotEmpty || marked || _row.typePolicy == 'interrupt';
+    final hidePlanned = isInterrupt && (marked || allZero);
+    final severityLabel = 'Severity ${asStrOr(severity['input'], asStrOr(_item?['severity'], ''))}'.trim();
+    final shown = <MapEntry<String, String>>[
+      if (severity.isNotEmpty) MapEntry('severity', severityLabel),
+      if (!hidePlanned) ...planned.entries,
+    ];
+
+    final override = asMap(terms['override']);
+    final points = asIntOr(override['points'], 0);
+    final pinned = asDouble(override['pinned']);
+    final hasOverride = points != 0 || pinned != null;
+
     return Container(
       margin: const EdgeInsets.only(bottom: Sp.sm),
       padding: const EdgeInsets.all(Sp.md),
       decoration: BoxDecoration(color: context.scheme.surfaceContainerHighest, borderRadius: DispatchRadius.cardR),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        for (final e in labels.entries)
-          if (terms[e.key] is Map)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(children: [
-                SizedBox(width: 120, child: Text(e.value, style: context.text.bodySmall)),
-                Expanded(
-                  child: ProgressBar(
-                    ((asDouble(asMap(terms[e.key])['contribution']) ?? 0) / 40).clamp(0, 1),
-                    colour: DispatchColors.typeBlue,
-                  ),
+        for (final e in shown)
+          if (terms[e.key] is Map) _priorityTermRow(e.value, asMap(terms[e.key])),
+        // The API has not sent a severity term yet: say what drives the score
+        // rather than leave the expander empty.
+        if (hidePlanned && severity.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              SizedBox(width: 120, child: Text(severityLabel, style: context.text.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(
+                child: Text('Scored from severity', style: context.text.bodySmall?.copyWith(color: context.inkColor), maxLines: 1, overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(width: Sp.sm),
+              SizedBox(
+                width: 56,
+                child: Text(
+                  (_row.priorityScore ?? 0).toStringAsFixed(1),
+                  textAlign: TextAlign.right,
+                  style: DispatchTheme.numeric(size: 12.5),
                 ),
-                const SizedBox(width: Sp.sm),
-                SizedBox(
-                  width: 56,
-                  child: Text(
-                    (asDouble(asMap(terms[e.key])['contribution']) ?? 0).toStringAsFixed(1),
-                    textAlign: TextAlign.right,
-                    style: DispatchTheme.numeric(size: 12.5),
-                  ),
+              ),
+            ]),
+          ),
+        if (hasOverride)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              SizedBox(width: 120, child: Text('Override', style: context.text.bodySmall)),
+              Expanded(
+                child: Text(
+                  pinned != null ? 'Pinned at ${pinned.round()}' : 'Manual adjustment',
+                  style: context.text.bodySmall?.copyWith(color: context.inkColor),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              ]),
-            ),
+              ),
+              const SizedBox(width: Sp.sm),
+              SizedBox(
+                width: 56,
+                child: Text(
+                  pinned != null ? '—' : '${points > 0 ? '+' : ''}$points',
+                  textAlign: TextAlign.right,
+                  style: DispatchTheme.numeric(size: 12.5),
+                ),
+              ),
+            ]),
+          ),
         const SizedBox(height: Sp.sm),
         Text(
-          'Weighted from business value, urgency, risk, leverage and age; the nightly run rescales so the top item sits near 100.',
+          isInterrupt
+              ? 'Interrupt-driven work scores from its severity, so the benefit case — value, urgency, risk, '
+                  'leverage and age — is skipped and it enters the queue at the top.'
+              : 'Weighted from business value, urgency, risk, leverage and age; the nightly run rescales so the top item sits near 100.',
           style: context.text.bodySmall,
+        ),
+      ]),
+    );
+  }
+
+  Widget _priorityTermRow(String label, Map<String, dynamic> term) {
+    final contribution = asDouble(term['contribution']) ?? 0;
+    final weight = asDouble(term['weight']);
+    // contribution = normalised x weight, so the bar reads as a share of what
+    // this term could have scored — never a share of a hard-coded 40.
+    final fraction = asDouble(term['normalised']) ?? (weight != null && weight > 0 ? contribution / weight : contribution / 40);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(children: [
+        SizedBox(
+          width: 120,
+          child: Text(label, style: context.text.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+        Expanded(child: ProgressBar(fraction.clamp(0, 1), colour: DispatchColors.typeBlue)),
+        const SizedBox(width: Sp.sm),
+        SizedBox(
+          width: 56,
+          child: Text(contribution.toStringAsFixed(1), textAlign: TextAlign.right, style: DispatchTheme.numeric(size: 12.5)),
         ),
       ]),
     );
@@ -1354,5 +1496,53 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
         ]),
       ]),
     );
+  }
+}
+
+/// Labelled date control used by the Edit dialog for needed-by and
+/// earliest-start (PIP-01). The button carries only the date, so two sit side
+/// by side without either label wrapping.
+class _DateField extends StatelessWidget {
+  const _DateField({required this.label, required this.value, required this.onPick, required this.helpText});
+
+  final String label;
+  final DateTime? value;
+  final ValueChanged<DateTime?> onPick;
+  final String helpText;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Text(label, style: context.text.labelMedium?.copyWith(color: context.mutedColor)),
+      const SizedBox(height: Sp.xs),
+      Row(children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.calendar_today_rounded, size: 18),
+            label: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(value == null ? 'Not set' : fmtDate(value), maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            onPressed: () async {
+              final now = DateTime.now();
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: value ?? now,
+                firstDate: DateTime(now.year - 2),
+                lastDate: DateTime(now.year + 3),
+                helpText: helpText,
+              );
+              if (picked != null) onPick(picked);
+            },
+          ),
+        ),
+        if (value != null)
+          IconButton(
+            tooltip: 'Clear the ${label.toLowerCase()} date',
+            icon: const Icon(Icons.close_rounded, size: 18),
+            onPressed: () => onPick(null),
+          ),
+      ]),
+    ]);
   }
 }

@@ -18,6 +18,8 @@ import '../theme/tokens.dart';
 import '../widgets/schedule_widgets.dart';
 import '../widgets/widgets.dart';
 import 'parts/sch_models.dart';
+import 'plan_versions_screen.dart';
+import 'scenarios_screen.dart';
 
 /// Schedule — a lane per person across the horizon (VIEW-01..05, SCH-06/07/09,
 /// STAB-01/06). Committed weeks are tinted and locked, today is an orange
@@ -33,6 +35,11 @@ class ScheduleScreen extends StatefulWidget {
 
 enum SchZoom { weeks, days, months }
 
+/// What a lane stands for (VIEW-04). Person is the default lane-per-person
+/// view; Item gives every work item a lane with its assignees' blocks on it;
+/// Work type collapses to a lane per type.
+enum SchGroup { person, item, workType }
+
 class _ScheduleScreenState extends State<ScheduleScreen> {
   // --- data -----------------------------------------------------------------
   ScheduleData? _data;
@@ -40,6 +47,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   String? _error;
 
   SchZoom _zoom = SchZoom.weeks;
+  SchGroup _group = SchGroup.person;
   bool _overlay = false;
   int? _openProposalId;
   bool _proposing = false;
@@ -60,9 +68,10 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   List<DateTime> _days = const []; // working days across the range
   Map<String, int> _dayIndex = const {};
+  List<_Lane> _lanes = const [];
   List<double> _laneHeights = const [];
   List<double> _laneTops = const [];
-  Map<int, List<_Placed>> _laneBlocks = const {};
+  Map<String, List<_Placed>> _laneBlocks = const {};
 
   // --- scrolling ------------------------------------------------------------
   final _hHeader = ScrollController();
@@ -78,7 +87,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   final Map<int, int> _nudge = {}; // assignment id → working-day offset pending confirmation
   /// Owned by the screen, not the sheet, so it outlives the sheet's exit animation.
   final TextEditingController _moveReason = TextEditingController();
-  int? _selectedPersonId; // phone view
+  String? _selectedLaneKey; // phone view: the lane the picker is showing
 
   @override
   void initState() {
@@ -147,7 +156,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _loading = false;
         _error = null;
         _nudge.clear();
-        _selectedPersonId ??= data.people.isNotEmpty ? data.people.first.id : null;
         _layout();
       });
       final through = data.committedThrough;
@@ -197,46 +205,126 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _days = days;
     _dayIndex = index;
 
-    final blocks = <int, List<_Placed>>{};
+    // Overlay: the proposed plan, plus a ghost at the committed position of
+    // anything that moved. Otherwise the committed plan as it stands.
+    final overlayOn = _overlay && d.hasOverlay;
+    final source = overlayOn ? d.overlayBlocks : d.blocks;
+    final overlayById = {for (final b in d.overlayBlocks) b.id: b};
+
+    final lanes = _buildLanes(d, source, includeCommitted: overlayOn);
+    final blocks = <String, List<_Placed>>{for (final l in lanes) l.key: <_Placed>[]};
+    final ghosted = <String>{}; // lane key + assignment id, so a ghost is drawn once
+
+    for (final b in source) {
+      final list = blocks[_laneKeyFor(b)];
+      if (list != null) {
+        final placed = _place(b, ghost: false);
+        if (placed != null) list.add(placed);
+      }
+      if (!overlayOn || !b.changed) continue;
+      for (final c in d.blocks.where((c) => c.workItemId == b.workItemId)) {
+        if (overlayById[c.id]?.changed == false) continue;
+        final key = _laneKeyFor(c);
+        if (!ghosted.add('$key#${c.id}')) continue;
+        final ghostList = blocks[key];
+        if (ghostList == null) continue;
+        final ghost = _place(c, ghost: true);
+        if (ghost != null) ghostList.add(ghost);
+      }
+    }
+    // Leave, training and rota are per person, so they only belong on a person lane.
+    if (_group == SchGroup.person) {
+      for (final a in d.away) {
+        final list = blocks['p${a.personId}'];
+        if (list == null) continue;
+        final placed = _placeAway(a);
+        if (placed != null) list.add(placed);
+      }
+    }
+
     final heights = <double>[];
     final tops = <double>[];
-    final overlayById = {for (final b in d.overlayBlocks) b.id: b};
     double top = 0;
-
-    for (final p in d.people) {
-      final items = <_Placed>[];
-      Iterable<SchBlock> source = d.blocks.where((b) => b.personId == p.id);
-      if (_overlay && d.hasOverlay) {
-        // Overlay: the proposed plan, plus a ghost at the committed position of anything that moved.
-        source = d.overlayBlocks.where((b) => b.personId == p.id);
-      }
-      for (final b in source) {
-        final placed = _place(b, ghost: false);
-        if (placed != null) items.add(placed);
-        if (_overlay && b.changed) {
-          final committed = d.blocks.where((c) => c.workItemId == b.workItemId).toList();
-          for (final c in committed) {
-            if (overlayById[c.id]?.changed == false) continue;
-            final ghost = _place(c, ghost: true);
-            if (ghost != null && ghost.personId == p.id) items.add(ghost);
-          }
-        }
-      }
-      for (final a in d.away.where((a) => a.personId == p.id)) {
-        final placed = _placeAway(a);
-        if (placed != null) items.add(placed);
-      }
+    for (final lane in lanes) {
+      final items = blocks[lane.key]!;
       _stack(items);
       final rows = items.isEmpty ? 1 : items.map((i) => i.row).reduce(math.max) + 1;
       final h = _lanePad * 2 + rows * _blockH + (rows - 1) * _blockGap;
-      blocks[p.id] = items;
       heights.add(h);
       tops.add(top);
       top += h;
     }
+    _lanes = lanes;
     _laneBlocks = blocks;
     _laneHeights = heights;
     _laneTops = tops;
+    if (_selectedLaneKey == null || !lanes.any((l) => l.key == _selectedLaneKey)) {
+      _selectedLaneKey = lanes.isEmpty ? null : lanes.first.key;
+    }
+  }
+
+  /// Which lane a block belongs on under the current grouping.
+  String _laneKeyFor(SchBlock b) => switch (_group) {
+        SchGroup.person => 'p${b.personId}',
+        SchGroup.item => 'i${b.workItemId}',
+        SchGroup.workType => 't${b.typeName ?? ''}',
+      };
+
+  /// The lanes themselves. Person lanes come from the API's people list, so
+  /// someone with nothing scheduled still gets a lane; item and work-type
+  /// lanes are derived from the blocks on show.
+  List<_Lane> _buildLanes(ScheduleData d, List<SchBlock> source, {required bool includeCommitted}) {
+    if (_group == SchGroup.person) {
+      return [for (final p in d.people) _Lane(key: 'p${p.id}', title: p.name, person: p)];
+    }
+    final names = {for (final p in d.people) p.id: p};
+    final all = includeCommitted ? [...source, ...d.blocks] : source;
+    final byKey = <String, List<SchBlock>>{};
+    for (final b in all) {
+      byKey.putIfAbsent(_laneKeyFor(b), () => <SchBlock>[]).add(b);
+    }
+    final lanes = <_Lane>[];
+    byKey.forEach((key, bs) {
+      final first = bs.first;
+      final people = <SchPerson>[];
+      for (final b in bs) {
+        final p = names[b.personId];
+        if (p != null && !people.any((x) => x.id == p.id)) people.add(p);
+      }
+      people.sort((a, b) => a.name.compareTo(b.name));
+      final earliest = bs.map((b) => b.from).reduce((a, b) => a.isBefore(b) ? a : b);
+      if (_group == SchGroup.item) {
+        lanes.add(_Lane(
+          key: key,
+          title: first.ref ?? 'Item ${first.workItemId}',
+          subtitle: first.title,
+          accent: DispatchColors.parseHex(first.typeColour),
+          ref: first.ref,
+          sizeStamp: first.sizeStamp,
+          people: people,
+          earliest: earliest,
+        ));
+      } else {
+        final items = bs.map((b) => b.workItemId).toSet().length;
+        lanes.add(_Lane(
+          key: key,
+          title: first.typeName ?? 'Unclassified',
+          subtitle: dotJoin([
+            '$items ${items == 1 ? 'item' : 'items'}',
+            '${people.length} ${people.length == 1 ? 'person' : 'people'}',
+          ]),
+          accent: DispatchColors.parseHex(first.typeColour),
+          people: people,
+          earliest: earliest,
+        ));
+      }
+    });
+    lanes.sort((a, b) => _group == SchGroup.item
+        ? a.earliest!.compareTo(b.earliest!) == 0
+            ? a.title.compareTo(b.title)
+            : a.earliest!.compareTo(b.earliest!)
+        : a.title.compareTo(b.title));
+    return lanes;
   }
 
   _Placed? _place(SchBlock b, {required bool ghost}) {
@@ -345,17 +433,29 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           const SizedBox(height: Sp.md),
           LayoutBuilder(
             builder: (context, constraints) {
+              final version = d.planVersion;
               final pills = [
+                Tooltip(
+                  message: 'Open the plan version history',
+                  child: InfoPill(
+                    version == null ? 'No committed plan' : 'Plan v${version.versionNo} · ${humanise(version.status)}',
+                    icon: Icons.verified_outlined,
+                    onTap: () => context.go(PlanVersionsScreen.route),
+                  ),
+                ),
                 InfoPill('Freeze horizon: ${policy.freezeHorizonDays} working days', icon: Icons.lock_outline),
                 InfoPill('Incident reserve: ${fmtPct(policy.incidentReservePct)} per person', icon: Icons.shield_outlined),
               ];
-              if (constraints.maxWidth < 1120) return SchLegend(workTypes: config.activeWorkTypes, trailing: pills);
+              if (constraints.maxWidth < 1240) return SchLegend(workTypes: config.activeWorkTypes, trailing: pills);
               return Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Expanded(child: SchLegend(workTypes: config.activeWorkTypes)),
+                  Expanded(flex: 3, child: SchLegend(workTypes: config.activeWorkTypes)),
                   const SizedBox(width: Sp.md),
-                  Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: pills),
+                  Flexible(
+                    flex: 2,
+                    child: Wrap(spacing: Sp.sm, runSpacing: Sp.sm, alignment: WrapAlignment.end, children: pills),
+                  ),
                 ],
               );
             },
@@ -383,21 +483,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         Text(subtitle, style: context.text.bodyMedium?.copyWith(color: context.mutedColor)),
       ],
     );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final narrow = constraints.maxWidth < 1120;
-        final controls = _controls(canPlan);
-        if (narrow) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [title, const SizedBox(height: Sp.md), controls],
-          );
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [Expanded(child: title), const SizedBox(width: Sp.md), controls],
-        );
-      },
+    // The controls take a row of their own: with the zoom, the grouping, the
+    // overlay, the filters and two links there are more of them than will sit
+    // beside the title, and a Wrap only wraps when its width is bounded.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(width: double.infinity, child: title),
+        const SizedBox(height: Sp.md),
+        _controls(canPlan),
+      ],
     );
   }
 
@@ -415,11 +510,22 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 _load();
               },
             ),
+            _groupControl(),
             _overlayToggle(),
             SecondaryButton(
               _filterCount == 0 ? 'Filter' : 'Filter ($_filterCount)',
               icon: Icons.filter_alt_outlined,
               onPressed: _openFilters,
+            ),
+            SecondaryButton(
+              'Version history',
+              icon: Icons.history,
+              onPressed: () => context.go(PlanVersionsScreen.route),
+            ),
+            SecondaryButton(
+              'Scenarios',
+              icon: Icons.alt_route_outlined,
+              onPressed: () => context.go(ScenariosScreen.route),
             ),
             if (canPlan)
               PrimaryButton(
@@ -431,6 +537,39 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       ],
     );
   }
+
+  /// Group by person, item or work type (VIEW-04). Grouping is a client-side
+  /// re-lane of the same payload, so it never costs a round trip.
+  Widget _groupControl({bool compact = false}) {
+    return Semantics(
+      label: 'Group the schedule by person, item or work type',
+      child: Tooltip(
+        message: 'Group lanes by ${_groupLabel.toLowerCase()}',
+        child: SegmentedTabs(
+          compact: compact,
+          labels: const ['Person', 'Item', 'Work type'],
+          selected: switch (_group) { SchGroup.person => 0, SchGroup.item => 1, SchGroup.workType => 2 },
+          onChanged: (i) {
+            final next = switch (i) { 1 => SchGroup.item, 2 => SchGroup.workType, _ => SchGroup.person };
+            if (next == _group) return;
+            setState(() {
+              _group = next;
+              _nudge.clear();
+              _selectedLaneKey = null;
+              _layout();
+            });
+            _announce('Grouped by ${_groupLabel.toLowerCase()}, ${_lanes.length} ${_lanes.length == 1 ? 'lane' : 'lanes'}');
+          },
+        ),
+      ),
+    );
+  }
+
+  String get _groupLabel => switch (_group) {
+        SchGroup.person => 'Person',
+        SchGroup.item => 'Item',
+        SchGroup.workType => 'Work type',
+      };
 
   int get _filterCount => [_teamId, _typeId, _skillId, _itemId].where((v) => v != null).length;
 
@@ -458,17 +597,23 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   // --- the grid --------------------------------------------------------------
 
   Widget _grid(ScheduleData d, {required bool canPlan, required Policy policy}) {
-    if (d.people.isEmpty) {
+    if (_lanes.isEmpty) {
       return Panel(
         child: EmptyState(
-          icon: Icons.groups_outlined,
-          title: 'No people match these filters',
-          message: 'Clear the filters to see the whole team.',
+          icon: _group == SchGroup.person ? Icons.groups_outlined : Icons.view_agenda_outlined,
+          title: switch (_group) {
+            SchGroup.person => 'No people match these filters',
+            SchGroup.item => 'No work items match these filters',
+            SchGroup.workType => 'No work types match these filters',
+          },
+          message: _filterCount == 0
+              ? 'Nothing is scheduled in this window.'
+              : 'Clear the filters to see the whole plan.',
           action: _filterCount == 0 ? null : SecondaryButton('Clear filters', onPressed: _clearFilters),
         ),
       );
     }
-    if (_laneHeights.length != d.people.length) _layout();
+    if (_laneHeights.length != _lanes.length) _layout();
     final totalW = _days.length * _dayWidth;
     return Container(
       decoration: BoxDecoration(
@@ -494,7 +639,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     border: Border(right: BorderSide(color: context.borderColor), bottom: BorderSide(color: context.borderColor)),
                   ),
                   child: Text(
-                    '${d.people.length} ${d.people.length == 1 ? 'person' : 'people'} · ${fmtDays(d.daysPerWeekTotal)}/week',
+                    _laneColumnLabel(d),
                     style: context.text.titleSmall,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -520,15 +665,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     child: ListView.builder(
                       controller: _vLeft,
                       physics: const ClampingScrollPhysics(),
-                      itemCount: d.people.length,
-                      itemBuilder: (_, i) => SchLaneHeader(
-                        person: d.people[i],
-                        height: _laneHeights[i],
-                        targetMin: policy.targetLoadMin,
-                        targetMax: policy.targetLoadMax,
-                        onRota: d.rota.any((r) => r.personId == d.people[i].id),
-                        onTap: () => context.go(Routes.person(d.people[i].id)),
-                      ),
+                      itemCount: _lanes.length,
+                      itemBuilder: (_, i) => _laneHeader(d, i, policy),
                     ),
                   ),
                 ),
@@ -544,7 +682,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                         child: ListView.builder(
                           controller: _vRight,
                           physics: const ClampingScrollPhysics(),
-                          itemCount: d.people.length,
+                          itemCount: _lanes.length,
                           itemBuilder: (_, i) => _lane(d, i, totalW, canPlan),
                         ),
                       ),
@@ -652,10 +790,40 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
+  String _laneColumnLabel(ScheduleData d) => switch (_group) {
+        SchGroup.person => '${_lanes.length} ${_lanes.length == 1 ? 'person' : 'people'} · ${fmtDays(d.daysPerWeekTotal)}/week',
+        SchGroup.item => '${_lanes.length} ${_lanes.length == 1 ? 'work item' : 'work items'} scheduled',
+        SchGroup.workType => '${_lanes.length} ${_lanes.length == 1 ? 'work type' : 'work types'} scheduled',
+      };
+
+  Widget _laneHeader(ScheduleData d, int laneIndex, Policy policy) {
+    final lane = _lanes[laneIndex];
+    final person = lane.person;
+    if (person != null) {
+      return SchLaneHeader(
+        person: person,
+        height: _laneHeights[laneIndex],
+        targetMin: policy.targetLoadMin,
+        targetMax: policy.targetLoadMax,
+        onRota: d.rota.any((r) => r.personId == person.id),
+        onTap: () => context.go(Routes.person(person.id)),
+      );
+    }
+    return SchGroupLaneHeader(
+      title: lane.title,
+      subtitle: lane.subtitle,
+      height: _laneHeights[laneIndex],
+      accent: lane.accent,
+      sizeStamp: lane.sizeStamp,
+      people: [for (final p in lane.people) (initials: p.initialsOrDerived, colourHex: p.colourHex, seed: p.id, name: p.name)],
+      onTap: lane.ref == null ? null : () => context.go(Routes.item(lane.ref!)),
+    );
+  }
+
   Widget _lane(ScheduleData d, int laneIndex, double totalW, bool canPlan) {
-    final person = d.people[laneIndex];
+    final lane = _lanes[laneIndex];
     final height = _laneHeights[laneIndex];
-    final items = _laneBlocks[person.id] ?? const <_Placed>[];
+    final items = _laneBlocks[lane.key] ?? const <_Placed>[];
     return SizedBox(
       height: height,
       width: totalW,
@@ -679,13 +847,13 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               ),
             ),
           ),
-          for (final it in items) _positioned(d, it, person, canPlan),
+          for (final it in items) _positioned(d, it, lane, canPlan),
         ],
       ),
     );
   }
 
-  Widget _positioned(ScheduleData d, _Placed it, SchPerson person, bool canPlan) {
+  Widget _positioned(ScheduleData d, _Placed it, _Lane lane, bool canPlan) {
     final nudged = it.block != null ? (_nudge[it.block!.id] ?? 0) : 0;
     final start = (it.startIdx + nudged).clamp(0, math.max(0, _days.length - 1));
     final left = start * _dayWidth;
@@ -701,12 +869,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         away: true,
         title: dotJoin([a.label, if (returns != null) 'returns ${fmtDayMonth(returns)}']),
       );
-      child = Semantics(label: '${person.name}: ${a.label}, ${fmtDateRange(a.from, a.to)}', child: child);
+      child = Semantics(label: '${lane.title}: ${a.label}, ${fmtDateRange(a.from, a.to)}', child: child);
     } else {
       final b = it.block!;
       child = SchBlockCard(
-        title: dotJoin([b.ref, b.title]),
-        subtitle: b.subLabel,
+        title: _blockTitle(d, b),
+        subtitle: _blockSubtitle(d, b),
         railColour: DispatchColors.parseHex(b.typeColour),
         indicative: b.isIndicative,
         moved: !it.ghost && ((_overlay && b.changed) || nudged != 0),
@@ -715,7 +883,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         fixed: b.fixedPerson || b.fixedDates,
         dense: _zoom == SchZoom.months,
       );
-      if (!it.ghost) child = _interactive(d, b, person, child, canPlan: canPlan, nudged: nudged);
+      if (!it.ghost) child = _interactive(d, b, lane, child, canPlan: canPlan, nudged: nudged);
     }
 
     return Positioned(
@@ -727,13 +895,38 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  Widget _interactive(ScheduleData d, SchBlock b, SchPerson person, Widget child, {required bool canPlan, required int nudged}) {
+  /// On a person lane the block names its item; on an item lane the lane
+  /// already names the item, so the block names the person doing it.
+  String _blockTitle(ScheduleData d, SchBlock b) =>
+      _group == SchGroup.item ? (_personName(d, b.personId) ?? dotJoin([b.ref, b.title])) : dotJoin([b.ref, b.title]);
+
+  String _blockSubtitle(ScheduleData d, SchBlock b) => switch (_group) {
+        SchGroup.person => b.subLabel,
+        SchGroup.item => dotJoin([
+            b.roleLabel,
+            if (b.allocationPct != 100) '${b.allocationPct}%',
+            if (b.isIndicative) 'indicative',
+          ]),
+        SchGroup.workType => dotJoin([
+            _personName(d, b.personId),
+            b.sizeStamp,
+            if (b.allocationPct != 100) '${b.allocationPct}%',
+            if (b.isIndicative) 'indicative',
+          ]),
+      };
+
+  String? _personName(ScheduleData d, int personId) => d.people.where((p) => p.id == personId).firstOrNull?.name;
+
+  SchPerson? _personFor(ScheduleData d, int personId) => d.people.where((p) => p.id == personId).firstOrNull;
+
+  Widget _interactive(ScheduleData d, SchBlock b, _Lane lane, Widget child, {required bool canPlan, required int nudged}) {
     final node = _focusNodes.putIfAbsent(b.id, () => FocusNode(debugLabel: 'block-${b.id}'));
+    // Dragging between lanes only means something when a lane is a person.
     final draggable = canPlan && !b.fixedDates && !_overlay;
 
     Widget inner = Focus(
       focusNode: node,
-      onKeyEvent: (_, event) => _onKey(d, b, person, event),
+      onKeyEvent: (_, event) => _onKey(d, b, event),
       child: Builder(
         builder: (ctx) {
           final focused = Focus.of(ctx).hasFocus;
@@ -753,7 +946,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     inner = Semantics(
       button: true,
       label: [
-        person.name,
+        _personName(d, b.personId) ?? lane.title,
         dotJoin([b.ref, b.title]),
         fmtDateRange(b.from, b.to),
         if (b.allocationPct != 100) '${b.allocationPct}% allocation',
@@ -771,7 +964,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         behavior: HitTestBehavior.opaque,
         onTap: () {
           node.requestFocus();
-          _showBlockDetails(d, b, person);
+          _showBlockDetails(d, b);
         },
         onLongPressStart: draggable
             ? (_) => setState(() {
@@ -798,7 +991,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   // --- keyboard (9.6) --------------------------------------------------------
 
-  KeyEventResult _onKey(ScheduleData d, SchBlock b, SchPerson person, KeyEvent event) {
+  KeyEventResult _onKey(ScheduleData d, SchBlock b, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
     final shift = HardwareKeyboard.instance.isShiftPressed;
     final key = event.logicalKey;
@@ -808,7 +1001,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       if (n != 0) {
         _confirmMove(d, b, dayDelta: n, targetPersonId: b.personId);
       } else {
-        _showBlockDetails(d, b, person);
+        _showBlockDetails(d, b);
       }
       return KeyEventResult.handled;
     }
@@ -835,18 +1028,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       );
       return KeyEventResult.handled;
     }
+    final lane = _lanes.indexWhere((l) => l.key == _laneKeyFor(b));
     if (shift && (up || down)) {
-      final lane = d.people.indexWhere((p) => p.id == b.personId);
+      // Reassigning by lane only makes sense when a lane is a person.
+      if (_group != SchGroup.person) {
+        _announce('Group the schedule by person to move work to someone else.');
+        return KeyEventResult.handled;
+      }
       final target = lane + (down ? 1 : -1);
-      if (target < 0 || target >= d.people.length) return KeyEventResult.handled;
-      _confirmMove(d, b, dayDelta: _nudge[b.id] ?? 0, targetPersonId: d.people[target].id);
+      if (target < 0 || target >= _lanes.length) return KeyEventResult.handled;
+      final person = _lanes[target].person;
+      if (person == null) return KeyEventResult.handled;
+      _confirmMove(d, b, dayDelta: _nudge[b.id] ?? 0, targetPersonId: person.id);
       return KeyEventResult.handled;
     }
 
     // Plain arrows move focus between blocks.
-    final lane = d.people.indexWhere((p) => p.id == b.personId);
     if (left || right) {
-      final siblings = (_laneBlocks[b.personId] ?? const <_Placed>[]).where((p) => p.block != null && !p.ghost).toList()
+      final siblings = (_laneBlocks[_laneKeyFor(b)] ?? const <_Placed>[]).where((p) => p.block != null && !p.ghost).toList()
         ..sort((x, y) => x.startIdx.compareTo(y.startIdx));
       final i = siblings.indexWhere((p) => p.block!.id == b.id);
       final next = i + (right ? 1 : -1);
@@ -857,8 +1056,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       return KeyEventResult.handled;
     }
     final targetLane = lane + (down ? 1 : -1);
-    if (targetLane < 0 || targetLane >= d.people.length) return KeyEventResult.handled;
-    final neighbours = (_laneBlocks[d.people[targetLane].id] ?? const <_Placed>[]).where((p) => p.block != null && !p.ghost).toList();
+    if (targetLane < 0 || targetLane >= _lanes.length) return KeyEventResult.handled;
+    final neighbours = (_laneBlocks[_lanes[targetLane].key] ?? const <_Placed>[]).where((p) => p.block != null && !p.ghost).toList();
     if (neighbours.isEmpty) return KeyEventResult.handled;
     neighbours.sort((x, y) => (x.startIdx - _indexOf(b.from)).abs().compareTo((y.startIdx - _indexOf(b.from)).abs()));
     final target = neighbours.first.block!;
@@ -886,17 +1085,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       _dragDelta = Offset.zero;
     });
     final dayDelta = (delta.dx / _dayWidth).round();
-    final lane = d.people.indexWhere((p) => p.id == b.personId);
+    final lane = _lanes.indexWhere((l) => l.key == _laneKeyFor(b));
     if (lane < 0) return;
-    var targetLane = lane;
-    if (delta.dy.abs() > 12 && _laneTops.isNotEmpty) {
+    var targetPerson = b.personId;
+    // Vertical travel only reassigns when the lanes are people (VIEW-04): on an
+    // item or work-type lane a drag moves the dates and keeps the assignee.
+    if (_group == SchGroup.person && delta.dy.abs() > 12 && _laneTops.isNotEmpty) {
+      var targetLane = 0;
       final origin = _laneTops[lane] + delta.dy;
-      targetLane = 0;
       for (var i = 0; i < _laneTops.length; i++) {
         if (origin >= _laneTops[i]) targetLane = i;
       }
+      targetPerson = _lanes[targetLane.clamp(0, _lanes.length - 1)].person?.id ?? b.personId;
     }
-    final targetPerson = d.people[targetLane.clamp(0, d.people.length - 1)].id;
     if (dayDelta == 0 && targetPerson == b.personId) return;
     _confirmMove(d, b, dayDelta: dayDelta, targetPersonId: targetPerson);
   }
@@ -1120,8 +1321,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   // --- block details popover -------------------------------------------------
 
-  Future<void> _showBlockDetails(ScheduleData d, SchBlock b, SchPerson person) async {
+  Future<void> _showBlockDetails(ScheduleData d, SchBlock b) async {
     final session = context.read<Session>();
+    final person = _personFor(d, b.personId);
     var fixedPerson = b.fixedPerson;
     var fixedDates = b.fixedDates;
     await showDialog<void>(
@@ -1135,14 +1337,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    PersonAvatar(person.initialsOrDerived, colourHex: person.colourHex, seed: person.id, size: 28),
-                    const SizedBox(width: Sp.sm),
-                    Expanded(child: Text(dotJoin([person.name, person.roleTitle]), style: context.text.bodyMedium)),
-                  ],
-                ),
-                const SizedBox(height: Sp.md),
+                if (person != null) ...[
+                  Row(
+                    children: [
+                      PersonAvatar(person.initialsOrDerived, colourHex: person.colourHex, seed: person.id, size: 28),
+                      const SizedBox(width: Sp.sm),
+                      Expanded(child: Text(dotJoin([person.name, person.roleTitle]), style: context.text.bodyMedium)),
+                    ],
+                  ),
+                  const SizedBox(height: Sp.md),
+                ],
                 _detail('Dates', fmtDateRange(b.from, b.to)),
                 _detail('Allocation', '${b.allocationPct}%'),
                 if (b.roleLabel != null) _detail('Role', b.roleLabel!),
@@ -1425,8 +1629,15 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   // --- phone (MOB-02) --------------------------------------------------------
 
   Widget _phoneBody(ScheduleData d) {
-    final person = d.people.where((p) => p.id == _selectedPersonId).firstOrNull ?? (d.people.isEmpty ? null : d.people.first);
-    final blocks = person == null ? <SchBlock>[] : d.blocks.where((b) => b.personId == person.id).toList()
+    if (_laneHeights.length != _lanes.length) _layout();
+    final lane = _lanes.where((l) => l.key == _selectedLaneKey).firstOrNull ?? _lanes.firstOrNull;
+    final person = lane?.person;
+    final blocks = lane == null
+        ? <SchBlock>[]
+        : (_laneBlocks[lane.key] ?? const <_Placed>[])
+            .where((p) => p.block != null && !p.ghost)
+            .map((p) => p.block!)
+            .toList()
       ..sort((a, b) => a.from.compareTo(b.from));
     final away = person == null ? <SchAway>[] : d.away.where((a) => a.personId == person.id).toList();
 
@@ -1444,53 +1655,107 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             ]),
             style: context.text.bodySmall?.copyWith(color: context.mutedColor),
           ),
+          const SizedBox(height: Sp.md),
+          // One lane at a time on a phone (MOB-02), so grouping picks what a
+          // lane is and the picker below chooses which one.
+          SizedBox(width: double.infinity, child: _groupControl(compact: true)),
+          const SizedBox(height: Sp.md),
+          Wrap(
+            spacing: Sp.sm,
+            runSpacing: Sp.sm,
+            children: [
+              InfoPill('Version history', icon: Icons.history, onTap: () => context.go(PlanVersionsScreen.route)),
+              InfoPill('Scenarios', icon: Icons.alt_route_outlined, onTap: () => context.go(ScenariosScreen.route)),
+            ],
+          ),
           const SizedBox(height: Sp.lg),
-          if (d.people.isEmpty)
-            const EmptyState(icon: Icons.groups_outlined, title: 'No people in this workspace', message: 'Add people to the team to see a schedule.')
+          if (_lanes.isEmpty)
+            EmptyState(
+              icon: Icons.groups_outlined,
+              title: switch (_group) {
+                SchGroup.person => 'No people in this workspace',
+                SchGroup.item => 'Nothing is scheduled in this window',
+                SchGroup.workType => 'Nothing is scheduled in this window',
+              },
+              message: 'Add people and plan some work to see a schedule.',
+            )
           else ...[
-            DropdownButtonFormField<int>(
-              initialValue: person?.id,
+            DropdownButtonFormField<String>(
+              initialValue: lane?.key,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Person'),
+              decoration: InputDecoration(labelText: _groupLabel),
               items: [
-                for (final p in d.people)
+                for (final l in _lanes)
                   DropdownMenuItem(
-                    value: p.id,
-                    child: Text('${p.name} · ${p.loadPct.round()}%', maxLines: 1, overflow: TextOverflow.ellipsis),
+                    value: l.key,
+                    child: Text(_laneOptionLabel(l), maxLines: 1, overflow: TextOverflow.ellipsis),
                   ),
               ],
-              onChanged: (v) => setState(() => _selectedPersonId = v),
+              onChanged: (v) => setState(() => _selectedLaneKey = v),
             ),
             const SizedBox(height: Sp.lg),
-            if (person != null)
-              Row(
-                children: [
-                  PersonAvatar(person.initialsOrDerived, colourHex: person.colourHex, seed: person.id, size: 36),
-                  const SizedBox(width: Sp.md),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(person.name, style: context.text.titleMedium),
-                        Text(dotJoin([person.roleTitle, '${person.loadPct.round()}% load']),
-                            style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+            if (lane != null) _phoneLaneSummary(lane),
             const SizedBox(height: Sp.lg),
             if (blocks.isEmpty && away.isEmpty)
               EmptyState(
                 icon: Icons.event_available_outlined,
                 title: 'Nothing scheduled',
-                message: 'No work is scheduled for ${person?.name ?? 'this person'} in this window.',
+                message: 'No work is scheduled for ${lane?.title ?? 'this lane'} in this window.',
               )
             else
               ..._phoneWeeks(d, blocks, away),
           ],
         ],
       ),
+    );
+  }
+
+  String _laneOptionLabel(_Lane l) {
+    final p = l.person;
+    if (p != null) return '${p.name} · ${p.loadPct.round()}%';
+    return dotJoin([l.title, l.subtitle]);
+  }
+
+  Widget _phoneLaneSummary(_Lane lane) {
+    final person = lane.person;
+    if (person != null) {
+      return Row(
+        children: [
+          PersonAvatar(person.initialsOrDerived, colourHex: person.colourHex, seed: person.id, size: 36),
+          const SizedBox(width: Sp.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(person.name, style: context.text.titleMedium),
+                Text(dotJoin([person.roleTitle, '${person.loadPct.round()}% load']),
+                    style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+    return Row(
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: lane.accent ?? DispatchColors.typeBlue, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: Sp.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(lane.title, style: context.text.titleMedium, maxLines: 1, overflow: TextOverflow.ellipsis),
+              if (lane.subtitle != null)
+                Text(lane.subtitle!, maxLines: 2, overflow: TextOverflow.ellipsis, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+            ],
+          ),
+        ),
+        if (lane.sizeStamp != null) SizeStamp(lane.sizeStamp, size: 24),
+      ],
     );
   }
 
@@ -1525,10 +1790,17 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(dotJoin([b.ref, b.title]), style: context.text.titleSmall),
+                      Text(_blockTitle(d, b), maxLines: 2, overflow: TextOverflow.ellipsis, style: context.text.titleSmall),
                       const SizedBox(height: 2),
                       Text(
-                        dotJoin([fmtDateRange(b.from, b.to), '${b.allocationPct}%', b.roleLabel, if (b.isIndicative) 'indicative']),
+                        dotJoin([
+                          fmtDateRange(b.from, b.to),
+                          '${b.allocationPct}%',
+                          if (_group == SchGroup.workType) _personName(d, b.personId) else b.roleLabel,
+                          if (b.isIndicative) 'indicative',
+                        ]),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: context.text.bodySmall?.copyWith(color: context.mutedColor),
                       ),
                     ],
@@ -1624,6 +1896,35 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 }
 
 // ---------------------------------------------------------------------------
+
+/// One row of the grid. Grouping by person gives a lane per person (and
+/// [person] carries the load for its header); grouping by item or work type
+/// gives a derived lane with the assignees on it (VIEW-04).
+class _Lane {
+  _Lane({
+    required this.key,
+    required this.title,
+    this.subtitle,
+    this.person,
+    this.accent,
+    this.ref,
+    this.sizeStamp,
+    this.people = const [],
+    this.earliest,
+  });
+
+  final String key;
+  final String title;
+  final String? subtitle;
+  final SchPerson? person;
+  final Color? accent;
+  final String? ref;
+  final String? sizeStamp;
+  final List<SchPerson> people;
+  final DateTime? earliest;
+
+  bool get isPerson => person != null;
+}
 
 /// A block or an away period placed on the working-day axis of one lane.
 class _Placed {

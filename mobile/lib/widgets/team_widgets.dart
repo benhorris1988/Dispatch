@@ -60,6 +60,59 @@ class TmMetricTitle extends StatelessWidget {
   }
 }
 
+/// A [Panel] whose title is a [TmMetricTitle], so the metric it shows carries
+/// its own definition (REP-04). [Panel] takes a String title, which cannot hold
+/// the info icon, so the header is composed here against the same padding and
+/// typography the panel header uses.
+class TmMetricPanel extends StatelessWidget {
+  const TmMetricPanel({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.definition,
+    this.trailing,
+    this.padding = const EdgeInsets.fromLTRB(Sp.lg, Sp.sm, Sp.lg, Sp.lg),
+    this.dividerAfterHeader = false,
+  });
+
+  final String title;
+  final String? subtitle;
+
+  /// Formula, inclusions and exclusions — reached through the info icon.
+  final String? definition;
+  final Widget? trailing;
+  final Widget child;
+  final EdgeInsets padding;
+  final bool dividerAfterHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      padding: EdgeInsets.zero,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Padding(
+          // Matches Panel's own header padding, less the icon button's inset so
+          // the title sits on the same baseline as a plain panel's.
+          padding: EdgeInsets.fromLTRB(Sp.lg, Sp.md, Sp.lg, dividerAfterHeader ? Sp.sm : 0),
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Sp.md,
+            runSpacing: Sp.sm,
+            children: [
+              TmMetricTitle(title: title, subtitle: subtitle, definition: definition),
+              ?trailing,
+            ],
+          ),
+        ),
+        if (dividerAfterHeader) const Divider(),
+        Padding(padding: padding, child: child),
+      ]),
+    );
+  }
+}
+
 Future<void> showTmInfoDialog(BuildContext context, String title, String body) {
   return showDialog<void>(
     context: context,

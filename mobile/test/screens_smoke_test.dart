@@ -23,7 +23,9 @@ import 'package:dispatch_app/screens/notifications_screen.dart';
 import 'package:dispatch_app/screens/overview_screen.dart';
 import 'package:dispatch_app/screens/person_screen.dart';
 import 'package:dispatch_app/screens/pipeline_screen.dart';
+import 'package:dispatch_app/screens/plan_versions_screen.dart';
 import 'package:dispatch_app/screens/reports_screen.dart';
+import 'package:dispatch_app/screens/scenarios_screen.dart';
 import 'package:dispatch_app/screens/schedule_screen.dart';
 import 'package:dispatch_app/screens/settings_screen.dart';
 import 'package:dispatch_app/screens/team_skills_screen.dart';
@@ -121,6 +123,8 @@ Future<void> main() async {
     'Overview': const OverviewScreen(),
     'Pipeline': const PipelineScreen(),
     'Schedule': const ScheduleScreen(),
+    'Plan versions': const PlanVersionsScreen(),
+    'Scenarios': const ScenariosScreen(),
     'Changes': const ChangesScreen(),
     'Team & skills': const TeamSkillsScreen(),
     'Person': const PersonScreen(id: '1'),
@@ -135,22 +139,19 @@ Future<void> main() async {
     'Add work': const AddWorkScreen(),
   };
 
+  // Every screen at every width. Restricting the responsive pass to a handful of screens
+  // was a real hole: three separate sweeps found overflows on screens the bar was happy
+  // with, because it only ever drew them at 1440px. A layout that breaks on a phone is
+  // broken whether or not anyone happened to test that screen there.
   for (final entry in screens.entries) {
-    testWidgets('${entry.key} renders on desktop', (tester) async {
-      await render(tester, entry.value, _sizes['desktop']!);
-      expectLoaded(tester, entry.key);
-    });
-  }
-
-  // The three surfaces the design commits to. Phone layouts are a different code path.
-  for (final name in ['Overview', 'Pipeline', 'Schedule', 'Changes', 'My week']) {
-    for (final size in ['tablet', 'phone']) {
-      testWidgets('$name renders on $size', (tester) async {
-        await render(tester, screens[name]!, _sizes[size]!);
-        expectLoaded(tester, name);
+    for (final size in _sizes.keys) {
+      testWidgets('${entry.key} renders on $size', (tester) async {
+        await render(tester, entry.value, _sizes[size]!);
+        expectLoaded(tester, '${entry.key} ($size)');
       });
     }
   }
+
 
   testWidgets('screens render in dark theme', (tester) async {
     for (final name in ['Overview', 'Schedule', 'Benefits']) {

@@ -13,6 +13,7 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/team_widgets.dart';
+import '../widgets/wc_filters.dart';
 import '../widgets/widgets.dart';
 
 /// Benefits (BEN-*, spec 9.4.9). The register totals value in plan, realised to
@@ -34,6 +35,27 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
   String? _error;
   _Register? _data;
 
+  // Register filters (BEN-05). `benefits.php list` takes all four; they narrow
+  // the register itself, never the workspace totals beside it.
+  String? _fType;
+  String? _fStatus;
+  String? _fOwner;
+  String? _fQuarter;
+
+  /// Every quarter the register has ever shown, so narrowing to one does not
+  /// empty the quarter picker behind you.
+  final Set<String> _quartersSeen = {};
+
+  static const _statusOptions = <String, String>{
+    'planned': 'Planned',
+    'in_flight': 'In flight',
+    'realising': 'Realising',
+    'realised': 'Realised',
+    'at_risk': 'At risk',
+  };
+
+  int get _filterCount => [_fType, _fStatus, _fOwner, _fQuarter].where((f) => f != null).length;
+
   @override
   void initState() {
     super.initState();
@@ -42,14 +64,27 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
 
   Future<void> _load() async {
     setState(() {
-      _loading = true;
+      // Only the first load blanks the page: changing a filter keeps the
+      // register on screen, and the filter row with it.
+      _loading = _data == null;
       _error = null;
     });
     try {
-      final r = await Api.post('benefits.php', 'list');
+      // Only the register lists benefits, so the other two tabs always ask for
+      // everything and cannot show a filtered aggregate by accident.
+      final onRegister = _tab == 0;
+      final r = await Api.post('benefits.php', 'list', {
+        if (onRegister && _fType != null) 'type': _fType,
+        if (onRegister && _fStatus != null) 'status': _fStatus,
+        if (onRegister && _fOwner != null) 'owner': _fOwner,
+        if (onRegister && _fQuarter != null) 'quarter': _fQuarter,
+      });
       if (!mounted) return;
       setState(() {
         _data = _Register.fromJson(r);
+        _quartersSeen
+          ..addAll(_data!.byQuarter.map((q) => q.quarter).where((q) => q.isNotEmpty))
+          ..addAll(_data!.benefits.map((b) => b.realisationQuarter).whereType<String>());
         _loading = false;
       });
     } on ApiException catch (e) {
@@ -59,6 +94,93 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
         _loading = false;
       });
     }
+  }
+
+  void _setFilter(void Function() change) {
+    setState(change);
+    _load();
+  }
+
+  void _clearFilters() => _setFilter(() {
+        _fType = null;
+        _fStatus = null;
+        _fOwner = null;
+        _fQuarter = null;
+      });
+
+  void _setTab(int i) {
+    final wasFiltered = _filterCount > 0 && (_tab == 0) != (i == 0);
+    setState(() => _tab = i);
+    if (wasFiltered) _load();
+  }
+
+  /// Q1 2026 before Q2 2026 before Q1 2027.
+  static int _quarterKey(String q) {
+    final m = RegExp(r'Q(\d)\s*(\d{4})').firstMatch(q);
+    if (m == null) return 0;
+    return int.parse(m.group(2)!) * 10 + int.parse(m.group(1)!);
+  }
+
+  Widget _filterBar(_Register d) {
+    final owners = d.byOwner.map((o) => o.ownerName).where((n) => n.isNotEmpty && n != 'Unassigned').toList()..sort();
+    final quarters = _quartersSeen.toList()..sort((a, b) => _quarterKey(a).compareTo(_quarterKey(b)));
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Wrap(spacing: Sp.md, runSpacing: Sp.md, crossAxisAlignment: WrapCrossAlignment.center, children: [
+        WcFilterDropdown<String?>(
+          value: _fType,
+          hint: 'All types',
+          icon: Icons.category_outlined,
+          maxWidth: 210,
+          items: [
+            const DropdownMenuItem<String?>(value: null, child: Text('All types')),
+            for (final t in d.types) DropdownMenuItem<String?>(value: t.type, child: Text(t.label)),
+          ],
+          onChanged: (v) => _setFilter(() => _fType = v),
+        ),
+        WcFilterDropdown<String?>(
+          value: _fStatus,
+          hint: 'Any status',
+          icon: Icons.flag_outlined,
+          maxWidth: 190,
+          items: [
+            const DropdownMenuItem<String?>(value: null, child: Text('Any status')),
+            for (final e in _statusOptions.entries) DropdownMenuItem<String?>(value: e.key, child: Text(e.value)),
+          ],
+          onChanged: (v) => _setFilter(() => _fStatus = v),
+        ),
+        WcFilterDropdown<String?>(
+          value: owners.contains(_fOwner) ? _fOwner : null,
+          hint: 'All owners',
+          icon: Icons.person_outline_rounded,
+          maxWidth: 210,
+          items: [
+            const DropdownMenuItem<String?>(value: null, child: Text('All owners')),
+            for (final o in owners) DropdownMenuItem<String?>(value: o, child: Text(o)),
+          ],
+          onChanged: (v) => _setFilter(() => _fOwner = v),
+        ),
+        WcFilterDropdown<String?>(
+          value: quarters.contains(_fQuarter) ? _fQuarter : null,
+          hint: 'Any quarter',
+          icon: Icons.event_outlined,
+          maxWidth: 170,
+          items: [
+            const DropdownMenuItem<String?>(value: null, child: Text('Any quarter')),
+            for (final q in quarters) DropdownMenuItem<String?>(value: q, child: Text(q)),
+          ],
+          onChanged: (v) => _setFilter(() => _fQuarter = v),
+        ),
+        WcActiveFilters(count: _filterCount, onClear: _clearFilters),
+      ]),
+      if (_filterCount > 0) ...[
+        const SizedBox(height: Sp.sm),
+        Text(
+          'Showing ${d.benefits.length} of ${d.totals.benefitCount} benefits. The totals above cover the whole register.',
+          style: context.text.bodySmall,
+        ),
+      ],
+    ]);
   }
 
   Future<void> _export() async {
@@ -105,7 +227,7 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
                   'values are annual, owner-confirmed',
                 ]),
           actions: [
-            SegmentedTabs(labels: _tabs, selected: _tab, onChanged: (i) => setState(() => _tab = i)),
+            SegmentedTabs(labels: _tabs, selected: _tab, onChanged: _setTab),
             SecondaryButton('Export', icon: Icons.file_download_outlined, onPressed: d == null ? null : _export),
             if (session.can('benefit_owner')) PrimaryButton('Add benefit', icon: Icons.add_rounded, onPressed: _addBenefit),
           ],
@@ -115,7 +237,7 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
           const _BenefitsSkeleton()
         else if (_error != null)
           ErrorState(title: 'We could not load the benefits register', message: _error, onRetry: _load)
-        else if (d == null || d.benefits.isEmpty)
+        else if (d == null || (d.benefits.isEmpty && _filterCount == 0))
           EmptyState(
             icon: Icons.savings_outlined,
             title: 'No benefits recorded yet',
@@ -134,7 +256,13 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
                   onRecord: _recordRealisation,
                 ),
               2 => _ByOwnerTab(data: d),
-              _ => _RegisterTab(data: d, canEdit: session.can('benefit_owner'), onEdit: _editBenefit),
+              _ => _RegisterTab(
+                  data: d,
+                  canEdit: session.can('benefit_owner'),
+                  onEdit: _editBenefit,
+                  filters: _filterBar(d),
+                  onClearFilters: _filterCount == 0 ? null : _clearFilters,
+                ),
             };
             final right = _SidePanels(data: d, policy: config.policy);
             if (!wide) {
@@ -197,13 +325,42 @@ class _Totals extends StatelessWidget {
 // ─── Register tab ─────────────────────────────────────────────────────────
 
 class _RegisterTab extends StatelessWidget {
-  const _RegisterTab({required this.data, required this.canEdit, required this.onEdit});
+  const _RegisterTab({
+    required this.data,
+    required this.canEdit,
+    required this.onEdit,
+    required this.filters,
+    this.onClearFilters,
+  });
   final _Register data;
   final bool canEdit;
   final void Function(_BenefitRow) onEdit;
 
+  /// The type, status, owner and quarter row (BEN-05).
+  final Widget filters;
+  final VoidCallback? onClearFilters;
+
   @override
   Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      filters,
+      const SizedBox(height: Sp.lg),
+      _panel(context),
+    ]);
+  }
+
+  Widget _panel(BuildContext context) {
+    if (data.benefits.isEmpty) {
+      return Panel(
+        child: EmptyState(
+          icon: Icons.filter_alt_outlined,
+          title: 'No benefit matches these filters',
+          message: 'Widen one of them to see more of the register.',
+          compact: true,
+          action: onClearFilters == null ? null : SecondaryButton('Clear the filters', onPressed: onClearFilters),
+        ),
+      );
+    }
     return Panel(
       padding: EdgeInsets.zero,
       child: LayoutBuilder(builder: (context, c) {

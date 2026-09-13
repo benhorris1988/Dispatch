@@ -41,10 +41,12 @@ class _AddWorkFormState extends State<AddWorkForm> {
   final _sponsor = TextEditingController();
   final _effortDays = TextEditingController();
   final _benefitValue = TextEditingController();
+  final _tags = TextEditingController();
 
   WorkType? _type;
   SizeClass? _size;
   DateTime? _neededBy;
+  DateTime? _earliestStart;
   String _benefitType = 'cost_avoidance';
   String _confidence = 'medium';
   String _severity = 'P3';
@@ -76,6 +78,7 @@ class _AddWorkFormState extends State<AddWorkForm> {
     _sponsor.dispose();
     _effortDays.dispose();
     _benefitValue.dispose();
+    _tags.dispose();
     super.dispose();
   }
 
@@ -135,6 +138,20 @@ class _AddWorkFormState extends State<AddWorkForm> {
     );
     if (picked != null && mounted) setState(() => _neededBy = picked);
   }
+
+  Future<void> _pickEarliestStart() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _earliestStart ?? now,
+      firstDate: DateTime(now.year - 1),
+      lastDate: DateTime(now.year + 3),
+      helpText: 'Earliest start',
+    );
+    if (picked != null && mounted) setState(() => _earliestStart = picked);
+  }
+
+  List<String> get _tagList => _tags.text.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
 
   Future<void> _addSkill() async {
     if (_catalogue.isEmpty) {
@@ -198,6 +215,8 @@ class _AddWorkFormState extends State<AddWorkForm> {
       if (_requestedBy.text.trim().isNotEmpty) 'requested_by': _requestedBy.text.trim(),
       if (_sponsor.text.trim().isNotEmpty) 'sponsor': _sponsor.text.trim(),
       if (_neededBy != null) 'needed_by': _iso(_neededBy!),
+      if (_earliestStart != null) 'earliest_start': _iso(_earliestStart!),
+      if (_tagList.isNotEmpty) 'tags': _tagList,
       if (type.isInterrupt) 'severity': _severity,
       if (_skills.isNotEmpty)
         'skills': [for (final s in _skills) {'skill_id': s.skill.id, 'min_proficiency': s.minLevel}],
@@ -300,22 +319,39 @@ class _AddWorkFormState extends State<AddWorkForm> {
             },
           ),
         ],
-        _label('Needed by'),
-        Row(children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _pickNeededBy,
-              icon: const Icon(Icons.calendar_today_rounded, size: 18),
-              label: Align(alignment: Alignment.centerLeft, child: Text(_neededBy == null ? 'Choose a date' : fmtDate(_neededBy))),
-            ),
-          ),
-          if (_neededBy != null)
-            IconButton(
-              tooltip: 'Clear the needed-by date',
-              onPressed: () => setState(() => _neededBy = null),
-              icon: const Icon(Icons.close_rounded),
-            ),
-        ]),
+        _label('Dates'),
+        LayoutBuilder(builder: (context, box) {
+          final side = box.maxWidth < 420;
+          final neededBy = _DatePick(
+            label: 'Needed by',
+            value: _neededBy,
+            onPick: _pickNeededBy,
+            onClear: () => setState(() => _neededBy = null),
+          );
+          final earliest = _DatePick(
+            label: 'Earliest start',
+            value: _earliestStart,
+            onPick: _pickEarliestStart,
+            onClear: () => setState(() => _earliestStart = null),
+          );
+          if (side) {
+            return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              neededBy,
+              const SizedBox(height: Sp.md),
+              earliest,
+            ]);
+          }
+          return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: neededBy),
+            const SizedBox(width: Sp.md),
+            Expanded(child: earliest),
+          ]);
+        }),
+        const SizedBox(height: Sp.xs),
+        Text(
+          'The scheduler will not place this work before its earliest start. Leave it empty when the team could begin at any time.',
+          style: context.text.bodySmall,
+        ),
         _label('Why it matters'),
         TextFormField(
           controller: _summary,
@@ -329,6 +365,21 @@ class _AddWorkFormState extends State<AddWorkForm> {
           const SizedBox(width: Sp.md),
           Expanded(child: TextFormField(controller: _sponsor, decoration: const InputDecoration(labelText: 'Sponsor'))),
         ]),
+        _label('Tags'),
+        TextFormField(
+          controller: _tags,
+          onChanged: (_) => setState(() {}),
+          decoration: const InputDecoration(
+            hintText: 'Comma separated, for example finance, regulatory',
+            helperText: 'Tags are searchable from the pipeline.',
+          ),
+        ),
+        if (_tagList.isNotEmpty) ...[
+          const SizedBox(height: Sp.sm),
+          Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [
+            for (final t in _tagList) ToneChip(t, compact: true),
+          ]),
+        ],
         if (!(_type?.isInterrupt ?? false)) ...[
           _label('Benefit, £ per year'),
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -345,6 +396,7 @@ class _AddWorkFormState extends State<AddWorkForm> {
             Expanded(
               flex: 2,
               child: DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _benefitType,
                 decoration: const InputDecoration(labelText: 'Benefit type'),
                 items: [for (final e in _benefitTypes.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
@@ -354,6 +406,7 @@ class _AddWorkFormState extends State<AddWorkForm> {
             const SizedBox(width: Sp.md),
             Expanded(
               child: DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _confidence,
                 decoration: const InputDecoration(labelText: 'Confidence'),
                 items: const [
@@ -390,11 +443,10 @@ class _AddWorkFormState extends State<AddWorkForm> {
           ErrorState(title: 'The item could not be added', message: _error, compact: true),
         ],
         const SizedBox(height: Sp.lg),
-        Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-          if (widget.onCancel != null) ...[
-            SecondaryButton('Cancel', onPressed: widget.onCancel),
-            const SizedBox(width: Sp.md),
-          ],
+        // Wrap, so a long submit label and a cancel button stack on a narrow phone
+        // instead of running off the edge.
+        Wrap(alignment: WrapAlignment.end, spacing: Sp.md, runSpacing: Sp.sm, children: [
+          if (widget.onCancel != null) SecondaryButton('Cancel', onPressed: widget.onCancel),
           PrimaryButton(widget.submitLabel, icon: Icons.add_rounded, busy: _submitting, onPressed: _submit),
         ]),
       ]),
@@ -416,6 +468,42 @@ class _AddWorkFormState extends State<AddWorkForm> {
         children: [for (final c in children) SizedBox(width: width, child: c)],
       );
     });
+  }
+}
+
+/// Labelled date button used for needed-by and earliest start (PIP-01).
+class _DatePick extends StatelessWidget {
+  const _DatePick({required this.label, required this.value, required this.onPick, required this.onClear});
+
+  final String label;
+  final DateTime? value;
+  final VoidCallback onPick;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Text(label, style: context.text.labelMedium?.copyWith(color: context.mutedColor)),
+      const SizedBox(height: Sp.xs),
+      Row(children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: onPick,
+            icon: const Icon(Icons.calendar_today_rounded, size: 18),
+            label: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(value == null ? 'Choose a date' : fmtDate(value), maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ),
+        ),
+        if (value != null)
+          IconButton(
+            tooltip: 'Clear the ${label.toLowerCase()} date',
+            onPressed: onClear,
+            icon: const Icon(Icons.close_rounded, size: 18),
+          ),
+      ]),
+    ]);
   }
 }
 

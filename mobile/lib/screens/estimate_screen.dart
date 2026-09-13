@@ -323,7 +323,9 @@ class _EstimateScreenState extends State<EstimateScreen> {
     return PageBody(
       onRefresh: _load,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Row(children: [
+        // A three-part breadcrumb does not fit a phone; a Wrap folds it instead of
+        // running off the edge.
+        Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
           TextButton(onPressed: () => context.go(Routes.pipeline), child: const Text('Pipeline')),
           Icon(Icons.chevron_right_rounded, size: 16, color: context.mutedColor),
           TextButton(onPressed: () => context.go(Routes.item(item.ref)), child: Text(item.ref)),
@@ -356,12 +358,14 @@ class _EstimateScreenState extends State<EstimateScreen> {
             ]),
           ),
           const SizedBox(width: Sp.lg),
-          Wrap(spacing: Sp.sm, runSpacing: Sp.sm, alignment: WrapAlignment.end, children: [
+          // See work_item_screen.dart: a Wrap inside a Row must be given bounded
+          // width, or it measures itself as infinitely wide and never wraps.
+          Flexible(child: Wrap(spacing: Sp.sm, runSpacing: Sp.sm, alignment: WrapAlignment.end, children: [
             SecondaryButton('Versions (${versions.length})', icon: Icons.history_rounded, onPressed: _showVersions),
             SecondaryButton('Copy from similar', icon: Icons.content_copy_outlined, onPressed: _copyFromSimilar),
             if (session.can('team_member'))
               PrimaryButton('Save estimate', icon: Icons.save_outlined, busy: _saving, onPressed: _save),
-          ]),
+          ])),
         ]),
         const SizedBox(height: Sp.lg),
         if (Breaks.isDesktop(context))
@@ -405,11 +409,11 @@ class _EstimateScreenState extends State<EstimateScreen> {
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text('Size class implied', style: context.text.bodySmall),
                 const SizedBox(height: 4),
-                Row(children: [
+                // A Wrap gives its children unbounded width, so a Row here takes its
+                // natural size and overflows a narrow column rather than folding.
+                Wrap(spacing: Sp.sm, runSpacing: Sp.xs, crossAxisAlignment: WrapCrossAlignment.center, children: [
                   SizeStamp(implied.stamp, size: 24, dashed: implied.stamp == 'C'),
-                  const SizedBox(width: Sp.sm),
                   Text(implied.name, style: context.text.titleSmall),
-                  const SizedBox(width: Sp.sm),
                   Text(implied.range, style: context.text.bodySmall),
                 ]),
               ]),
@@ -443,6 +447,17 @@ class _EstimateScreenState extends State<EstimateScreen> {
   }
 
   Widget _threePointMethod() {
+    // Three labelled fields do not fit a phone: at 390px each column is about 110px
+    // and the labels alone overflow the decoration. Stack them there.
+    if (Breaks.isPhone(context)) {
+      return Column(children: [
+        _numberField('Optimistic (days)', _optimistic),
+        const SizedBox(height: Sp.md),
+        _numberField('Most likely (days)', _likely),
+        const SizedBox(height: Sp.md),
+        _numberField('Pessimistic (days)', _pessimistic),
+      ]);
+    }
     return Row(children: [
       Expanded(child: _numberField('Optimistic (days)', _optimistic)),
       const SizedBox(width: Sp.md),

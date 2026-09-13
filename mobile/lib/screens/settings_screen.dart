@@ -12,6 +12,7 @@ import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/widgets.dart';
+import 'parts/adm_settings_parts.dart';
 
 /// Settings (CFG-*, ADM-*, spec 9.4.10). Work types, size classes and
 /// scheduling policy for the workspace, plus the skills catalogue, roles,
@@ -31,14 +32,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'General',
     'Work types',
     'Size classes',
+    'Day rates',
     'Scheduling & stability',
-    'Priority scoring',
+    'Priority & objective',
     'Skills catalogue',
     'Teams & roles',
     'Integrations',
     'Notifications',
     'Audit log',
   ];
+
+  /// Sections whose edits accumulate in [_policyDraft] rather than saving as
+  /// they are made.
+  static const _policySections = {4, 5};
 
   int _section = 1;
   bool _loading = true;
@@ -85,11 +91,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  bool get _dirty => switch (_section) {
-        0 => _wsDraft.isNotEmpty,
-        3 || 4 => _policyDraft.isNotEmpty,
-        _ => false,
-      };
+  bool get _dirty => _section == 0 ? _wsDraft.isNotEmpty : (_policySections.contains(_section) && _policyDraft.isNotEmpty);
 
   void _discard() {
     setState(() {
@@ -189,12 +191,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onToggleOverride: (v) => setState(() => _incidentOverride = v),
             onReload: _load,
           ),
-        3 => _SchedulingSection(config: c, isAdmin: isAdmin, value: _policyValue, onChange: _setPolicy),
-        4 => _PrioritySection(config: c, isAdmin: isAdmin, draft: _policyDraft, onChange: _setPolicy),
-        5 => const _SkillsCatalogueSection(),
-        6 => const _TeamsRolesSection(),
-        7 => _IntegrationsSection(rows: c.integrations),
-        8 => const _NotificationDefaultsSection(),
+        3 => AdmDayRatesPanel(
+            rates: c.dayRates,
+            isAdmin: isAdmin,
+            workspaceCurrency: asStrOr(c.workspace['currency'], 'GBP'),
+            onChanged: _load,
+          ),
+        4 => _SchedulingSection(config: c, isAdmin: isAdmin, value: _policyValue, onChange: _setPolicy),
+        5 => _PrioritySection(config: c, isAdmin: isAdmin, draft: _policyDraft, onChange: _setPolicy),
+        6 => const _SkillsCatalogueSection(),
+        7 => const _TeamsRolesSection(),
+        8 => _IntegrationsSection(rows: c.integrations),
+        9 => const _NotificationDefaultsSection(),
         _ => const _AuditLogSection(),
       };
 }
@@ -262,20 +270,6 @@ class _GeneralSection extends StatelessWidget {
             ),
           ]),
         ]),
-      ),
-      const SizedBox(height: Sp.lg),
-      Panel(
-        title: 'Day rates',
-        subtitle: 'Used to turn effort days into cost on the estimate screen',
-        child: config.dayRates.isEmpty
-            ? const EmptyState(icon: Icons.payments_outlined, title: 'No day rate set', message: 'Add a blended rate so estimates can show cost.', compact: true)
-            : Column(children: [
-                for (final r in config.dayRates)
-                  TmKeyValue(
-                    asStrOr(r['name'], 'Rate'),
-                    '${fmtMoney(asDouble(r['rate']))} · from ${fmtShortDate(asDate(r['effective_from']))}${asBool(r['is_blended']) ? ' · blended' : ''}',
-                  ),
-              ]),
       ),
       const SizedBox(height: Sp.lg),
       Panel(
@@ -381,10 +375,17 @@ class _WorkTypesSection extends StatelessWidget {
 
     final policy = _SchedulingSummaryPanel(config: config);
 
+    // CFG-02: the sizes a type may use are its own override scope when it has
+    // one (Incidents are planned in hours), otherwise the workspace defaults.
+    final sizeRows = editing != null && editing.id == config.incidentWorkTypeId && config.incidentSizeClasses.isNotEmpty
+        ? config.incidentSizeClasses
+        : config.sizeClasses;
+    final sizes = [for (final s in sizeRows) (stamp: s.stamp, name: s.name)];
+
     return LayoutBuilder(builder: (context, box) {
       final right = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         if (editing != null) ...[
-          _WorkTypeForm(key: ValueKey(editing.id), type: editing, onSaved: onReload, onClose: () => onEdit(null)),
+          _WorkTypeForm(key: ValueKey(editing.id), type: editing, sizes: sizes, onSaved: onReload, onClose: () => onEdit(null)),
           const SizedBox(height: Sp.lg),
         ],
         policy,
@@ -480,6 +481,8 @@ class _WorkTypeTile extends StatelessWidget {
       t.requiresEstimate ? 'Estimate required' : 'Estimate optional',
       t.requiresBenefit ? 'Benefit case required' : 'No benefit case',
       if (t.isInterrupt) 'Interrupt-driven',
+      if (t.defaultSizeStamp != null && t.defaultSizeStamp!.isNotEmpty) 'Defaults to ${t.defaultSizeStamp}',
+      if (t.allowedSizes.isNotEmpty) 'Sizes ${t.allowedSizes.join(', ')}',
     ];
     return Container(
       padding: const EdgeInsets.symmetric(vertical: Sp.md),
@@ -538,8 +541,11 @@ const List<({String label, String hex})> kTypeSwatches = [
 
 /// The inline “Rename …” form from the mockup.
 class _WorkTypeForm extends StatefulWidget {
-  const _WorkTypeForm({super.key, required this.type, required this.onSaved, required this.onClose});
+  const _WorkTypeForm({super.key, required this.type, required this.sizes, required this.onSaved, required this.onClose});
   final _WorkTypeRow type;
+
+  /// The size classes in scope for this type (CFG-02).
+  final List<AdmSizeOption> sizes;
   final Future<void> Function() onSaved;
   final VoidCallback onClose;
 
@@ -555,6 +561,8 @@ class _WorkTypeFormState extends State<_WorkTypeForm> {
   late bool _estimate = widget.type.requiresEstimate;
   late bool _benefit = widget.type.requiresBenefit;
   late bool _interrupt = widget.type.isInterrupt;
+  late String? _defaultStamp = widget.type.defaultSizeStamp;
+  late Set<String> _allowedSizes = {...widget.type.allowedSizes};
   bool _busy = false;
   String? _error;
 
@@ -567,6 +575,11 @@ class _WorkTypeFormState extends State<_WorkTypeForm> {
   }
 
   Future<void> _save() async {
+    final clash = AdmSizeRules.validate(_defaultStamp, _allowedSizes);
+    if (clash != null) {
+      setState(() => _error = clash);
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -581,6 +594,10 @@ class _WorkTypeFormState extends State<_WorkTypeForm> {
         'policy': _interrupt ? 'interrupt' : 'planned',
         'requires_estimate': _estimate,
         'requires_benefit': _benefit,
+        // An empty string clears the default; an empty list means every size is
+        // allowed, which is how the API stores "no restriction".
+        'default_size_stamp': _defaultStamp ?? '',
+        'allowed_sizes': _allowedSizes.toList(),
       });
       if (!mounted) return;
       tmToast(context, '${_name.text.trim()} saved');
@@ -636,6 +653,23 @@ class _WorkTypeFormState extends State<_WorkTypeForm> {
             ),
           ),
         ]),
+        const SizedBox(height: Sp.md),
+        // CFG-02. save_work_type has always taken both and the Add work form
+        // already uses the default; this form simply never offered them.
+        AdmSizeRules(
+          stamps: widget.sizes,
+          defaultStamp: _defaultStamp,
+          allowed: _allowedSizes,
+          typePlural: widget.type.plural,
+          onDefaultChanged: (v) => setState(() {
+            _defaultStamp = v;
+            _error = null;
+          }),
+          onAllowedChanged: (v) => setState(() {
+            _allowedSizes = v;
+            _error = null;
+          }),
+        ),
         const SizedBox(height: Sp.md),
         TmSwitchRow(label: 'Requires an estimate before scheduling', value: _estimate, onChanged: (v) => setState(() => _estimate = v)),
         TmSwitchRow(label: 'Requires a benefit case before scheduling', value: _benefit, onChanged: (v) => setState(() => _benefit = v)),
@@ -1238,6 +1272,20 @@ class _PrioritySection extends StatelessWidget {
     onChange('priority_weights', current);
   }
 
+  /// SCH-02. The engine already reads these; Settings only ever printed them.
+  Map<String, dynamic> get _objectiveWeights {
+    final live = Map<String, dynamic>.from(config.policy.objectiveWeights);
+    final drafted = draft['objective_weights'];
+    if (drafted is Map) live.addAll(Map<String, dynamic>.from(drafted));
+    return live;
+  }
+
+  void _setObjective(String key, num v) {
+    final current = draft['objective_weights'] is Map ? Map<String, dynamic>.from(draft['objective_weights'] as Map) : <String, dynamic>{};
+    current[key] = v;
+    onChange('objective_weights', current);
+  }
+
   void _setConfidence(String key, num v) {
     final current = draft['priority_weights'] is Map ? Map<String, dynamic>.from(draft['priority_weights'] as Map) : <String, dynamic>{};
     final live = config.policy.priorityWeights['confidenceScale'];
@@ -1298,12 +1346,13 @@ class _PrioritySection extends StatelessWidget {
         ]),
       ),
       const SizedBox(height: Sp.lg),
-      Panel(
-        title: 'Objective weights',
-        subtitle: 'What the engine optimises when it proposes a plan',
-        child: Column(children: [
-          for (final e in config.policy.objectiveWeights.entries) TmKeyValue(humanise(e.key), e.value.toString()),
-        ]),
+      AdmObjectiveWeights(
+        weights: _objectiveWeights,
+        isAdmin: isAdmin,
+        onChanged: _setObjective,
+        policyVersion: config.policy.version,
+        targetLoadMin: config.policy.targetLoadMin,
+        targetLoadMax: config.policy.targetLoadMax,
       ),
     ]);
   }
@@ -1884,6 +1933,8 @@ class _WorkTypeRow {
     this.requiresEstimate = true,
     this.requiresBenefit = false,
     this.description,
+    this.defaultSizeStamp,
+    this.allowedSizes = const [],
     this.itemCount = 0,
     this.openItemCount = 0,
     this.sortOrder = 0,
@@ -1899,6 +1950,12 @@ class _WorkTypeRow {
   final bool requiresEstimate;
   final bool requiresBenefit;
   final String? description;
+
+  /// CFG-02: pre-selected on the Add work form. Null when the type has none.
+  final String? defaultSizeStamp;
+
+  /// CFG-02: empty means every size is allowed (the API stores that as null).
+  final List<String> allowedSizes;
   final int itemCount;
   final int openItemCount;
   final int sortOrder;
@@ -1916,6 +1973,8 @@ class _WorkTypeRow {
         requiresEstimate: asBool(j['requires_estimate'], fallback: true),
         requiresBenefit: asBool(j['requires_benefit']),
         description: asStr(j['description']),
+        defaultSizeStamp: asStr(j['default_size_stamp']),
+        allowedSizes: asStrList(j['allowed_sizes']),
         itemCount: asIntOr(j['item_count'], 0),
         openItemCount: asIntOr(j['open_item_count'], 0),
         sortOrder: asIntOr(j['sort_order'], 0),

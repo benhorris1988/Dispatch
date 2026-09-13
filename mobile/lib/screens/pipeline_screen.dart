@@ -13,9 +13,12 @@ import '../shell/breaks.dart';
 import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
+import '../widgets/wc_filters.dart';
+import '../widgets/wc_selection_table.dart';
 import '../widgets/widgets.dart';
 import '../widgets/work_widgets.dart';
 import 'parts/add_work_form.dart';
+import 'parts/wc_bulk_actions.dart';
 
 /// Pipeline (PIP-03, web-02): every item with type, size stamp, priority,
 /// benefit, estimate range, required skills and status, with filters and a
@@ -63,6 +66,9 @@ class _PipelineScreenState extends State<PipelineScreen> {
   List<({int id, String name})> _teams = const [];
 
   final Set<String> _hiddenColumns = {};
+
+  /// Work item ids ticked for a bulk action (PIP-10).
+  final Set<int> _selected = {};
 
   @override
   void initState() {
@@ -131,6 +137,9 @@ class _PipelineScreenState extends State<PipelineScreen> {
         _queueHealth = asMap(r['queue_health']);
         _total = asIntOr(r['total'], _items.length);
         _loading = false;
+        // A filter or a bulk change can take a ticked row off the page; a
+        // selection the user can no longer see must not travel with them.
+        _selected.retainAll(_items.map((i) => i.id).toSet());
       });
       context.read<ShellState>().setPageTitle('Pipeline');
     } on ApiException catch (e) {
@@ -175,6 +184,22 @@ class _PipelineScreenState extends State<PipelineScreen> {
     );
   }
 
+  Future<void> _runBulk(String op) async {
+    final ids = _items.where((i) => _selected.contains(i.id)).map((i) => i.id).toList();
+    if (ids.isEmpty) return;
+    final updated = await showWcBulkDialog(context, op: op, ids: ids);
+    if (updated == null || !mounted) return;
+    final skipped = ids.length - updated;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(dotJoin([
+        '$updated ${updated == 1 ? 'item' : 'items'} updated',
+        skipped > 0 ? '$skipped already had that value' : null,
+      ])),
+    ));
+    setState(_selected.clear);
+    await _load();
+  }
+
   Future<void> _addWork() async {
     if (Breaks.isPhone(context)) {
       context.go(Routes.addWork);
@@ -215,6 +240,14 @@ class _PipelineScreenState extends State<PipelineScreen> {
           ErrorState(title: 'The pipeline could not be loaded', message: _error, onRetry: _load)
         else ...[
           _queueStrip(),
+          if (_canBulk && _selected.isNotEmpty)
+            WcBulkBar(
+              count: _selected.length,
+              total: _items.length,
+              onClear: () => setState(_selected.clear),
+              onSelectAll: () => setState(() => _selected.addAll(_items.map((i) => i.id))),
+              onAction: _runBulk,
+            ),
           Panel(
             padding: EdgeInsets.zero,
             child: _items.isEmpty
@@ -239,6 +272,10 @@ class _PipelineScreenState extends State<PipelineScreen> {
       ]),
     );
   }
+
+  /// `work_items.php bulk` is team_lead and above; the controls are hidden
+  /// below that rather than left to fail with a 403.
+  bool get _canBulk => context.watch<Session>().isTeamLead;
 
   Widget _columnsButton() {
     const toggleable = ['Type', 'Size', 'Priority', 'Benefit', 'ROM days', 'Required skills', 'Status'];
@@ -352,46 +389,16 @@ class _PipelineScreenState extends State<PipelineScreen> {
     ]);
   }
 
+  /// The toolbar dropdown now lives in `widgets/wc_filters.dart` so the
+  /// Benefits register can wear the same control (BEN-05).
   Widget _dropdown<T>({
     required T? value,
     required String hint,
     required List<DropdownMenuItem<T>> items,
     required ValueChanged<T?> onChanged,
     IconData? icon,
-  }) {
-    return Container(
-      height: 38,
-      padding: const EdgeInsets.symmetric(horizontal: Sp.md),
-      decoration: BoxDecoration(
-        color: context.panelColor,
-        borderRadius: DispatchRadius.buttonR,
-        border: Border.all(color: context.borderColor),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<T>(
-          value: value,
-          isDense: true,
-          hint: Text(hint, style: context.text.labelLarge),
-          icon: const Icon(Icons.expand_more_rounded, size: 18),
-          borderRadius: DispatchRadius.cardR,
-          style: context.text.labelLarge?.copyWith(color: context.inkColor),
-          dropdownColor: context.panelColor,
-          items: items,
-          onChanged: onChanged,
-          selectedItemBuilder: icon == null
-              ? null
-              : (context) => [
-                    for (final i in items)
-                      Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(icon, size: 16, color: context.mutedColor),
-                        const SizedBox(width: Sp.sm),
-                        DefaultTextStyle(style: context.text.labelLarge ?? const TextStyle(), child: i.child),
-                      ]),
-                  ],
-        ),
-      ),
-    );
-  }
+  }) =>
+      WcFilterDropdown<T>(value: value, hint: hint, items: items, onChanged: onChanged, icon: icon);
 
   Widget _queueStrip() {
     final parts = <String>[];
@@ -453,14 +460,9 @@ class _PipelineScreenState extends State<PipelineScreen> {
       if (_show('Status')) const TableCol('Status', width: 118),
     ];
 
-    return DispatchTable(
-      columns: columns,
-      minWidth: 860,
-      onRowTap: (i) => context.go(Routes.item(_items[i].ref)),
-      rowSemantics: (i) => '${_items[i].ref} ${_items[i].title}',
-      rows: [
-        for (final i in _items)
-          [
+    final cells = <List<Widget>>[
+      for (final i in _items)
+        [
             Text(i.ref, style: DispatchTheme.numeric(size: 13, weight: FontWeight.w600, color: context.mutedColor)),
             Text(i.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
             if (_show('Type')) TypeChip(i.typeName, colourHex: i.typeColour, compact: true),
@@ -472,7 +474,33 @@ class _PipelineScreenState extends State<PipelineScreen> {
             if (_show('Required skills')) SkillChips(i.skills, max: 2),
             if (_show('Status')) StatusChip(i.displayStatus, compact: true),
           ],
-      ],
+    ];
+
+    if (!_canBulk) {
+      return DispatchTable(
+        columns: columns,
+        minWidth: 860,
+        onRowTap: (i) => context.go(Routes.item(_items[i].ref)),
+        rowSemantics: (i) => '${_items[i].ref} ${_items[i].title}',
+        rows: cells,
+      );
+    }
+
+    return WcSelectionTable(
+      columns: columns,
+      // The checkbox column adds 44px, so the table asks for that much more
+      // before it starts scrolling sideways.
+      minWidth: 904,
+      rows: cells,
+      isSelected: (i) => _selected.contains(_items[i].id),
+      onSelect: (i, on) => setState(() => on ? _selected.add(_items[i].id) : _selected.remove(_items[i].id)),
+      onSelectAll: (all) => setState(() {
+        _selected.clear();
+        if (all) _selected.addAll(_items.map((i) => i.id));
+      }),
+      onRowTap: (i) => context.go(Routes.item(_items[i].ref)),
+      rowSemantics: (i) => '${_items[i].ref} ${_items[i].title}',
+      rowLabel: (i) => 'Select ${_items[i].ref} ${_items[i].title}',
     );
   }
 
@@ -483,13 +511,40 @@ class _PipelineScreenState extends State<PipelineScreen> {
           onTap: () => context.go(Routes.item(i.ref)),
           child: Container(
             padding: const EdgeInsets.all(Sp.md),
-            decoration: BoxDecoration(border: Border(bottom: BorderSide(color: context.borderColor))),
+            decoration: BoxDecoration(
+              color: _selected.contains(i.id) ? DispatchColors.tint(DispatchColors.typeBlue, opacity: context.isDark ? 0.18 : 0.07) : null,
+              border: Border(bottom: BorderSide(color: context.borderColor)),
+            ),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
-                Text(i.ref, style: DispatchTheme.numeric(size: 12.5, color: context.mutedColor)),
+                if (_canBulk)
+                  Padding(
+                    padding: const EdgeInsets.only(right: Sp.sm),
+                    child: Checkbox(
+                      value: _selected.contains(i.id),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      semanticLabel: 'Select ${i.ref} ${i.title}',
+                      onChanged: (v) => setState(() => (v ?? false) ? _selected.add(i.id) : _selected.remove(i.id)),
+                    ),
+                  ),
+                // The reference gives way before the status chip does, so the
+                // checkbox can join the row on a phone without crowding it.
+                Expanded(
+                  child: Row(children: [
+                    Flexible(
+                      child: Text(
+                        i.ref,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: DispatchTheme.numeric(size: 12.5, color: context.mutedColor),
+                      ),
+                    ),
+                    const SizedBox(width: Sp.sm),
+                    SizeStamp(i.sizeStamp, size: 22, dashed: i.isCustom),
+                  ]),
+                ),
                 const SizedBox(width: Sp.sm),
-                SizeStamp(i.sizeStamp, size: 22, dashed: i.isCustom),
-                const Spacer(),
                 StatusChip(i.displayStatus, compact: true),
               ]),
               const SizedBox(height: Sp.xs),
