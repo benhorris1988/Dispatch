@@ -118,12 +118,27 @@ if ($segments[0] === 'plan') {
 
 if ($segments[0] === 'assignments') {
     $limit = v1_page(); $after = v1_cursor();
-    $pvId = param('plan_version_id') !== null ? (int)param('plan_version_id')
-        : (int)(scalar($conn, "SELECT TOP 1 id FROM dbo.plan_versions WHERE workspace_id = ? AND status = 'committed' ORDER BY version_no DESC", [$wsId]) ?? -1);
+    // plan_version_id arrives from the caller, so it must be checked before it is used.
+    // Filtering on it alone crossed the tenancy boundary — any id from any workspace would
+    // have returned that workspace's assignments — and served drafts, because a proposed
+    // version is not a plan anyone is working to. Only committed history is public here.
+    if (param('plan_version_id') !== null && param('plan_version_id') !== '') {
+        $pvId = (int)param('plan_version_id');
+        $pv = row($conn, "SELECT id, status FROM dbo.plan_versions WHERE id = ? AND workspace_id = ?", [$pvId, $wsId]);
+        if (!$pv) problem(404, 'Not found', "No plan version $pvId in this workspace.", 'plan_version_not_found');
+        if (!in_array($pv['status'], ['committed', 'superseded'], true)) {
+            problem(404, 'Not found', 'That plan version is a proposal or a scenario, not a plan anyone is working to. Only committed and superseded versions are readable here.', 'plan_version_not_public');
+        }
+    } else {
+        $pvId = (int)(scalar($conn, "SELECT TOP 1 id FROM dbo.plan_versions WHERE workspace_id = ? AND status = 'committed' ORDER BY version_no DESC", [$wsId]) ?? -1);
+    }
     $where = ['a.plan_version_id = ?', 'a.id > ?']; $params = [$pvId, $after];
     if (($p = param('person_id')) !== null && $p !== '') { $where[] = 'a.person_id = ?'; $params[] = (int)$p; }
     if (($f = param('from')) !== null && $f !== '') { $where[] = 'a.to_date >= ?'; $params[] = $f; }
     if (($t = param('to')) !== null && $t !== '') { $where[] = 'a.from_date <= ?'; $params[] = $t; }
+    // Belt and braces: scope the rows themselves to the workspace as well, so this query
+    // cannot leak even if the guard above is ever refactored away.
+    $where[] = 'wi.workspace_id = ?'; $params[] = $wsId;
     $out = rows($conn, "SELECT TOP ($limit) a.id, a.work_item_id, wi.ref, wi.title, a.person_id, pe.name AS person,
             a.from_date, a.to_date, a.allocation_pct, a.state, a.role_label
         FROM dbo.assignments a JOIN dbo.work_items wi ON wi.id = a.work_item_id JOIN dbo.people pe ON pe.id = a.person_id

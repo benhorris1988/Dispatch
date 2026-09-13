@@ -34,14 +34,14 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 ## Verification bar
 
 ```bash
-C:\xampp\php\php.exe tests\run_all.php     # all five PHP suites; re-seeds before and after
+C:\xampp\php\php.exe tests\run_all.php     # all eight PHP suites; re-seeds before and after
 python engine\test_solver.py               # CP-SAT hard-constraint checks (no server needed)
 "C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze                        # in mobile/
 "C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/screens_smoke_test.dart
 ```
 
 **`analyze` is not enough on its own.** It proves the client compiles; it draws nothing.
-`screens_smoke_test.dart` renders all fifteen screens against the running API at desktop,
+`screens_smoke_test.dart` renders all seventeen screens against the running API at desktop,
 tablet and phone widths and in dark theme, and fails on any framework exception, error
 state or blank screen. Its first run found 428 layout overflows that `analyze` and a
 green `build web` had both been perfectly happy with. It needs the server up and the demo

@@ -35,6 +35,18 @@ function http($method, $url, $body = null, $bearer = null, &$code = null, &$head
     $headers = substr((string)$raw, 0, $hlen);
     return substr((string)$raw, $hlen);
 }
+/** The id of a plan version that is NOT committed, read straight from the database. */
+function scalar_draft_version() {
+    $cfg = require __DIR__ . '/../api/config.php';
+    $a = $cfg['db_admin'];
+    $c = sqlsrv_connect($a['server'], ['Database' => $a['database'], 'Uid' => $a['uid'], 'Pwd' => $a['pwd'], 'CharacterSet' => 'UTF-8', 'ReturnDatesAsStrings' => true, 'TrustServerCertificate' => true]);
+    if ($c === false) return null;
+    $st = sqlsrv_query($c, "SELECT TOP 1 id FROM dbo.plan_versions WHERE status NOT IN ('committed','superseded') ORDER BY id DESC");
+    $id = ($st && sqlsrv_fetch($st)) ? (int)sqlsrv_get_field($st, 0) : null;
+    sqlsrv_close($c);
+    return $id;
+}
+
 function api($endpoint, array $body, $bearer = null) {
     global $BASE;
     $raw = http('POST', "$BASE/api/$endpoint.php", $body, $bearer, $code);
@@ -96,6 +108,20 @@ check(!empty($plan['plan']['committed_through']), 'the plan reports how far it i
 $stab = json_decode(http('GET', "$BASE/v1/reports/stability", null, $token, $code), true);
 $idxPct = $stab['weeks'][0]['stability_index_pct'] ?? null;
 check($idxPct !== null && $idxPct >= 0 && $idxPct <= 100, 'stability index is a percentage');
+
+// Tenancy and draft exposure on /v1/assignments. plan_version_id comes from the caller,
+// and filtering on it alone once crossed the workspace boundary and served uncommitted
+// plans from an API that advertises the committed one.
+$props = json_decode(http('GET', "$BASE/v1/proposals", null, $token, $code), true);
+$draft = (int)(scalar_draft_version() ?? 0);
+if ($draft > 0) {
+    http('GET', "$BASE/v1/assignments?plan_version_id=$draft", null, $token, $code);
+    check($code === 404, "a proposed plan version is not readable through the public API (HTTP $code)");
+}
+http('GET', "$BASE/v1/assignments?plan_version_id=999999", null, $token, $code);
+check($code === 404, "a plan version outside this workspace is refused (HTTP $code)");
+$mine = json_decode(http('GET', "$BASE/v1/assignments?limit=2", null, $token, $code), true);
+check($code === 200 && !empty($mine['assignments']), 'while the committed plan still reads normally');
 
 http('GET', "$BASE/v1/work-items", null, null, $code);
 check($code === 401, "an unauthenticated read is refused (HTTP $code)");

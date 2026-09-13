@@ -159,7 +159,13 @@ paths:
       summary: Assignments on a plan version
       description: Defaults to the current committed version. Each assignment is a person on a work item for a date range at an allocation.
       parameters:
-        - { name: plan_version_id, in: query, schema: { type: integer } }
+        - name: plan_version_id
+          in: query
+          schema: { type: integer }
+          description: |
+            A committed or superseded version in your own workspace. A proposal, a scenario
+            or a version belonging to anyone else is answered 404: this surface exposes plans
+            people are working to or have worked to, never drafts.
         - { name: person_id, in: query, schema: { type: integer } }
         - { name: from, in: query, schema: { type: string, format: date } }
         - { name: to, in: query, schema: { type: string, format: date } }
