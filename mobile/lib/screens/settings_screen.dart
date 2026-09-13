@@ -193,7 +193,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         4 => _PrioritySection(config: c, isAdmin: isAdmin, draft: _policyDraft, onChange: _setPolicy),
         5 => const _SkillsCatalogueSection(),
         6 => const _TeamsRolesSection(),
-        7 => const _IntegrationsSection(),
+        7 => _IntegrationsSection(rows: c.integrations),
         8 => const _NotificationDefaultsSection(),
         _ => const _AuditLogSection(),
       };
@@ -1502,16 +1502,24 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
 // ─── Integrations ─────────────────────────────────────────────────────────
 
 class _IntegrationsSection extends StatelessWidget {
-  const _IntegrationsSection();
+  const _IntegrationsSection({required this.rows});
 
-  static const integrations = [
-    (name: 'Entra ID', detail: 'Single sign-on and group claims map to roles', icon: Icons.verified_user_outlined, on: true),
-    (name: 'Microsoft Teams', detail: 'Change notifications and approvals in a channel', icon: Icons.forum_outlined, on: false),
-    (name: 'HR leave feed', detail: 'Imports leave; descriptions are stripped on import (ADM-05)', icon: Icons.event_busy_outlined, on: true),
-    (name: 'Timesheets', detail: 'Actual hours for the load and utilisation report', icon: Icons.schedule_outlined, on: true),
-    (name: 'Azure DevOps', detail: 'Two-way link between work items and boards', icon: Icons.developer_board_outlined, on: false),
-    (name: 'ServiceNow', detail: 'Incidents raised as interrupt-driven work', icon: Icons.support_agent_outlined, on: false),
-  ];
+  /// Connector rows as the API reports them. This panel used to hardcode six
+  /// systems and show three of them as "Connected"; none were, nothing read
+  /// dbo.integrations, and none of the connectors are built. A settings screen
+  /// that misreports the state of the system is worse than an empty one.
+  final List<Map<String, dynamic>> rows;
+
+  static const _labels = <String, ({String name, String detail, IconData icon})>{
+    'jira': (name: 'Jira / Azure DevOps', detail: 'Import work items by query and write planned dates back', icon: Icons.developer_board_outlined),
+    'servicenow': (name: 'ServiceNow', detail: 'Assigned incidents above a severity threshold become interrupt-driven work', icon: Icons.support_agent_outlined),
+    'hr_leave': (name: 'HR leave feed', detail: 'Approved leave as availability; only a type is stored, never a reason', icon: Icons.event_busy_outlined),
+    'm365': (name: 'Microsoft 365', detail: 'Out-of-office in, committed assignments out as a calendar feed', icon: Icons.calendar_month_outlined),
+    'teams': (name: 'Microsoft Teams', detail: 'Proposals, approvals and digests posted to a channel', icon: Icons.forum_outlined),
+    'timesheets': (name: 'Timesheets', detail: 'Actual effort per item, for estimate accuracy and utilisation', icon: Icons.schedule_outlined),
+    'powerbi': (name: 'Power BI', detail: 'Read-only analytics views', icon: Icons.insert_chart_outlined),
+  };
+
 
   @override
   Widget build(BuildContext context) {
@@ -1521,24 +1529,35 @@ class _IntegrationsSection extends StatelessWidget {
         spacing: Sp.lg,
         runSpacing: Sp.lg,
         children: [
-          for (final i in integrations)
+          for (final row in rows)
             SizedBox(
               width: cols == 1 ? c.maxWidth : (c.maxWidth - Sp.lg * (cols - 1)) / cols,
-              child: DispatchCard(
-                padding: const EdgeInsets.all(Sp.lg),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                  Row(children: [
-                    Icon(i.icon, size: 20, color: context.mutedColor),
-                    const SizedBox(width: Sp.sm),
-                    Expanded(child: Text(i.name, style: context.text.titleSmall)),
-                    ToneChip(i.on ? 'Connected' : 'Not connected', tone: i.on ? 'ok' : null, compact: true),
+              child: Builder(builder: (context) {
+                final key = asStrOr(row['system'], '');
+                final meta = _labels[key];
+                final on = asBool(row['enabled'], fallback: false);
+                final sync = asStr(row['last_sync_at']);
+                return DispatchCard(
+                  padding: const EdgeInsets.all(Sp.lg),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                    Row(children: [
+                      Icon(meta?.icon ?? Icons.extension_outlined, size: 20, color: context.mutedColor),
+                      const SizedBox(width: Sp.sm),
+                      Expanded(child: Text(meta?.name ?? humanise(key), style: context.text.titleSmall)),
+                      ToneChip(on ? 'Connected' : 'Not connected', tone: on ? 'ok' : null, compact: true),
+                    ]),
+                    const SizedBox(height: Sp.sm),
+                    Text(meta?.detail ?? '', style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+                    const SizedBox(height: Sp.sm),
+                    TmSwitchRow(
+                      label: on ? 'Enabled' : 'Disabled',
+                      value: on,
+                      onChanged: null,
+                      disabledNote: on && sync != null ? 'Last synced ${fmtShortDate(parseDate(sync))}' : 'No connector is built yet',
+                    ),
                   ]),
-                  const SizedBox(height: Sp.sm),
-                  Text(i.detail, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
-                  const SizedBox(height: Sp.sm),
-                  TmSwitchRow(label: i.on ? 'Enabled' : 'Disabled', value: i.on, onChanged: null, disabledNote: 'Configured by a platform administrator'),
-                ]),
-              ),
+                );
+              }),
             ),
         ],
       );
@@ -1954,6 +1973,7 @@ class _Config {
     required this.incidentSizeClasses,
     required this.policy,
     required this.dayRates,
+    required this.integrations,
     this.incidentWorkTypeId,
   });
 
@@ -1963,6 +1983,8 @@ class _Config {
   final List<_SizeClassRow> incidentSizeClasses;
   final Policy policy;
   final List<Map<String, dynamic>> dayRates;
+  /// Real connector state from dbo.integrations, not a hardcoded list.
+  final List<Map<String, dynamic>> integrations;
   final int? incidentWorkTypeId;
 
   String get workspaceName => asStrOr(workspace['name'], 'workspace');
@@ -1974,6 +1996,7 @@ class _Config {
         incidentSizeClasses: asList(j['incident_size_classes'], _SizeClassRow.fromJson),
         policy: Policy.fromJson(asMap(j['policy'])),
         dayRates: [for (final r in (j['day_rates'] as List? ?? const [])) if (r is Map) Map<String, dynamic>.from(r)],
+        integrations: [for (final r in (j['integrations'] as List? ?? const [])) if (r is Map) Map<String, dynamic>.from(r)],
         incidentWorkTypeId: asInt(j['incident_work_type_id']),
       );
 }

@@ -59,7 +59,13 @@ function get_config($conn, $wsId) {
     $rates = rows($conn, "SELECT * FROM dbo.day_rates WHERE workspace_id = ? ORDER BY effective_from DESC, id", [$wsId]);
     foreach ($rates as &$r) { $r['id'] = (int)$r['id']; $r['rate'] = (float)$r['rate']; $r['is_blended'] = (bool)$r['is_blended']; $r['effective_from'] = substr($r['effective_from'], 0, 10); }
     return ['workspace' => $ws, 'work_types' => work_types($conn, $wsId), 'size_classes' => $sizes, 'incident_size_classes' => $inc,
-        'incident_work_type_id' => $incId, 'policy' => $policy, 'day_rates' => $rates];
+        'incident_work_type_id' => $incId, 'policy' => $policy, 'day_rates' => $rates,
+        // Real connector state (ADM-06). The Settings panel used to hardcode this list and
+        // showed three of them as Connected; nothing was, and nothing read the table.
+        'integrations' => array_map(fn($r) => [
+            'system' => $r['system'], 'enabled' => (bool)$r['enabled'],
+            'last_sync_at' => $r['last_sync_at'], 'last_status' => $r['last_status'],
+        ], rows($conn, "SELECT system, enabled, last_sync_at, last_status FROM dbo.integrations WHERE workspace_id = ? ORDER BY id", [$wsId]))];
 }
 
 if ($action === 'get') ok(get_config($conn, $wsId));
