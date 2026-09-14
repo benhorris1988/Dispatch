@@ -9,7 +9,8 @@ function cpsat_model_payload(array $model) {
     $people = [];
     foreach ($model['people'] as $p) {
         $cap = [];
-        foreach ($model['days'] as $d) { $c = $p['capacity'][$d] ?? ['available' => 0, 'reserve' => 0]; $cap[] = [$c['available'], $c['reserve']]; }
+        // TEAM-09: the solver sees the part of each day that belongs to the model's scope (share = 1 in a workspace model).
+        foreach ($model['days'] as $d) { $c = $p['capacity'][$d] ?? ['available' => 0, 'reserve' => 0]; $s = (float)($c['share'] ?? 1); $cap[] = [round($c['available'] * $s, 2), round($c['reserve'] * $s, 2)]; }
         $people[] = ['id' => $p['id'], 'name' => $p['name'], 'max_concurrent' => $p['max_concurrent'], 'min_focus_days' => $p['min_focus_days'],
             'skills' => (object)$p['skills'], 'development' => (object)$p['development'], 'prefers' => $p['prefers'], 'avoid' => $p['avoid'],
             'protected' => $p['protected'], 'rota_weeks' => $p['rota_weeks'], 'capacity' => $cap];
@@ -24,11 +25,15 @@ function cpsat_model_payload(array $model) {
             'priority' => $i['priority'], 'protected' => $i['protected'], 'small' => $i['small'], 'type_name' => $i['type_name'], 'tags' => $i['tags']];
     }
     $committed = [];
-    foreach ($model['committed'] as $a) if (isset($model['items'][$a['work_item_id']])) $committed[] = ['id' => $a['id'], 'work_item_id' => $a['work_item_id'], 'person_id' => $a['person_id'], 'from_date' => $a['from_date'], 'to_date' => $a['to_date'], 'allocation_pct' => $a['allocation_pct'], 'locked' => $a['locked'], 'is_reserve' => $a['is_reserve']];
+    // Rows on people outside the pool (a scoped model) are not sent: the solver cannot book them and
+    // cpsat_solve() passes them through unchanged instead.
+    foreach ($model['committed'] as $a) if (isset($model['items'][$a['work_item_id']]) && isset($model['people'][$a['person_id']])) $committed[] = ['id' => $a['id'], 'work_item_id' => $a['work_item_id'], 'person_id' => $a['person_id'], 'from_date' => $a['from_date'], 'to_date' => $a['to_date'], 'allocation_pct' => $a['allocation_pct'], 'locked' => $a['locked'], 'is_reserve' => $a['is_reserve']];
+    $scope = $model['scope'] ?? ['kind' => 'workspace', 'team_id' => null, 'portfolio_id' => null, 'team_ids' => null, 'partial' => false];
     return [
         'schema_version' => 1,
         'workspace_id' => $model['workspace_id'], 'today' => $model['today'], 'hours_per_day' => $model['hours_per_day'],
         'working_days' => $model['working_days'], 'days' => $model['days'], 'windows' => $model['windows'],
+        'scope' => ['kind' => $scope['kind'], 'team_id' => $scope['team_id'], 'portfolio_id' => $scope['portfolio_id'], 'team_ids' => $scope['team_ids'], 'partial' => (bool)($scope['partial'] ?? false)],
         'policy' => [
             'objective_weights' => $model['policy']['objective_weights'], 'change_budget_days' => $model['policy']['change_budget_days'],
             'min_improvement_pct' => $model['policy']['min_improvement_pct'], 'target_load_min' => $model['policy']['target_load_min'], 'target_load_max' => $model['policy']['target_load_max'],
@@ -76,6 +81,15 @@ function cpsat_solve(array $model, array $cfg, $budgetSeconds = null) {
             'allocation_pct' => (int)$a['allocation_pct'], 'state' => model_state_for(max(substr($a['from_date'], 0, 10), $model['today']), $model['windows']),
             'role_label' => $a['role_label'] ?? null, 'kept' => false, 'locked' => false, 'committed_id' => null, 'is_reserve' => (bool)($a['is_reserve'] ?? false)];
     }
+    // SCH-13: a scoped model withheld the rows of people outside the pool; put them back untouched so the
+    // candidate is a complete workspace plan (the heuristic does the same in its pass 1).
+    if (!empty($model['scope']['partial'])) {
+        foreach ($model['committed'] as $a) {
+            if (isset($model['people'][$a['person_id']]) || !$a['locked'] || $a['to_date'] < $model['today']) continue;
+            $item = $model['items'][$a['work_item_id']] ?? null; if (!$item) continue;
+            $out[] = pl_out_row($model, $item, $a['person_id'], $a['from_date'], $a['to_date'], $a['allocation_pct'], $a['role_label'], true, true, $a['id'], $a['is_reserve']);
+        }
+    }
     $violations = plan_check_constraints($out, $model);
     if ($violations) return ['ok' => false, 'reason' => 'engine plan violates hard constraints: ' . implode('; ', array_slice($violations, 0, 3))];
     $placed = []; foreach ($out as $a) $placed[$a['work_item_id']] = true;
@@ -94,6 +108,7 @@ function plan_check_constraints(array $assignments, array $model) {
     foreach ($assignments as $a) {
         $iid = $a['work_item_id']; $pid = $a['person_id'];
         $item = $model['items'][$iid] ?? null; $p = $model['people'][$pid] ?? null;
+        if ($item && !$p && !empty($a['locked']) && !empty($model['scope']['partial'])) continue;   // pass-through row of someone outside a scoped pool
         if (!$item || !$p) { $v[] = "unknown item/person on {$a['ref']}"; continue; }
         if ($a['from_date'] > $a['to_date']) $v[] = "{$item['ref']}: from after to";
         if ($item['earliest_start'] && $a['from_date'] < $item['earliest_start'] && $a['from_date'] >= $model['today']) $v[] = "{$item['ref']} starts before earliest start";
@@ -116,6 +131,10 @@ function plan_check_constraints(array $assignments, array $model) {
             $worked++;
             // Allocation is a share of that day's schedulable time (see planner.php).
             $hours = $a['allocation_pct'] / 100 * $room;
+            // TEAM-09: a loaned-in person's own committed rows (locked, kept as they were) book against
+            // the part of the day that stays with their own team; only the overflow counts here.
+            $share = (float)($cap['share'] ?? 1);
+            if (!empty($a['locked']) && !($p['home'] ?? true)) $hours = max(0.0, $hours - (1 - $share) * $room);
             $load[$pid][$di]['planned'] = ($load[$pid][$di]['planned'] ?? 0) + ($isInterrupt ? 0 : $hours);
             $load[$pid][$di]['all'] = ($load[$pid][$di]['all'] ?? 0) + $hours;
             if ($item['counts_for_wip']) $items[$pid][$di][$iid] = true;
@@ -127,9 +146,9 @@ function plan_check_constraints(array $assignments, array $model) {
     foreach ($load as $pid => $days) {
         $p = $model['people'][$pid];
         foreach ($days as $di => $h) {
-            $c = $p['capacity'][$model['days'][$di]];
-            if ($h['planned'] > $c['available'] - $c['reserve'] + 1e-6) $v[] = "{$p['name']} planned load " . round($h['planned'], 2) . "h > " . round($c['available'] - $c['reserve'], 2) . "h on {$model['days'][$di]}";
-            if ($h['all'] > $c['available'] + 1e-6) $v[] = "{$p['name']} total load " . round($h['all'], 2) . "h > capacity on {$model['days'][$di]}";
+            $c = $p['capacity'][$model['days'][$di]]; $s = (float)($c['share'] ?? 1);
+            if ($h['planned'] > $s * ($c['available'] - $c['reserve']) + 1e-6) $v[] = "{$p['name']} planned load " . round($h['planned'], 2) . "h > " . round($s * ($c['available'] - $c['reserve']), 2) . "h on {$model['days'][$di]}";
+            if ($h['all'] > $s * $c['available'] + 1e-6) $v[] = "{$p['name']} total load " . round($h['all'], 2) . "h > capacity on {$model['days'][$di]}";
             if (count($items[$pid][$di] ?? []) > $p['max_concurrent']) $v[] = "{$p['name']} has " . count($items[$pid][$di]) . " concurrent items on {$model['days'][$di]}";
         }
     }

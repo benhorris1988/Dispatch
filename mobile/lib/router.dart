@@ -15,6 +15,7 @@ import 'screens/overview_screen.dart';
 import 'screens/person_screen.dart';
 import 'screens/pipeline_screen.dart';
 import 'screens/plan_versions_screen.dart';
+import 'screens/portfolio_screen.dart';
 import 'screens/reports_screen.dart';
 import 'screens/scenarios_screen.dart';
 import 'screens/schedule_screen.dart';
@@ -22,6 +23,7 @@ import 'screens/settings_screen.dart';
 import 'screens/sign_in_screen.dart';
 import 'screens/team_skills_screen.dart';
 import 'screens/work_item_screen.dart';
+import 'services/deep_links.dart';
 import 'shell/app_shell.dart';
 import 'shell/breaks.dart';
 import 'shell/nav.dart';
@@ -35,6 +37,10 @@ GoRouter buildRouter(Session session) {
     refreshListenable: session,
     debugLogDiagnostics: false,
     redirect: (context, state) {
+      // A link from outside (dispatch://items/WI-1042, an https App Link to the web build,
+      // a tapped notification) is rewritten to the app path first; the sign-in check below
+      // then runs against that path and carries it through `from` (MOB-04).
+      if (DeepLinks.needsMapping(state.uri)) return DeepLinks.toRoute(state.uri) ?? Routes.overview;
       final loc = state.uri.path;
       if (session.restoring) return null; // splash shows until restore completes
       final atSignIn = loc == Routes.signIn;
@@ -70,6 +76,8 @@ GoRouter buildRouter(Session session) {
           _page('/changes/:id', (s) => ChangeDetailScreen(id: s.pathParameters['id']!)),
           _page(Routes.team, (s) => const TeamSkillsScreen()),
           _page('/people/:id', (s) => PersonScreen(id: s.pathParameters['id']!)),
+          // TEAM-09: a portfolio's teams side by side; hangs off Team & skills.
+          _page('/portfolios/:id', (s) => PortfolioScreen(id: s.pathParameters['id']!)),
           _page(Routes.estimates, (s) => const EstimatesScreen()),
           _page(Routes.benefits, (s) => const BenefitsScreen()),
           _page(Routes.reports, (s) => const ReportsScreen()),

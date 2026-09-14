@@ -140,8 +140,10 @@ function notification_pref($conn, $userId, $kind) {
  *   'teams'  — routed to Microsoft Teams;
  *   'in_app' — delivered now, in the app.
  * An urgent notification never rides a digest (NOT-03) and therefore stays 'in_app'.
- * Push is deliberately never claimed here: there is no APNs/FCM sender in this build (MOB-04),
- * and a channel value is a statement about where a notification went.
+ * Push (MOB-04) is not a channel value: the channel says where the notification went, and a
+ * push is queued alongside it, per registered device, by engine/push_lib.php. Whether that queue
+ * is ever sent depends on APNs/FCM credentials in config.php; without them the rows are marked
+ * `unconfigured`, never `sent`.
  *
  * @return int|null the new notification id, or null when a preference suppressed it.
  */
@@ -154,9 +156,13 @@ function notify($conn, $wsId, $toUserId, $kind, $title, $body = null, $link = nu
         if ($pref['email_digest'] && in_array($pref['digest'], ['daily', 'weekly'], true)) $channel = 'digest';
         elseif ($pref['teams']) $channel = 'teams';
     }
-    return insert($conn, 'notifications', ['workspace_id' => $wsId, 'user_id' => $toUserId, 'kind' => $kind,
+    $nid = insert($conn, 'notifications', ['workspace_id' => $wsId, 'user_id' => $toUserId, 'kind' => $kind,
         'title' => mb_substr((string)$title, 0, 200), 'body' => $body === null ? null : mb_substr((string)$body, 0, 600),
         'link' => $link, 'urgent' => $urgent ? 1 : 0, 'channel' => $channel]);
+    // MOB-04: one push_deliveries row per active device, if the push library is present.
+    if ($channel !== 'digest' && !function_exists('push_queue') && file_exists(__DIR__ . '/engine/push_lib.php')) require_once __DIR__ . '/engine/push_lib.php';
+    if ($channel !== 'digest' && $pref['push'] && function_exists('push_queue')) push_queue($conn, $wsId, (int)$toUserId, (string)$title, $body, $link, $nid);
+    return $nid;
 }
 /** Notify the user linked to a person (if any). */
 function notify_person($conn, $wsId, $personId, $kind, $title, $body = null, $link = null, $urgent = 0) {

@@ -42,8 +42,17 @@ Optional CP-SAT solver: `cd engine && python -m pip install -r requirements.txt 
 app:app --port 8010`; set `engine_url` in `api/config.php`. Without it every cycle uses the PHP
 heuristic (the R1 behaviour in the roadmap).
 
-Nightly cycle (propose at 02:00): schedule `C:\xampp\php\php.exe cron.php` in Task Scheduler, or press
-**Propose replan now** in the app.
+Scheduled jobs (all CLI, all safe to run by hand):
+
+| Job | Cadence | What it does |
+|---|---|---|
+| `cron.php` | nightly, 02:00 | propose cycle: capacity, priorities, nightly proposal, auto-apply, watch list |
+| `cron_webhooks.php` | every few minutes | deliver outbound webhooks with back-off |
+| `cron_push.php` | every few minutes | send queued push notifications (marked `unconfigured` until FCM/APNs keys exist) |
+| `cron_digest.php` | weekly, Friday | the weekly digest for everyone with the preference on (in-app until SMTP is configured) |
+| `cron_retention.php` | daily | purge plan history and audit beyond the retention windows |
+
+Schedule them with `C:\xampp\php\php.exe <job>` in Task Scheduler, or press **Propose replan now** in the app for the first.
 
 Optional Apache serving instead of the built-in server — add to `httpd.conf`:
 `Alias /dispatch "C:/xampp/htdocs/dispatch"` plus a `<Directory>` block allowing it, and build the web
@@ -60,7 +69,7 @@ engine/         Python FastAPI + OR-Tools CP-SAT service (optional)
 mobile/         Flutter app
 tests/          PHP CLI suites run against the local server
 seed_demo.php   Wipe-and-reseed demo data (CLI only)
-cron.php        Nightly propose cycle (CLI only)
+cron*.php       Scheduled jobs: nightly cycle, webhooks, push, digest, retention (CLI only)
 ```
 
 ## Where the demo knowingly differs from the mockups

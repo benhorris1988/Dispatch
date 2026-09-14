@@ -13,6 +13,10 @@ const NOTIFICATION_KINDS = [
     'estimate_requested' => ['label' => 'An estimate is requested', 'urgent_capable' => false],
     'realisation_due'    => ['label' => 'A benefit realisation is due', 'urgent_capable' => false],
     'watch_list'         => ['label' => 'A watch-list item I own', 'urgent_capable' => false],
+    // NOT-04. The weekly digest itself. `in_app` here decides whether the digest lands as an
+    // in-app notification when no mail transport is configured (see engine/mail_lib.php); the
+    // weekly run addresses everyone who has email_digest on for any kind (see digest.php).
+    'digest'             => ['label' => 'My weekly digest: next week\'s plan and what changed', 'urgent_capable' => false],
 ];
 function notif_shape(array $n) {
     return ['id' => (int)$n['id'], 'kind' => $n['kind'], 'title' => $n['title'], 'body' => $n['body'], 'link' => $n['link'], 'urgent' => (bool)$n['urgent'],

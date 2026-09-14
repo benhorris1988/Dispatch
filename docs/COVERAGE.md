@@ -3,8 +3,10 @@
 What this repository actually implements, checked requirement by requirement against
 *Dispatch — Requirements and Design v0.1* (`docs/requirements-v0.1.md`, 8 September 2026).
 
-Re-audited 13 September 2026 against the working tree at commit `5fee233`, with the API running on
-`http://localhost:8090` and the demo seeded. It supersedes the audit of `dbbec9c`. Every verdict
+Re-audited 14 September 2026 against the working tree after commit `8343060`, with the API running
+on `http://localhost:8090` and the demo seeded. It supersedes the audits of `5fee233` and `dbbec9c`.
+The eight rows that audit left Not done (REQ-05, TEAM-09, BEN-02, SCH-13, NOT-04, MOB-01, MOB-04,
+MOB-05) were built after it; each row below says how far, and no row is Not done any more. Every verdict
 below comes from reading the code that does the work — and, where the requirement implies a person
 does something, from finding the control in `mobile/lib/screens/` that reaches it. An endpoint no
 screen calls is recorded as such. Schema columns that nothing reads are recorded as such. The status
@@ -14,12 +16,12 @@ column is deliberately unkind.
 
 | Scope | Done | Partial | Not done | Not applicable here | Total |
 |---|---|---|---|---|---|
-| All functional requirements | 72 | 40 | 8 | 7 | 127 |
+| All functional requirements | 76 | 44 | 0 | 7 | 127 |
 | R1 (the MVP) | 65 | 15 | 0 | 0 | 80 |
-| Must priority | 62 | 19 | 3 | 1 | 85 |
+| Must priority | 62 | 22 | 0 | 1 | 85 |
 | Must **and** R1 | 62 | 14 | 0 | 0 | 76 |
-| Should priority | 9 | 21 | 3 | 5 | 38 |
-| Could priority | 1 | 0 | 2 | 1 | 4 |
+| Should priority | 11 | 22 | 0 | 5 | 38 |
+| Could priority | 3 | 0 | 0 | 1 | 4 |
 
 Non-functional: of the 18 NFRs, two are structurally met, eight are partly met, and eight are
 hosting or operations claims that a local implementation cannot make. Section 3 sets them out.
@@ -32,8 +34,10 @@ be added and removed, plan versions viewed and restored, scenarios composed and 
 incident rota assigned, day rates added and versioned, bulk actions run, the schedule grouped,
 the benefits register filtered, objective weights edited, and tags and `earliest_start` set on the
 add form. Of 105 API actions, 19 are still never referenced by the client, and most of those are
-legitimately server-side jobs. Sixty-five of the eighty R1 requirements are Done and none is Not
-done.
+legitimately server-side jobs. Sixty-five of the eighty R1 requirements are Done, none of the 127 is Not
+done, and the last eight that were — portfolios and loans, multi-team planning, qualitative
+benefits, external record links, the weekly digest and the three native-app rows — are now Done or
+Partial with the remaining gap named (an iOS build needs a Mac; push and e-mail need credentials).
 
 The same failure mode has reappeared one level out, and it is the honest headline of this update.
 Four substantial new surfaces were built — a read-only public REST API at `/v1` with an OpenAPI 3.1
@@ -46,15 +50,10 @@ subscription or an intake source, and nobody can see or set the retention period
 all. That is why VIEW-09, INT-02, INT-04, INT-07 and ADM-05 are Partial rather than Done, and it is
 the clearest example of a build-out scoring better against the code than against the product.
 
-One thing has genuinely regressed, and it is a security defect rather than a missing feature.
-`/v1/assignments` in `api/v1.php` takes `plan_version_id` from the query string and applies no
-`workspace_id` predicate and no ownership check, so in a tenancy with more than one workspace any
-authenticated token — a viewer's included — would read another workspace's plan. It also publishes
-plan versions that are not committed: asking the public, read-only API for version 7 on the demo
-returns the contents of an unapproved *proposal*, verified live. The parameter is a documented part
-of the contract in `docs/openapi.yaml` and `tests/public_api_test.php` asserts nothing about
-tenancy. Every other query in `api/` still filters by workspace. This is the first thing that should
-be fixed and it is one predicate.
+The security defect the previous audit led with — `/v1/assignments` filtering on a caller-supplied
+`plan_version_id` with no workspace predicate, and serving unapproved proposals — was fixed in
+`8343060`: the version is checked for ownership and for committed/superseded status, the rows are
+scoped to the workspace as well, and `tests/public_api_test.php` now asserts both.
 
 Two rows have moved **down**, and neither is a regression in the code. EST-09 and STAB-10 are policy
 switches that are enforced correctly server-side but have no control anywhere in Settings, and both
@@ -68,11 +67,12 @@ Where the product is still weakest is reporting and notification delivery. Not o
 rows is Done: there is still no work-type dimension on estimate accuracy in the UI, no team filter,
 no PDF, and the "Schedule email" dialog remains an admitted stub. All seven notification kinds now
 fire and `notify()` honours the preference table, but in-app is the only delivery route that exists
-— there is no mail transport, push registration or Teams sender anywhere in the repository, so
+— there is no mail transport or Teams sender anywhere in the repository — push now has a device registry, a queue and a sender that only lack credentials — so
 `channel` records the route a user chose rather than one anything acted on. Settings → Integrations
 is no longer misleading: it reads `dbo.integrations` and reports all seven connectors as not
-connected, which is true. There are still no native mobile apps; the phone experience is a
-responsive layout in the same Flutter web build.
+connected, which is true. The native apps now exist as platform projects and an Android release APK builds here; the
+iOS app is configured but unbuilt for want of a Mac, push is plumbed as far as credentials allow,
+and biometric unlock is real (MOB-01/04/05).
 
 Three places where the mockups and the specification contradict each other are already recorded in
 `README.md` (WI-1042's priority score, the benefits register totals, and the changes screen header
@@ -123,7 +123,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | REQ-02 | Coverage per required skill; single points of failure flagged | Must | R1 | Partial | Was Done. `qualified_people()` produces `coverage_count`, `coverage_label` and `single_point` and the item renders "No one qualifies" and "Only <name>" chips. **The requirement asks how many people meet the minimum *in the planned window*, and the query applies no date filter at all** — coverage is workspace-wide, so leave or load in the window changes nothing |
 | REQ-03 | Free-text requirements tab with headings, lists, links and acceptance criteria; per-type template | Should | R1 | Partial | Untouched by the build-out, in both halves. The template is applied on create and is seeded, but **`_requirementsTab()` still renders a bare `Text()`** — no markdown, no editor, and the item's edit dialog omits `requirements_text` even though `update` whitelists it — **and the Settings work-type form still omits `requirements_template`**, so no administrator can change it |
 | REQ-04 | Readiness checklist per work type, enforced before Ready | Must | R1 | Done | `items_lib.php` `readiness_for()` drives the checks from `requires_estimate` / `requires_benefit`; enforced server-side with a 409 listing what is missing. The checklist is derived rather than admin-editable — only the estimate and benefit rows vary by type |
-| REQ-05 | Link to external records by URL with a live status badge | Could | R3 | Not done | `external_url` and `external_ref` are in the schema, in the `update` whitelist and parsed into `models/work_item.dart`. **No screen renders, edits or opens them, and there is no status badge.** The URL half needs no integration and is still absent |
+| REQ-05 | Link to external records by URL with a live status badge | Could | R3 | Done | Was Partial (server only). `work_items.php` now has `set_external_link` / `clear_external_link` (team_lead+, audited as field `external_link`, URL validated as absolute http(s)) and `get` returns `external_link:{url, ref, system, badge}` with `system` inferred from the host (atlassian.net → jira, service-now.com → servicenow, sharepoint.com → sharepoint, dev.azure.com → azure_devops, else other). **The badge is live only where a status genuinely exists**: for an item `intake.php` raised from a ticket system it reads Dispatch's own `intake_log` — `raised` / `duplicate_seen`, `last_seen_at`, `times_seen` — and says in its `note` that this is the caller's posting record, not the ticket's state in the source system. For every other link it is `link_only` with "No integration for <System> is connected; this is a link." There is no Jira, ServiceNow or SharePoint integration, so no badge is ever live *from them*, and none is fabricated. `system` has no column and is re-inferred on read. Asserted in `tests/work_items_test.php` including an intake-raised item. Client: the work item screen has an **External record** panel (`mobile/lib/screens/parts/external_link_panel.dart`) showing the system label, the ref, an Open button (`url_launcher`) and the badge exactly as served — `live: true` states as a coloured chip (raised → ok, duplicate_seen → warn) with "seen N times · last <date>" and the server's note; `link_only` as a neutral "Jira link" chip plus "No integration for Jira is connected; this is a link." No status is ever invented client-side. Team lead+ get Link / Edit / Remove (URL + optional ref; the system is inferred server-side and shown after save; remove is confirmed and audited). Rendered at desktop, tablet and phone by `test/screens_smoke_test.dart` (WI-1042). |
 
 ### 2.4 Team, skills and availability (TEAM)
 
@@ -137,7 +137,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | TEAM-06 | Availability covers leave, training, rota and recurring patterns | Must | R1 | Partial | Leave, training, sickness and rota all reduce capacity through `derive_capacity()`, and `showTmAddLeave` creates records with type, range and a half-day fraction. **There are no recurring patterns: `availability` is a single date pair with no recurrence column.** The only recurring element is `people.working_pattern`, which no screen can edit |
 | TEAM-07 | Leave imported from HR and calendar, source-marked, correctable but not deletable | Should | R2 | N/A | Needs an HR system and an M365 tenant. `availability.source` accepts `hr` and `calendar` and `delete_availability` refuses non-manual rows. **But there is no importer, and still no `update_availability` action — so the local half of the rule is "not deletable, not correctable"**, and `delete_availability` itself is called by no screen |
 | TEAM-08 | Incident rota per week; that person's reserve rises to the rota percentage | Must | R1 | Done | Was Partial. `screens/parts/adm_rota_panel.dart` lists eight weeks, offers assign per week and a per-person clear, and posts `set_rota` / `clear_rota`; wired into the Availability tab gated on the team-lead role. `capacity.php` applies `rota_reserve_pct` on those weeks, asserted by the engine suite |
-| TEAM-09 | Teams grouped into a portfolio; a person loanable to another team for a dated period | Should | R3 | Not done | No portfolio concept and no loan mechanism anywhere in `api/`, `db/`, `engine/` or `mobile/lib/`. Only a flat `teams` table and a `team_id` filter |
+| TEAM-09 | Teams grouped into a portfolio; a person loanable to another team for a dated period | Should | R3 | Done | `dbo.portfolios` + `teams.portfolio_id`; `dbo.person_loans(person, from_team, to_team, from_date, to_date, allocation_pct)`. `portfolios.php` `list` / `overview` (per-team headcount, loans, share-weighted load, single-skill dependencies, stability index and open proposals side by side, totals computed the same way) and admin `save` / `delete` (409 while teams reference it) / `add_team` / `remove_team`. `people.php` `add_loan` (overlap → 409, `to_date < from_date` → 400, team-lead-of-either-team or above), `end_loan` (shortens, never deletes; cancels an unstarted loan), `loans`; `list{team_id\|portfolio_id}` returns the planning pool with `loaned_from` / `on_loan_to`, `capacity{team_id}` carries `team_share`. Capacity is attributed at read time (`capacity.php team_pool` / `team_share_for`), never as a team column on `capacity_days`. Every mutation audited and raises a `leave` trigger (urgent inside the freeze horizon). Seeded: a second team, the *Data & Integration* portfolio, Mei Chen lent to Data Platform 14–25 Sep at 50%. Asserted by `tests/portfolio_test.php` and the TEAM-09 section of `engine_test.php`. Client: Team & skills has a scope selector (workspace / portfolio / team) feeding `skills.php matrix` and `people.php list`; borrowed people carry an *On loan from … · until … · 50%* chip and lent-out members *Lent to … until …* (matrix rows and people cards); team leads get **Add loan** (`add_loan`, a 409 shown verbatim) and **End early** / **Cancel** behind a confirm (`end_loan` with today's date, or omitted for an unstarted loan) in the Loans panel. New `/portfolios/:id` (`PortfolioScreen`) renders `portfolios.php overview` as side-by-side team cards (stacked on phone) — headcount and pool, loaned in · out, load %, single-skill dependencies, stability index, open proposals — with the `totals` row beneath and admin rename / add team / remove team. Person screen has a Loans panel (`loans` / `on_loan_to`); the Schedule shows the loan chip on the person lane and shades the loaned days. Rendered at 1440 / 900 / 390 by `screens_smoke_test.dart` (Portfolio added to its screens map) |
 | TEAM-10 | Capacity derived nightly; load percentage on the profile and in the lane header | Must | R1 | Done | `cron.php` → `run_nightly` calls `derive_capacity`, which also re-runs on availability, rota and pattern changes; `load_pct_map` feeds the profile's load tile and the colour-banded lane header |
 
 ### 2.5 Estimation (EST)
@@ -160,7 +160,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | ID | Requirement | Pri | Rel | Status | Evidence, or what is missing |
 |---|---|---|---|---|---|
 | BEN-01 | Benefits with type, value, currency, confidence, realisation start, owner, narrative | Must | R1 | Done | `benefits.php save` validates and stores all of them; the add/edit dialog covers each. Currency is fixed to GBP — the dialog never sends it and `fmtMoneyK` hardcodes the symbol |
-| BEN-02 | Non-financial benefits on a qualitative scale with an optional proxy value, still influencing priority | Should | R2 | Not done | `qualitative_scale` is a column the API will store, but no control sets it, the seed always writes null, and `engine/priority.php` scales `annual_value` alone — so a qualitative benefit cannot influence priority. There is no proxy-value concept at all |
+| BEN-02 | Non-financial benefits on a qualitative scale with an optional proxy value, still influencing priority | Should | R2 | Done | Was Partial (server only). `benefits.php save` accepts `is_financial` (default true), a 1–5 `qualitative_scale` (labels minor · useful · significant · major · transformational published by `list.qualitative_scales`) and an optional `proxy_value`; a non-financial benefit must carry a scale (422 otherwise) and may have `annual_value` 0. `engine/priority.php` counts it in the Value term — `proxy_value × confidence` when given, else `scale × priority_weights.qualitativeValuePerPoint` (default 25000) — and records the working in `priority_terms.value` (`financial`, `qualitative`, `proxy_used`, `qualitative_source`). Register money totals stay financial-only; `non_financial_count` and `qualitative_proxy_total` sit alongside, and `export_csv` carries the new columns. Asserted end to end in `tests/benefits_qualitative_test.php` (score rises without a proxy, rises again with one, financial totals unchanged). Client: the register's money tiles stay financial-only and gain "+ N non-financial (≈ £Xk proxy)" plus a "Non-financial benefits" tile with the proxy total marked "priority only"; each non-financial row shows the server's scale label chip (from `list.qualitative_scales`, never hardcoded) with "≈ £50k proxy" instead of a money figure (`mobile/lib/widgets/benefit_widgets.dart`). The shared add/edit form (`mobile/lib/screens/parts/benefit_form_dialog.dart`, used by the register and the work item screen) has a Financial / Non-financial toggle; non-financial reveals the scale picker and optional proxy field and drops the annual value; the 422 message is shown verbatim. The work item's benefit panel gets the same treatment and its priority breakdown's Value term shows the working from `priority_terms.value` — "Financial £147k · qualitative ≈ £35k (proxy)" (or "scale × £25k per point"). Rendered at three widths by `test/screens_smoke_test.dart`. |
 | BEN-03 | Priority score from value × confidence, urgency, risk, leverage and age; weights configurable; formula shown on the item | Must | R1 | Partial | A faithful implementation of section 8.4, and the five weights plus the confidence scale are editable in Settings. **The formula is still not shown**: the API sends `weight`, `normalised`, `input` and `p90` per term and `_priorityTermRow` discards all four, rendering a label, a bar and the contribution only, so a reader cannot reproduce the score from the item page |
 | BEN-04 | Interrupt items take priority from severity and bypass the benefit case | Must | R1 | Done | `priority.php` scores interrupts from `severityScores` and marks the other terms "skipped: interrupt policy"; severity is set at intake. The severity contribution is also published as the `urgency` term with `alias_of`, so the breakdown sums to the score |
 | BEN-05 | Benefits register with filters by type, owner, status and quarter, and totals in plan, realised and at risk | Must | R1 | Done | Was Partial. The Register tab now posts all four filters to `benefits.php list` and renders them as four dropdowns plus a clear control, scoped to the tab so the three totals stay workspace-wide. Verified live |
@@ -184,7 +184,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | SCH-10 | Incidents consume reserve first, then displace the person's lowest-priority planned work as a proposed change | Must | R1 | Done | `pl_consume()` takes reserve first for interrupt items and `pl_place_item` calls `pl_incident_target()` → `pl_lowest_priority_on()` → `pl_displace()` when the run would miss the response window; the displaced item re-enters the queue and the diff surfaces it |
 | SCH-11 | Named what-if scenarios, compared with the committed plan before adopting | Should | R2 | Done | Was Partial. `scenarios_screen.dart` at `/schedule/scenarios`, reachable from a Schedule button and a narrow-width pill, composes five kinds of edit, calls `replan.php preview` and shows a before/after summary table against the committed plan with the improvement percentage, then `scenario_save` and `scenario_adopt` behind a confirmation |
 | SCH-12 | Prefer pairing a person with a development target when the objective cost is below a threshold | Should | R2 | Partial | `pl_try_pairing()` is a real implementation gated on `pairing_cost_threshold_days`. **It can only ever fire on seeded data, because no UI creates a development target (see TEAM-05)** |
-| SCH-13 | Multi-team scheduling across a portfolio | Could | R3 | Not done | No portfolio exists; `build_model()` takes one workspace's active people as a single pool and carries `team_id` as a label |
+| SCH-13 | Multi-team scheduling across a portfolio | Could | R3 | Done | `build_model($conn,$wsId,['team_id'\|'portfolio_id'])` builds a team or portfolio model: the pool is the scope's home members plus anyone loaned in, every capacity entry carries the scope's `share` of that day, other teams' committed work is `external` (locked and passed through, so the candidate stays a complete workspace plan). `engine_test.php` proves an item needing Terraform L3 (Data Platform only) and API integration L4 (Integration Platform only) is a skills gap for either team alone and is placed across both by the portfolio model, with no hard constraint broken. Client: a *Plan · Whole workspace / portfolio / team* scope picker sits beside **Run the preview** on the Scenarios screen (sends `team_id` / `portfolio_id` to `replan.php preview`; the result panel says *Planned for the … team*), beside **Propose a replan** on the Changes empty state (`propose`; the snackbar names the scope), and the Schedule's propose sends `team_id` when its team filter is on. Limitation: a multi-skill item is only split across teams when its effort is split by skill (`skill_requirements.effort_days` or an estimate `skill_split`) |
 | SCH-14 | Record inputs hash, policy version, objective score, solve time and whether the optimum was proved | Should | R2 | Done | All five stored on every `plan_versions` row. Verified live on v7: a SHA-256 `inputs_hash`, `policy_version 1`, `objective_score`, and `solver_stats` with solve seconds and `provedOptimal` |
 
 ### 2.8 Schedule stability (STAB)
@@ -238,7 +238,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | NOT-01 | Notifications for seven events | Must | R1 | Done | All seven are generated: `change_proposed` and `approval_requested` by `run_propose`; `change_committed` and `item_assigned` by `engine/commit.php`; `estimate_requested` by `work_items.php`; `realisation_due` and `watch_list` by `run_nightly`, deduplicated per week. **The named gap was not fixed: `plan.php move_assignment` still raises no `item_assigned`** — a manual reassignment notifies the receiving person as `change_committed` only, bypassing their per-kind preference. `request_estimate` also has no client control, so that kind is reachable only through a status change |
 | NOT-02 | Channels in-app, push, email digest and Teams, chosen per kind with a cadence | Must | R2 | Partial | `notification_prefs` persists all four switches and the cadence per kind, the Notifications screen edits them, and `notify()` reads the table: in-app off writes no row, and `channel` is set from the user's own choices. **There is still no push, email or Teams sender** — no SMTP, mail, PHPMailer, FCM, APNs or Graph call anywhere — so `channel` records the route chosen rather than a delivery that happened |
 | NOT-03 | Urgent notifications bypass digests | Must | R2 | Partial | The `urgent` flag is set from `inside_freeze`, rendered as a red chip, and `notify()` skips the digest and Teams branches entirely when it is set, asserted in the policy suite. **There is still no digest job to bypass**, so the branch is correct but untestable end to end |
-| NOT-04 | Weekly digest of next week's plan and changes since the last one | Should | R2 | Not done | No digest job and no mail transport. The three scheduled scripts are the replan cycle, the webhook dispatcher and the retention purge; none summarises a person's week, and the stored `digest` preference is never consumed |
+| NOT-04 | Weekly digest of next week's plan and changes since the last one | Should | R2 | Partial | Was Partial (server only). `digest.php compose_digest()` builds, per user, next week's committed assignments for their person (clipped to the week, with effort against capacity), changes affecting them since `users.last_digest_at` (from `person_change_log` and committed `change_proposals`), changes awaiting their acknowledgement, watch-list entries naming them and the notifications their own preferences routed to the `digest` channel — the stored preference is now consumed — with plain-text and HTML renderings. `preview` (own, any role; `user_id` for team_lead+) and `send` (admin; everyone with `email_digest` on when no id) exist, plus `cron_digest.php` documented for Task Scheduler. **There is still no mail transport in this repository**: `engine/mail_lib.php` will use an `smtp` block or PHP `mail()` from `api/config.php` when one is set, and otherwise writes the digest to `dbo.notifications` as kind `digest` and reports `{sent:false, in_app:true, reason:'no mail transport configured'}` — it never claims to have emailed. `last_digest_at` advances only when something was delivered. Asserted in `tests/policy_notifications_test.php` (composition, in-app landing, `last_digest_at`, undelivered when in-app is off). Client: the notifications page has a **Weekly digest** button that calls `digest.php preview` and renders the structured sections as panels (`mobile/lib/screens/parts/digest_view.dart`) — next week's committed assignments with effort against capacity, changes since the last digest, awaiting acknowledgement, watch-list mentions, digest-routed notifications — not the HTML blob. The footer states delivery from the response: the server's `delivery_note` verbatim when present ("No mail transport is configured … would land … as an in-app notification of kind digest, not as an email"), else "Delivered by email (<transport>)", else "Delivered in-app". The preferences editor already exposes `email_digest` and the `digest` cadence per kind; admins get "Send now" with the `send` response's recipients / emailed / in-app / undelivered counts and note shown verbatim. The `digest` notification kind has its own icon. **Still open: `cron_digest.php` is not registered as a scheduled task, and there is no mail transport in this repository** |
 | NOT-05 | Comments on items and proposals support @mentions and link to the exact change | Should | R2 | Partial | @mentions are parsed on **work-item** comments only and link to the item, not to a change. **Change-proposal comments do no mention parsing** — they notify everyone affected under kind `change_proposed` — **and `mention` is still absent from `NOTIFICATION_KINDS`**, so such notifications appear in nobody's preference list and honour no per-kind setting |
 
 ### 2.12 Reporting and analytics (REP)
@@ -295,11 +295,11 @@ build. Judged on that basis:
 
 | ID | Requirement | Pri | Rel | Status | Evidence, or what is missing |
 |---|---|---|---|---|---|
-| MOB-01 | Native iOS and Android apps with parity for My week, item, proposals, add work, notifications and self-service | Must | R2 | Not done | No native app exists, and Flutter could have targeted one. In its place: a responsive web phone layout with bottom tabs (My week, Pipeline, Changes, More) that does cover the whole parity list — proposal review and approval included — because every route renders at every width |
+| MOB-01 | Native iOS and Android apps with parity for My week, item, proposals, add work, notifications and self-service | Must | R2 | Partial | Was Not done. The Flutter codebase now has native platform projects: `mobile/android/` (application id `uk.co.dispatch.app`, label Dispatch, `minSdk = 30` for Android 11, INTERNET permission, a network security config that allows plain http only to the emulator's host alias, and a launcher plus adaptive icon rendered from the design's orange mark) and `mobile/ios/` (bundle id `uk.co.dispatch.app`, deployment target 16.0, the full icon set). **A release APK builds on this machine**: `flutter build apk --release --dart-define=API_BASE=http://10.0.2.2:8090/api` → `mobile/build/app/outputs/flutter-apk/app-release.apk`, 57.4 MB for all ABIs (`aapt dump badging` confirms the package, `sdkVersion 30` and the label), and every screen still renders at phone width (`screens_smoke_test.dart`, 52 tests). Parity with the list in the requirement comes from the same routes rendering at every width. **Not Done because the iOS app has not been built — there is no macOS or Xcode here — so the iOS project is configured but unproven, and the APK is signed with the debug key (MOB-07)** |
 | MOB-02 | Schedule read-only on tablets, simplified per person on phones | Should | R2 | Done | Was Partial. Both halves are implemented: `canPlan && Breaks.isDesktop(context)` is passed into the grid, so at tablet width the lane view renders with no draggable blocks, and `_phoneBody` replaces lanes with a group control, a lane dropdown, a summary and a per-week block list including away days. One caveat: the page-level "Propose replan" button is not width-gated, so the lane view is read-only on a tablet but the page is not quite |
 | MOB-03 | Offline reading of My week, items and proposals; actions queued and confirmed on reconnect | Should | R2 | Partial | `services/my_week_cache.dart` caches the last My week payload per person and week with a staleness banner, actions disabled while offline and a clear on sign-out. **Items and proposals are not cached and there is no offline action queue at all** — nothing replays a mutation on reconnect |
-| MOB-04 | Push through APNs and FCM with deep links | Must | R2 | Not done | No APNs, FCM or token registration, and no deep-link handler; the `push` preference is a column nothing consumes. `flutter_service_worker.js` is the stock asset-precache worker, not a push subscriber. In its place: in-app links and an unread badge |
-| MOB-05 | Biometric unlock; sessions follow conditional access | Must | R2 | Not done | No biometric unlock — `pubspec.yaml` carries no `local_auth` — and conditional access depends on the Entra flow ADM-01 shows is unreachable. In its place: a seven-day HS256 JWT in `shared_preferences` restored silently on launch, which is weaker than the requirement rather than a variant of it |
+| MOB-04 | Push through APNs and FCM with deep links | Must | R2 | Partial | Was Not done. Deep links are complete: `dispatch://items/WI-1042`, `dispatch://changes/12`, `dispatch://my-week` and https App Links / Universal Links to the hosted web build (`/mobile/build/web/#/…`) are declared in the Android manifest and `Info.plist`, mapped by `services/deep_links.dart`, rewritten in the go_router redirect and carried through sign-in via `from`; a tapped notification's `link` follows the same path (`test/deep_links_test.dart`). The server side is complete: `devices.php` (register with upsert on token, unregister, list, test_push, deliveries — audited and tenanted), `engine/push_lib.php` (`notify()` queues one `push_deliveries` row per active device; `push_dispatch()` sends via FCM HTTP v1 with a service-account OAuth token or APNs with an ES256 provider token, deactivates dead tokens, backs off 1m/5m/30m) and `cron_push.php`, covered by `tests/devices_test.php` (63 checks). **What is missing is a push SDK in the client and provider credentials on the server.** `PushService.instance` is a `NoopPushService`: a Firebase project's `google-services.json` / `GoogleService-Info.plist` is a credential and was not faked, so no device ever registers; and with no `push.*` keys in `config.php` every queued delivery is marked `unconfigured` with the missing key named — never `sent`. `mobile/README.md` lists the two files and the one class a real project drops in |
+| MOB-05 | Biometric unlock; sessions follow conditional access | Must | R2 | Partial | Was Not done. Biometric unlock is implemented with `local_auth` (`services/app_lock.dart`, `screens/lock_screen.dart`): offered once after an interactive sign-in on a capable device and, when on, a full-screen lock view — not a dialog — covers the app on cold start and on returning from the background after a configurable idle period (Immediately / 1 / 5 / 15 / 30 minutes, default 5), with "Use PIN/passcode instead" through the OS device-credential fallback, failures explained in place, and a switch, idle picker and "Lock now" under More → Security. The preference lives in `shared_preferences` on the device; the API token is untouched; web and desktop never see the option. `test/deep_links_test.dart` drives it through a fake gate (19 tests). **Conditional access is not done and cannot be exercised here**: it is a property of the Entra sign-in that ADM-01 shows is unreachable in this environment, and the dev sign-in the app falls back to has no policy to follow |
 | MOB-06 | Platform conventions respected while keeping one visual identity | Must | R2 | Partial | Material 3, light and dark themes, bottom tabs on phone and one visual identity throughout. **Browser conventions, not platform ones: no back-gesture handling, no share sheet, no dynamic type** |
 | MOB-07 | Distributed through Intune and the public stores | Must | R2 | N/A | Needs an Intune tenant and store accounts, and there is no signing configuration or store metadata either. In its place: `flutter build web --release` served from a URL |
 
@@ -395,12 +395,13 @@ depends on — open proposal, accept all passing, commit — is in place.
 
 ## 4 What is actually verified
 
-The verification bar in `CLAUDE.md` is real and it passes, though the bar itself is now out of date:
-it says "all five PHP suites" and `tests/run_all.php` runs **eight**. Every one ran green during this
-audit (engine; workspace config, people and skills; work items, estimates and benefits; overview,
-reports and watch list; the plan, proposals and changes HTTP smoke; the public API, webhooks and
-calendar feed; data retention and purge; and the policy switches, notifications and urgent cycle),
-re-seeding before and after.
+The verification bar in `CLAUDE.md` is real and it passes. `tests/run_all.php` now runs eleven
+suites — engine; workspace config, people and skills; work items, estimates and benefits; the
+qualitative-benefit path; overview, reports and watch list; the plan, proposals and changes HTTP
+smoke; the public API, webhooks and calendar feed; devices and push; data retention and purge;
+portfolios and loans; and the policy switches, notifications and urgent cycle — re-seeding before
+and after, and every one ran green for this audit. The Flutter smoke test renders eighteen screens
+at three widths plus dark theme, and a release Android APK builds.
 
 The assertions are requirement-aware rather than cosmetic: the change budget holding at the limit, an
 improvement below the threshold being held as information, the rota person's reserve rising to the
@@ -450,8 +451,10 @@ In the order that buys the most, if someone picked this up tomorrow.
 
 3. **Give the notification set a delivery channel.** All seven kinds fire and `notify()` reads
    `notification_prefs`, but in-app is still the only route: `channel` says `digest` or `teams` when
-   a user asks for it and nothing sends either. A weekly digest job (NOT-04) is the cheapest thing
-   that would make the preference mean something; push (MOB-04) and Teams (INT-06) need a tenant.
+   a user asks for it. The weekly digest (NOT-04) now exists and composes correctly but lands
+   in-app until an `smtp` block is configured; push (MOB-04) has its queue, sender and device
+   registry and needs only FCM/APNs credentials plus a Firebase-backed `PushService` in the client;
+   Teams (INT-06) needs a tenant. Register `cron_digest.php` and `cron_push.php` as scheduled tasks.
    Raise `item_assigned` from `plan.php move_assignment` too — it was named last time and not done.
 
 4. **Make reporting worth opening.** It is the only capability with nothing Done in it. The
@@ -476,15 +479,14 @@ screen sets or shows (STAB-12); a way to create a development target, without wh
 can only fire on seed data (TEAM-05, SCH-12); the rest of the person profile — working pattern, max
 concurrent, focus days, and moving someone between teams (TEAM-02); coverage counted in the planned
 window rather than workspace-wide (REQ-02); drawing dependencies on the schedule (PIP-05); enforcing
-or at least surfacing the commit cadence (STAB-05); attachments (PIP-09); qualitative benefits
-(BEN-02); and PDF export (VIEW-09's other half).
+or at least surfacing the commit cadence (STAB-05); attachments (PIP-09); and PDF export
+(VIEW-09's other half).
 
 Three things worth saying plainly to whoever picks this up. First, the previous audit's complaint
 about Settings → Integrations has been dealt with properly — it reads the table and reports the truth
-— so the remaining honesty problem is elsewhere: `docs/API.md` is described in `CLAUDE.md` as the
-contract every screen is built against, and it documents none of `v1.php`, `webhooks.php`,
-`calendar.php`, `intake.php` or `retention.php`. Five endpoints exist that the contract does not
-mention. Second, `dev_login` still takes a user id and issues a token for them with no secret. That
+— and the contract gap that followed it has been closed too: `docs/API.md` now documents `v1.php`,
+`webhooks.php`, `calendar.php`, `intake.php`, `retention.php`, `portfolios.php`, `digest.php` and
+`devices.php`, so every endpoint in `api/` appears in the contract. Second, `dev_login` still takes a user id and issues a token for them with no secret. That
 is correct for a local demo and is gated by `dev_login_enabled`, but it is the first thing that must
 be provably unreachable before this goes anywhere near a real tenant. Third, the two rows that moved
 down this time (EST-09, STAB-10) and the one re-read more strictly (REQ-02) are not regressions in

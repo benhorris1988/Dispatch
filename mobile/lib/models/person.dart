@@ -27,6 +27,9 @@ class Person {
     this.protectedUntil,
     this.loadPct,
     this.skills = const [],
+    this.loans = const [],
+    this.onLoanTo,
+    this.loanedFrom,
   });
 
   final int id;
@@ -50,6 +53,20 @@ class Person {
   final DateTime? protectedUntil;
   final double? loadPct; // when the endpoint supplies it
   final List<PersonSkill> skills;
+
+  // TEAM-09. `people.php list` and `get` supply these; other endpoints leave
+  // them empty.
+  /// Every loan touching the window the endpoint reported (today to the horizon
+  /// for `list`, 90 days back for `get`).
+  final List<Loan> loans;
+  /// The loan that moves this person to another team today, or null.
+  final Loan? onLoanTo;
+  /// In a team- or portfolio-scoped list: the loan that brings this person into
+  /// the scope from their home team, or null for a home member.
+  final Loan? loanedFrom;
+
+  /// True when this person is borrowed into the scope the list was built for.
+  bool get isBorrowed => loanedFrom != null;
 
   Color get colour => colourHex == null ? DispatchColors.forSeed(id) : DispatchColors.parseHex(colourHex, fallback: DispatchColors.forSeed(id));
 
@@ -85,6 +102,9 @@ class Person {
         protectedUntil: asDate(j['protected_until']),
         loadPct: asDouble(j['load_pct'] ?? j['load']),
         skills: asList(j['skills'], PersonSkill.fromJson),
+        loans: asList(j['loans'], Loan.fromJson),
+        onLoanTo: Loan.maybe(j['on_loan_to']),
+        loanedFrom: Loan.maybe(j['loaned_from']),
       );
 
   static Map<String, double> _pattern(dynamic v) {
@@ -158,4 +178,74 @@ class PersonSkill {
         pairingEnabled: asBool(j['pairing_enabled']),
         updatedAt: asDate(j['updated_at']),
       );
+}
+
+/// A dated loan of a person to another team at a share of their time (TEAM-09).
+/// The shape `people.php add_loan / loans / list / get` and
+/// `portfolios.php overview` return; `plan.php schedule` sends a cut-down
+/// version on each person row (`loaned_in` / `on_loan_to`), which parses the
+/// same way with the missing fields left null.
+class Loan {
+  const Loan({
+    required this.id,
+    required this.personId,
+    this.personName,
+    this.fromTeamId,
+    this.fromTeamName,
+    this.toTeamId,
+    this.toTeamName,
+    required this.fromDate,
+    required this.toDate,
+    this.allocationPct = 100,
+    this.reason,
+  });
+
+  final int id;
+  final int personId;
+  final String? personName;
+  final int? fromTeamId;
+  final String? fromTeamName;
+  final int? toTeamId;
+  final String? toTeamName;
+  final DateTime fromDate;
+  /// Inclusive.
+  final DateTime toDate;
+  final int allocationPct;
+  /// A business reason — never personal data (ADM-05).
+  final String? reason;
+
+  double get share => allocationPct / 100;
+
+  /// True while [day] falls inside the loan's dates.
+  bool coversDay(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
+    return !d.isBefore(fromDate) && !d.isAfter(toDate);
+  }
+
+  bool startsAfter(DateTime day) => fromDate.isAfter(DateTime(day.year, day.month, day.day));
+  bool endedBefore(DateTime day) => toDate.isBefore(DateTime(day.year, day.month, day.day));
+
+  static Loan? maybe(dynamic v) {
+    if (v is! Map || v.isEmpty) return null;
+    final m = Map<String, dynamic>.from(v);
+    if (asDate(m['from_date']) == null) return null;
+    return Loan.fromJson(m);
+  }
+
+  factory Loan.fromJson(Map<String, dynamic> j) {
+    final from = asDate(j['from_date']) ?? DateTime.now();
+    return Loan(
+      id: asIntOr(j['id'], 0),
+      personId: asIntOr(j['person_id'], 0),
+      personName: asStr(j['person_name']),
+      fromTeamId: asInt(j['from_team_id']),
+      fromTeamName: asStr(j['from_team_name']),
+      toTeamId: asInt(j['to_team_id']),
+      toTeamName: asStr(j['to_team_name']),
+      fromDate: from,
+      toDate: asDate(j['to_date']) ?? from,
+      allocationPct: asIntOr(j['allocation_pct'], 100),
+      reason: asStr(j['reason']),
+    );
+  }
 }

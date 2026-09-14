@@ -183,5 +183,66 @@ near($max, 100, 0.2, 'top planned item ≈100 after rescale');
 $inc = array_values(array_filter($LL['items'], fn($i) => $i['type_policy'] === 'interrupt'));
 check($inc && in_array((int)$inc[0]['priority_score'], [50,70,90,100], true), 'incident score from severity (' . ($inc[0]['priority_score'] ?? '-') . ')');
 
+echo "== external record link (REQ-05)\n";
+[, $G3] = api('work_items', ['action' => 'get', 'ref' => 'WI-1068']);
+check(array_key_exists('external_link', $G3['item']) && $G3['item']['external_link'] === null, 'an item with no URL has external_link null');
+[$code, $X] = api('work_items', ['action' => 'set_external_link', 'ref' => 'WI-1068', 'url' => 'ftp://files.example.org/x'], 422);
+check($code === 422, 'a non-http(s) URL is refused');
+[, $X] = api('work_items', ['action' => 'set_external_link', 'ref' => 'WI-1068', 'url' => 'https://acme.atlassian.net/browse/DP-42', 'external_ref' => 'DP-42']);
+$lnk = $X['external_link'] ?? [];
+check(($lnk['url'] ?? '') === 'https://acme.atlassian.net/browse/DP-42' && ($lnk['ref'] ?? '') === 'DP-42', 'set_external_link stores url and external_ref');
+check(($lnk['system'] ?? '') === 'jira' && ($lnk['system_label'] ?? '') === 'Jira', 'system inferred from the atlassian.net host');
+check(($lnk['badge']['state'] ?? '') === 'link_only' && ($lnk['badge']['live'] ?? true) === false, 'a typed-in link gets an honest link_only badge');
+check(strpos($lnk['badge']['note'] ?? '', 'No integration for Jira is connected') === 0, 'and says why: ' . ($lnk['badge']['note'] ?? '-'));
+check(($X['item']['external_link']['system'] ?? '') === 'jira' && ($X['item']['external_ref'] ?? '') === 'DP-42', 'the item shape carries the same link');
+foreach (['https://acme.service-now.com/incident.do?sys_id=1' => 'servicenow', 'https://contoso.sharepoint.com/sites/dp/SitePages/Runbook.aspx' => 'sharepoint', 'https://dev.azure.com/acme/_workitems/edit/7' => 'azure_devops', 'https://wiki.example.org/page' => 'other'] as $u => $sys) {
+    [, $X] = api('work_items', ['action' => 'set_external_link', 'id' => $G3['item']['id'], 'url' => $u]);
+    check(($X['external_link']['system'] ?? '') === $sys, "$sys inferred from $u");
+}
+[, $X] = api('work_items', ['action' => 'set_external_link', 'id' => $G3['item']['id'], 'url' => 'https://dev.azure.com/acme/_workitems/edit/7', 'system' => 'other']);
+check(($X['external_link']['system'] ?? '') === 'other' && !empty($X['external_link']['system_note']), 'an explicit system is echoed and the response says reads re-infer it');
+[$code] = api('work_items', ['action' => 'set_external_link', 'id' => $G3['item']['id'], 'url' => 'https://x.example.org', 'system' => 'trello'], 400);
+[, $H2] = api('work_items', ['action' => 'history', 'id' => $G3['item']['id']]);
+check(count(array_filter($H2['events'], fn($e) => $e['field'] === 'external_link')) >= 2, 'each link change is audited as field external_link');
+[, $X] = api('work_items', ['action' => 'clear_external_link', 'id' => $G3['item']['id']]);
+check($X['external_link'] === null && $X['item']['external_url'] === null && $X['item']['external_ref'] === null, 'clear_external_link removes both');
+// Role gate: a team member cannot set one.
+$member = null; foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'team_member') { $member = $u; break; }
+if ($member) { $leadToken = $token; [, $ml] = api('auth', ['action' => 'dev_login', 'user_id' => $member['id']]); $token = $ml['token'];
+    [$code] = api('work_items', ['action' => 'set_external_link', 'id' => $G3['item']['id'], 'url' => 'https://acme.atlassian.net/browse/DP-1'], 403);
+    check($code === 403, 'a team member is refused (team_lead+)'); $token = $leadToken; }
+
+echo "== the badge is live only for an intake-raised item (REQ-05 + INT-02)\n";
+$admin = null; foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'admin') { $admin = $u; break; }
+check($admin !== null, 'an admin dev user exists');
+$leadToken = $token; [, $al] = api('auth', ['action' => 'dev_login', 'user_id' => $admin['id']]); $adminToken = $al['token'] ?? null;
+$token = $adminToken;
+[, $src] = api('intake', ['action' => 'save', 'name' => 'ServiceNow (badge test)', 'system' => 'servicenow']);
+$srcId = $src['source']['id'] ?? null; $secret = $src['secret'] ?? '';
+check($srcId !== null && $secret !== '', 'an intake source exists to post through');
+$post = function (array $payload) use ($BASE, $srcId, $secret) {
+    $ch = curl_init("$BASE/api/intake.php?source=$srcId");
+    curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode($payload), CURLOPT_HTTPHEADER => ['Content-Type: application/json', "X-Dispatch-Intake-Secret: $secret"], CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 60]);
+    $raw = curl_exec($ch); curl_close($ch); return json_decode($raw, true) ?? [];
+};
+$r = $post(['number' => 'INC0077001', 'short_description' => 'Badge test incident', 'priority' => '2', 'url' => 'https://acme.service-now.com/incident.do?number=INC0077001']);
+check(($r['outcome'] ?? '') === 'created', 'a ticket system raises an incident (' . ($r['ref'] ?? '-') . ')');
+$token = $leadToken;
+[, $I] = api('work_items', ['action' => 'get', 'id' => $r['work_item_id'] ?? 0]);
+$lnk = $I['item']['external_link'] ?? [];
+check(($lnk['ref'] ?? '') === 'INC0077001' && ($lnk['system'] ?? '') === 'servicenow', 'the raised item carries the ticket ref and the source system');
+check(($lnk['badge']['state'] ?? '') === 'raised' && ($lnk['badge']['live'] ?? false) === true && ($lnk['badge']['source'] ?? '') === 'intake_log', "its badge is live from Dispatch's own intake record: raised");
+check(!empty($lnk['badge']['last_seen_at']) && ($lnk['badge']['times_seen'] ?? 0) === 1, 'with last_seen_at and times_seen 1');
+check(strpos($lnk['badge']['note'] ?? '', "not the ticket's current state") !== false, "and it does not claim to know the ticket's state in ServiceNow");
+$post(['number' => 'INC0077001', 'short_description' => 'Badge test incident', 'priority' => '2']);
+[, $I2] = api('work_items', ['action' => 'get', 'id' => $r['work_item_id'] ?? 0]);
+$b2 = $I2['item']['external_link']['badge'] ?? [];
+check(($b2['state'] ?? '') === 'duplicate_seen' && ($b2['times_seen'] ?? 0) === 2, 'a re-post moves the badge to duplicate_seen, times_seen 2');
+check(($b2['last_seen_at'] ?? '') >= ($lnk['badge']['last_seen_at'] ?? 'z'), 'last_seen_at advanced');
+$token = $adminToken; api('intake', ['action' => 'delete', 'id' => $srcId]); $token = $leadToken;
+[, $I3] = api('work_items', ['action' => 'get', 'id' => $r['work_item_id'] ?? 0]);
+check(($I3['item']['external_link']['badge']['state'] ?? '') === 'link_only', 'with the intake record gone the badge honestly falls back to link_only');
+api('work_items', ['action' => 'set_status', 'id' => $r['work_item_id'] ?? 0, 'status' => 'cancelled', 'reason' => 'test incident']);
+
 echo "\n$pass passed, $fail failed\n";
 exit($fail ? 1 : 0);

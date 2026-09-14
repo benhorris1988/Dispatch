@@ -9,8 +9,19 @@ $today = today();
 const MIN_QUALIFIED_LEVEL = 3;
 const LEVEL_NAMES = ['None', 'Aware', 'Practitioner', 'Independent', 'Expert'];
 
-/** Skills with coverage + 6-week demand/supply. */
-function skills_with_stats($conn, $wsId, $today, $includeRetired = false) {
+/**
+ * The people a skills view is about (TEAM-09): the whole workspace, or with team_id / portfolio_id the
+ * scope's planning pool — home members plus anyone loaned in — with the share of each day that belongs
+ * to the scope. Returns [pool (team_pool shape) | null, scope].
+ */
+function skills_scope($conn, $wsId, $today, $to) {
+    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'portfolio_id' => param('portfolio_id')]);
+    if ($scope === null) fail('Team or portfolio not found', 404);
+    return [$scope['team_ids'] === null ? null : team_pool($conn, $wsId, $scope['team_ids'], $today, $to), $scope];
+}
+
+/** Skills with coverage + 6-week demand/supply. $pool (team_pool) restricts people and weights supply by the scope's share. */
+function skills_with_stats($conn, $wsId, $today, $includeRetired = false, $pool = null) {
     $ws = workspace_row($conn, $wsId);
     $hpd = (float)$ws['hours_per_day'] ?: 7.5;
     $workingDays = workspace_working_days($conn, $wsId);
@@ -18,14 +29,23 @@ function skills_with_stats($conn, $wsId, $today, $includeRetired = false) {
     ensure_capacity($conn, $wsId, $from, $to);
     $skills = rows($conn, "SELECT * FROM dbo.skills WHERE workspace_id = ?" . ($includeRetired ? '' : ' AND retired = 0') . " ORDER BY sort_order, name", [$wsId]);
 
-    // Qualified people per skill.
+    // Qualified people per skill (within the pool when scoped).
     $qualified = [];
-    foreach (rows($conn, "SELECT ps.skill_id, ps.person_id FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id WHERE p.workspace_id = ? AND p.active = 1 AND ps.proficiency >= ?", [$wsId, MIN_QUALIFIED_LEVEL]) as $r)
+    foreach (rows($conn, "SELECT ps.skill_id, ps.person_id FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id WHERE p.workspace_id = ? AND p.active = 1 AND ps.proficiency >= ?", [$wsId, MIN_QUALIFIED_LEVEL]) as $r) {
+        if ($pool !== null && !isset($pool[(int)$r['person_id']])) continue;
         $qualified[(int)$r['skill_id']][] = (int)$r['person_id'];
-    // Supply: capacity days (available − reserve) per person over the window.
+    }
+    // Supply: capacity days (available − reserve) per person over the window, × the scope's share of each day when scoped.
     $capDays = [];
-    foreach (rows($conn, "SELECT person_id, SUM(available_hours - reserve_hours) h FROM dbo.capacity_days WHERE workspace_id = ? AND day BETWEEN ? AND ? GROUP BY person_id", [$wsId, $from, $to]) as $r)
-        $capDays[(int)$r['person_id']] = (float)$r['h'] / $hpd;
+    if ($pool === null) {
+        foreach (rows($conn, "SELECT person_id, SUM(available_hours - reserve_hours) h FROM dbo.capacity_days WHERE workspace_id = ? AND day BETWEEN ? AND ? GROUP BY person_id", [$wsId, $from, $to]) as $r)
+            $capDays[(int)$r['person_id']] = (float)$r['h'] / $hpd;
+    } else {
+        foreach (capacity_map($conn, $wsId, $from, $to, array_keys($pool)) as $pid => $days) {
+            $h = 0.0; foreach ($days as $day => $c) $h += ($c['available'] - $c['reserve']) * team_share_for($pool[$pid], $day);
+            $capDays[$pid] = $h / $hpd;
+        }
+    }
 
     // Demand: open items requiring each skill → planned assignment-days in the window from the committed plan; unscheduled → remaining planning days.
     $pv = committed_plan_version_id($conn, $wsId);
@@ -75,29 +95,36 @@ function skills_with_stats($conn, $wsId, $today, $includeRetired = false) {
 }
 
 if ($action === 'list') {
-    [$skills, $window] = skills_with_stats($conn, $wsId, $today, (bool)param('include_retired', false));
-    ok(['skills' => $skills, 'window_6w' => $window]);
+    [$pool, $scope] = skills_scope($conn, $wsId, $today, date('Y-m-d', strtotime("$today +41 days")));
+    [$skills, $window] = skills_with_stats($conn, $wsId, $today, (bool)param('include_retired', false), $pool);
+    ok(['skills' => $skills, 'window_6w' => $window, 'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids']))]);
 }
 
 if ($action === 'matrix') {
-    [$skills, $window6] = skills_with_stats($conn, $wsId, $today);
+    [$pool, $scope] = skills_scope($conn, $wsId, $today, date('Y-m-d', strtotime("$today +41 days")));
+    [$skills, $window6] = skills_with_stats($conn, $wsId, $today, false, $pool);
     $ws = workspace_row($conn, $wsId);
     $hpd = (float)$ws['hours_per_day'] ?: 7.5;
     $workingDays = workspace_working_days($conn, $wsId);
     $policy = current_policy($conn, $wsId);
     $from4 = $today; $to4 = date('Y-m-d', strtotime("$today +27 days"));
     $people = rows($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ? AND p.active = 1 ORDER BY p.name", [$wsId]);
-    $load = load_pct_map($conn, $wsId, $from4, $to4);
+    if ($pool !== null) {
+        $people = array_values(array_filter($people, fn($p) => isset($pool[(int)$p['id']])));
+        $load = array_map(fn($x) => $x['load_pct'], team_load($conn, $wsId, $scope['team_ids'], $from4, $to4)['people']);
+    } else $load = load_pct_map($conn, $wsId, $from4, $to4);
     $peopleOut = []; $firstName = [];
     foreach ($people as $p) {
         $peopleOut[] = ['id' => (int)$p['id'], 'name' => $p['name'], 'initials' => trim((string)$p['initials']), 'colour' => $p['colour'], 'role_title' => $p['role_title'],
-            'team_id' => $p['team_id'] !== null ? (int)$p['team_id'] : null, 'team_name' => $p['team_name'], 'days_per_week' => (float)$p['days_per_week'], 'load_pct' => $load[(int)$p['id']] ?? 0];
+            'team_id' => $p['team_id'] !== null ? (int)$p['team_id'] : null, 'team_name' => $p['team_name'], 'days_per_week' => (float)$p['days_per_week'], 'load_pct' => $load[(int)$p['id']] ?? 0,
+            'loaned_in' => $pool !== null && !$pool[(int)$p['id']]['home']];
         $firstName[(int)$p['id']] = explode(' ', $p['name'])[0];
     }
     $cells = []; $development = [];
     $skillName = []; foreach ($skills as $s) $skillName[$s['id']] = $s['name'];
     foreach (rows($conn, "SELECT ps.* FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id JOIN dbo.skills s ON s.id = ps.skill_id WHERE p.workspace_id = ? AND p.active = 1 AND s.retired = 0", [$wsId]) as $r) {
         $pid = (int)$r['person_id']; $sid = (int)$r['skill_id'];
+        if ($pool !== null && !isset($pool[$pid])) continue;
         $cells["$pid:$sid"] = ['proficiency' => (int)$r['proficiency'], 'certified' => (bool)$r['certified'],
             'development_target' => $r['development_target'] !== null ? (int)$r['development_target'] : null, 'pairing_enabled' => (bool)$r['pairing_enabled'],
             'endorsed' => $r['endorsed_by'] !== null && $r['endorsed_by'] !== ''];
@@ -115,6 +142,7 @@ if ($action === 'matrix') {
     $nameOf = []; foreach ($people as $p) $nameOf[(int)$p['id']] = $p['name'];
     foreach (rows($conn, "SELECT a.* FROM dbo.availability a JOIN dbo.people p ON p.id = a.person_id WHERE a.workspace_id = ? AND p.active = 1 AND a.from_date <= ? AND a.to_date >= ? ORDER BY a.from_date", [$wsId, $to4, $from4]) as $a) {
         $pid = (int)$a['person_id']; $f = substr($a['from_date'], 0, 10); $t = substr($a['to_date'], 0, 10);
+        if (!isset($nameOf[$pid])) continue;                  // outside the scope's pool
         $days = working_days_between(max($f, $from4), min($t, $to4), $workingDays) * (float)$a['fraction'];
         $days = round($days * 2) / 2;
         $kind = $a['type'] === 'training' ? 'training' : 'leave';
@@ -137,6 +165,7 @@ if ($action === 'matrix') {
     $rotaPct = (float)$policy['rota_reserve_pct']; $rotaLabel = ($rotaPct == floor($rotaPct) ? (int)$rotaPct : $rotaPct) . '%';
     foreach (rows($conn, "SELECT r.person_id, r.week_start FROM dbo.incident_rota r JOIN dbo.people p ON p.id = r.person_id WHERE r.workspace_id = ? AND p.active = 1 AND r.week_start BETWEEN ? AND ? ORDER BY r.week_start", [$wsId, week_start($from4), $to4]) as $r) {
         $pid = (int)$r['person_id']; $w = substr($r['week_start'], 0, 10);
+        if (!isset($nameOf[$pid])) continue;
         $avail[] = ['person_id' => $pid, 'person' => $nameOf[$pid] ?? '', 'label' => 'incident rota w/c ' . fmt_day($w), 'from' => $w, 'to' => date('Y-m-d', strtotime("$w +4 days")), 'type' => 'rota', 'days' => null,
             'badge' => "Reserve $rotaLabel", 'kind' => 'rota', 'source' => 'rota'];
     }
@@ -145,7 +174,8 @@ if ($action === 'matrix') {
     $dvs = array_map(fn($s) => ['skill_id' => $s['id'], 'skill' => $s['name'], 'demand_days' => $s['demand_days_6w'], 'supply_days' => $s['supply_days_6w'], 'exceeds' => $s['exceeds']], $skills);
     ok(['skills' => $skills, 'people' => $peopleOut, 'cells' => $cells,
         'summary' => ['single_point_skills' => $single, 'two_person_skills' => $two, 'well_covered' => $well, 'people_count' => count($peopleOut), 'skills_count' => count($skills),
-            'team_name' => $peopleOut ? ($peopleOut[0]['team_name'] ?? null) : null, 'levels' => LEVEL_NAMES],
+            'team_name' => $scope['name'] ?? ($peopleOut ? ($peopleOut[0]['team_name'] ?? null) : null), 'levels' => LEVEL_NAMES],
+        'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids'])),
         'availability_4w' => $avail, 'development' => $development, 'demand_vs_supply' => $dvs,
         'windows' => ['availability' => ['from' => $from4, 'to' => $to4], 'demand' => $window6]]);
 }

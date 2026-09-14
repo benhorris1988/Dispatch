@@ -16,6 +16,7 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/schedule_widgets.dart';
+import '../widgets/tm_loan_chip.dart';
 import '../widgets/widgets.dart';
 import 'parts/sch_models.dart';
 import 'plan_versions_screen.dart';
@@ -65,9 +66,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   static const double _blockH = 38;
   static const double _blockGap = 6;
   static const double _lanePad = 7;
+  static const double _loanChipH = 24; // room for the loan chip under a person's name
 
   List<DateTime> _days = const []; // working days across the range
   Map<String, int> _dayIndex = const {};
+  /// TEAM-09: the loan to show on a person's lane, by person id.
+  Map<int, _LaneLoan> _laneLoans = const {};
   List<_Lane> _lanes = const [];
   List<double> _laneHeights = const [];
   List<double> _laneTops = const [];
@@ -148,10 +152,25 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       body['to'] = _iso(from.add(Duration(days: _weeksForZoom * 7 - 1)));
       final raw = await Api.post('plan.php', 'schedule', body);
       final data = ScheduleData.fromJson(raw);
+      // TEAM-09: with a team filter, each person row says whether they are
+      // borrowed into that team (`loaned_in`) or lent out of it (`on_loan_to`).
+      final loans = <int, _LaneLoan>{};
+      for (final p in (raw['people'] as List? ?? const [])) {
+        if (p is! Map) continue;
+        final pid = asIntOr(p['id'], 0);
+        final inbound = Loan.maybe(p['loaned_in']);
+        final outbound = Loan.maybe(p['on_loan_to']);
+        if (inbound != null) {
+          loans[pid] = _LaneLoan(inbound, LoanSide.borrowed);
+        } else if (outbound != null) {
+          loans[pid] = _LaneLoan(outbound, LoanSide.lent);
+        }
+      }
       if (!mounted) return;
       // The range the server actually used drives the columns.
       setState(() {
         _data = data;
+        _laneLoans = loans;
         _openProposalId = lock ?? _openProposalId;
         _loading = false;
         _error = null;
@@ -249,7 +268,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       final items = blocks[lane.key]!;
       _stack(items);
       final rows = items.isEmpty ? 1 : items.map((i) => i.row).reduce(math.max) + 1;
-      final h = _lanePad * 2 + rows * _blockH + (rows - 1) * _blockGap;
+      // TEAM-09: a lane with a loan chip in its header needs a third line.
+      final loanExtra = lane.person != null && _laneLoans.containsKey(lane.person!.id) ? _loanChipH : 0.0;
+      final h = _lanePad * 2 + rows * _blockH + (rows - 1) * _blockGap + loanExtra;
       heights.add(h);
       tops.add(top);
       top += h;
@@ -800,7 +821,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final lane = _lanes[laneIndex];
     final person = lane.person;
     if (person != null) {
-      return SchLaneHeader(
+      final header = SchLaneHeader(
         person: person,
         height: _laneHeights[laneIndex],
         targetMin: policy.targetLoadMin,
@@ -808,6 +829,22 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         onRota: d.rota.any((r) => r.personId == person.id),
         onTap: () => context.go(Routes.person(person.id)),
       );
+      final loan = _laneLoans[person.id];
+      if (loan == null) return header;
+      // The loan chip sits over the header's bottom edge, where the header's
+      // own two lines leave room; the lane itself shades the loaned days.
+      return Stack(children: [
+        header,
+        Positioned(
+          left: Sp.md + 30 + Sp.sm,
+          right: Sp.sm,
+          bottom: 3,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TmLoanChip(loan.loan, side: loan.side, today: d.today),
+          ),
+        ),
+      ]);
     }
     return SchGroupLaneHeader(
       title: lane.title,
@@ -839,6 +876,10 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 today: d.today,
                 freezeEnd: d.freezeEnd,
                 plannedEnd: d.plannedEnd,
+                loanFrom: lane.person == null ? null : _laneLoans[lane.person!.id]?.loan.fromDate,
+                loanTo: lane.person == null ? null : _laneLoans[lane.person!.id]?.loan.toDate,
+                loanTint: (lane.person != null && _laneLoans[lane.person!.id]?.side == LoanSide.lent ? DispatchColors.amber : DispatchColors.typeBlue)
+                    .withValues(alpha: context.isDark ? 0.16 : 0.09),
                 gridColour: context.borderColor,
                 weekColour: context.borderColor.withValues(alpha: 0.45),
                 committedTint: DispatchColors.ink.withValues(alpha: context.isDark ? 0.16 : 0.035),
@@ -1437,10 +1478,14 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   Future<void> _proposeReplan() async {
     setState(() => _proposing = true);
     try {
-      final r = await Api.post('replan.php', 'propose', {'kind': 'manual'});
+      // SCH-13: with a team filter on, the cycle is planned for that team only
+      // (its people and work; everyone else's rows pass through unchanged).
+      final teamName = _teamId == null ? null : _teams.where((t) => t.id == _teamId).firstOrNull?.name;
+      final r = await Api.post('replan.php', 'propose', {'kind': 'manual', if (_teamId != null) 'team_id': _teamId});
       if (!mounted) return;
       final changes = asIntOr(r['changes'], 0);
       final held = asIntOr(r['held'], 0);
+      final scopeNote = teamName == null ? '' : ' for the $teamName team';
       setState(() {
         _openProposalId = asInt(r['proposal_id']) ?? _openProposalId;
         _overlay = changes > 0;
@@ -1451,8 +1496,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(changes == 0
-              ? 'The replan found nothing worth changing'
-              : '$changes ${changes == 1 ? 'change' : 'changes'} proposed${held > 0 ? ', $held held by guardrails' : ''}'),
+              ? 'The replan found nothing worth changing$scopeNote'
+              : '$changes ${changes == 1 ? 'change' : 'changes'} proposed$scopeNote${held > 0 ? ', $held held by guardrails' : ''}'),
           action: changes == 0 ? null : SnackBarAction(label: 'Review', onPressed: () => context.go(Routes.changes)),
         ),
       );
@@ -1953,6 +1998,9 @@ class _LanePainter extends CustomPainter {
     required this.committedTint,
     required this.hatchColour,
     required this.todayColour,
+    this.loanFrom,
+    this.loanTo,
+    this.loanTint,
   });
 
   final List<DateTime> days;
@@ -1961,6 +2009,10 @@ class _LanePainter extends CustomPainter {
   final DateTime? today;
   final DateTime? freezeEnd;
   final DateTime? plannedEnd;
+  /// TEAM-09: the days this person is on loan (inclusive), shaded lightly.
+  final DateTime? loanFrom;
+  final DateTime? loanTo;
+  final Color? loanTint;
   final Color gridColour;
   final Color weekColour;
   final Color committedTint;
@@ -1995,6 +2047,14 @@ class _LanePainter extends CustomPainter {
         canvas.restore();
       }
     }
+    // loaned days (TEAM-09)
+    if (loanFrom != null && loanTo != null && loanTint != null) {
+      final start = _indexFor(loanFrom!);
+      final endIdx = _indexFor(loanTo!.add(const Duration(days: 1)));
+      final x0 = (start * dayWidth).clamp(0.0, size.width);
+      final x1 = (endIdx * dayWidth).clamp(0.0, size.width);
+      if (x1 > x0) canvas.drawRect(Rect.fromLTWH(x0, 0, x1 - x0, size.height), Paint()..color = loanTint!);
+    }
     // column rules
     final rule = Paint()..strokeWidth = 1;
     for (var i = 0; i < days.length; i++) {
@@ -2020,7 +2080,21 @@ class _LanePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_LanePainter old) =>
-      old.dayWidth != dayWidth || old.days.length != days.length || old.freezeEnd != freezeEnd || old.today != today || old.zoom != zoom;
+      old.dayWidth != dayWidth ||
+      old.days.length != days.length ||
+      old.freezeEnd != freezeEnd ||
+      old.today != today ||
+      old.zoom != zoom ||
+      old.loanFrom != loanFrom ||
+      old.loanTo != loanTo ||
+      old.loanTint != loanTint;
+}
+
+/// The loan shown on a person's lane and which way it runs (TEAM-09).
+class _LaneLoan {
+  const _LaneLoan(this.loan, this.side);
+  final Loan loan;
+  final LoanSide side;
 }
 
 // --- small date helpers -----------------------------------------------------

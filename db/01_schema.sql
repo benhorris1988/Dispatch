@@ -700,3 +700,100 @@ CREATE TABLE dbo.intake_log (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_intake_log_ref')
   CREATE INDEX ix_intake_log_ref ON dbo.intake_log(workspace_id, external_ref);
 GO
+
+-- ---------------------------------------------------------------------------------------
+-- BEN-02: a non-financial benefit carries a qualitative scale and an optional proxy value
+-- so it can still weigh on priority. qualitative_scale already exists on dbo.benefits.
+-- ---------------------------------------------------------------------------------------
+IF COL_LENGTH('dbo.benefits', 'proxy_value') IS NULL
+  ALTER TABLE dbo.benefits ADD proxy_value DECIMAL(12,2) NULL;   -- currency-equivalent stand-in for a non-financial benefit
+IF COL_LENGTH('dbo.benefits', 'is_financial') IS NULL
+  ALTER TABLE dbo.benefits ADD is_financial BIT NOT NULL DEFAULT 1;
+
+-- NOT-04: weekly digest. When each user last received one, so the digest covers changes
+-- since then rather than a fixed window.
+IF COL_LENGTH('dbo.users', 'last_digest_at') IS NULL
+  ALTER TABLE dbo.users ADD last_digest_at DATETIME2 NULL;
+
+-- MOB-04: push registration. One row per device; the token is what APNs or FCM address.
+IF OBJECT_ID('dbo.device_tokens') IS NULL
+CREATE TABLE dbo.device_tokens (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  user_id INT NOT NULL REFERENCES dbo.users(id),
+  platform NVARCHAR(10) NOT NULL,              -- ios | android | web
+  token NVARCHAR(400) NOT NULL,
+  device_label NVARCHAR(120) NULL,
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_seen_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  active BIT NOT NULL DEFAULT 1,
+  CONSTRAINT uq_device_token UNIQUE (token)
+);
+
+-- Outbound push deliveries, queued like webhooks and sent by whichever sender is configured.
+IF OBJECT_ID('dbo.push_deliveries') IS NULL
+CREATE TABLE dbo.push_deliveries (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL,
+  notification_id INT NULL REFERENCES dbo.notifications(id),
+  device_token_id INT NOT NULL REFERENCES dbo.device_tokens(id),
+  title NVARCHAR(200) NOT NULL,
+  body NVARCHAR(600) NULL,
+  link NVARCHAR(200) NULL,
+  status NVARCHAR(12) NOT NULL DEFAULT 'pending',   -- pending|sent|failed|abandoned|unconfigured
+  attempts INT NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  last_status NVARCHAR(200) NULL,
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  sent_at DATETIME2 NULL
+);
+GO
+
+-- ---------------------------------------------------------------------------------------
+-- TEAM-09 / SCH-13: portfolios and loans.
+--
+-- A portfolio is a named grouping of teams for cross-team views and for planning across
+-- teams (SCH-13). A team belongs to at most one portfolio, so the relationship is a nullable
+-- column on dbo.teams rather than a join table.
+--
+-- A loan lends a person to another team for a dated period at a share of their time. It is
+-- deliberately NOT a team dimension on dbo.capacity_days: a loan does not change how many
+-- hours the person has, only which team those hours belong to, so the split is resolved
+-- at read time (capacity.php team_share_map) from this table. Loans that happened are
+-- history: end_loan shortens to_date rather than deleting the row.
+-- ---------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.portfolios') IS NULL
+CREATE TABLE dbo.portfolios (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  name NVARCHAR(80) NOT NULL,
+  description NVARCHAR(300) NULL,
+  lead_person_id INT NULL REFERENCES dbo.people(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  CONSTRAINT uq_portfolio_name UNIQUE (workspace_id, name)
+);
+
+IF COL_LENGTH('dbo.teams', 'portfolio_id') IS NULL
+  ALTER TABLE dbo.teams ADD portfolio_id INT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_teams_portfolio')
+  ALTER TABLE dbo.teams ADD CONSTRAINT fk_teams_portfolio FOREIGN KEY (portfolio_id) REFERENCES dbo.portfolios(id);
+
+IF OBJECT_ID('dbo.person_loans') IS NULL
+CREATE TABLE dbo.person_loans (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  person_id INT NOT NULL REFERENCES dbo.people(id),
+  from_team_id INT NOT NULL REFERENCES dbo.teams(id),   -- the person's home team when the loan was made
+  to_team_id INT NOT NULL REFERENCES dbo.teams(id),     -- the borrowing team
+  from_date DATE NOT NULL,
+  to_date DATE NOT NULL,                                -- inclusive; end_loan shortens it, never deletes
+  allocation_pct INT NOT NULL DEFAULT 100,              -- share of the person's time that moves (1..100)
+  reason NVARCHAR(300) NULL,                            -- why the loan was made (business reason, not personal data)
+  created_by INT NULL REFERENCES dbo.users(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_person_loans_person')
+  CREATE INDEX ix_person_loans_person ON dbo.person_loans(workspace_id, person_id, from_date, to_date);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_person_loans_team')
+  CREATE INDEX ix_person_loans_team ON dbo.person_loans(workspace_id, to_team_id, from_date, to_date);
+GO

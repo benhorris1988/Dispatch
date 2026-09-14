@@ -459,6 +459,19 @@ components:
         status: { type: string }
         realised_value: { type: number, nullable: true }
         owner_name: { type: string, nullable: true }
+        is_financial:
+          type: boolean
+          description: False for a qualitative (non-financial) benefit; its annual_value may be 0.
+        qualitative_scale:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 5
+          description: 1 minor, 2 useful, 3 significant, 4 major, 5 transformational. Set on non-financial benefits.
+        proxy_value:
+          type: number
+          nullable: true
+          description: Optional currency-equivalent stand-in for a non-financial benefit; feeds the priority Value term.
 
     WebhookEnvelope:
       type: object

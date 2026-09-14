@@ -11,7 +11,9 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/adm_metrics.dart';
+import '../widgets/pf_metrics.dart';
 import '../widgets/team_widgets.dart';
+import '../widgets/tm_loan_list.dart';
 import '../widgets/widgets.dart';
 
 /// Person (TEAM-*, spec 9.4.7): load and concurrency against their own limits,
@@ -426,6 +428,8 @@ class _OverviewTab extends StatelessWidget {
         final right = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           _SkillsPanel(detail: detail, canEdit: canEdit, isLead: isLead, onSetLevel: onSetLevel, onEndorse: onEndorse),
           const SizedBox(height: Sp.lg),
+          _LoansPanel(detail: detail),
+          const SizedBox(height: Sp.lg),
           _PatternPanel(detail: detail),
         ]);
         if (c.maxWidth < 1000) {
@@ -698,6 +702,40 @@ class _SkillRowTile extends StatelessWidget {
           ],
         ]),
       ),
+    );
+  }
+}
+
+/// TEAM-09: where this person has been lent, or is about to be. `people.php get`
+/// returns loans from 90 days back to the horizon and the one moving them today.
+class _LoansPanel extends StatelessWidget {
+  const _LoansPanel({required this.detail});
+  final _PersonDetail detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = detail.person;
+    // `people.php get` sends no clock; the browser's date only decides which
+    // state chip a loan gets, so it is close enough here.
+    final today = DateTime.now();
+    final loans = [...p.loans];
+    if (p.onLoanTo != null && !loans.any((l) => l.id == p.onLoanTo!.id)) loans.insert(0, p.onLoanTo!);
+    loans.sort((a, b) => b.fromDate.compareTo(a.fromDate));
+    final current = p.onLoanTo;
+    return TmMetricPanel(
+      title: 'Loans',
+      subtitle: current != null
+          ? 'With ${current.toTeamName ?? 'another team'} until ${fmtDayMonth(current.toDate)} at ${current.allocationPct}%'
+          : (loans.isEmpty ? null : 'Last 90 days to the planning horizon'),
+      definition: PfMetrics.loans,
+      child: loans.isEmpty
+          ? EmptyState(
+              icon: Icons.swap_horiz_rounded,
+              title: 'No loans',
+              message: '${p.firstName} has not been lent to another team in the last 90 days, and none is planned.',
+              compact: true,
+            )
+          : TmLoanList(loans: loans, today: today, showPerson: false, dense: true),
     );
   }
 }

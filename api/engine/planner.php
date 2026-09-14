@@ -34,24 +34,42 @@ function heuristic_plan(array $model, array $opts = []) {
         $committedCount[$a['work_item_id']] = ($committedCount[$a['work_item_id']] ?? 0) + 1;
         $totalWeight[$a['work_item_id']] = ($totalWeight[$a['work_item_id']] ?? 0) + pl_row_weight($model, $a);
     }
+    $partial = !empty($model['scope']['partial']);
     foreach ($model['committed'] as $a) {
         $item = $model['items'][$a['work_item_id']] ?? null;
         if (!$item) continue; // delivered / cancelled: released
         $outOfScope = $scopeSet !== null && !isset($scopeSet[$a['person_id']]);
         if (!$a['locked'] && !$outOfScope) continue;
-        if (!isset($model['people'][$a['person_id']])) continue;
+        if (!isset($model['people'][$a['person_id']])) {
+            // SCH-13: in a team/portfolio model this row belongs to someone outside the pool. It is
+            // not ours to move, but the candidate must still be a complete workspace plan, so it is
+            // passed through exactly as committed (no grid to book against: the person is not modelled).
+            if ($partial && $a['locked'] && $a['to_date'] >= $model['today']) {
+                $fixedCount[$item['id']] = ($fixedCount[$item['id']] ?? 0) + 1;
+                $fixedWeight[$item['id']] = ($fixedWeight[$item['id']] ?? 0) + pl_row_weight($model, $a);
+                $out[] = pl_out_row($model, $item, $a['person_id'], $a['from_date'], $a['to_date'], $a['allocation_pct'], $a['role_label'], true, true, $a['id'], $a['is_reserve']);
+                $fixedFinish[$item['id']] = max($fixedFinish[$item['id']] ?? -1, pl_di_at_or_before($model, $a['to_date']) ?? -1);
+            }
+            continue;
+        }
         $iid = $item['id']; $pid = $a['person_id']; $isInc = $item['policy'] === 'interrupt';
         $fixedCount[$iid] = ($fixedCount[$iid] ?? 0) + 1;
         $fixedWeight[$iid] = ($fixedWeight[$iid] ?? 0) + pl_row_weight($model, $a);
         $dis = model_days_in($model, $a['from_date'], $a['to_date']);
         if (!$dis) continue; // entirely in the past: nothing to occupy, nothing to emit
         $last = -1;
+        $home = $model['people'][$pid]['home'] ?? true;
         foreach ($dis as $di) {
             // Same reading as pl_try_run(): the allocation is a share of that day's schedulable
             // time, and a day the person does not work carries no effort at all.
             $room = $isInc ? $st['cap'][$pid][$di] : max(0.0, $st['cap'][$pid][$di] - $st['res'][$pid][$di]);
             if ($room <= 1e-6) continue;
             $h = $a['allocation_pct'] / 100 * $room;
+            // A person who is only in this pool through a loan brings their own team's commitments
+            // with them. Those book against the part of the day that stays with their own team; only
+            // what overflows it eats into the share lent to this scope.
+            if (!$home) $h = max(0.0, $h - (1 - $st['share'][$pid][$di]) * $room);
+            if ($h <= 1e-9) { $last = $di; continue; }
             pl_consume($st, $pid, $di, $iid, $h, $isInc);
             $last = $di;
         }
@@ -107,6 +125,7 @@ function heuristic_plan(array $model, array $opts = []) {
     // Unscheduled: schedulable items never placed, plus non-schedulable ones reported for the watch list.
     foreach ($model['items'] as $it) {
         if (isset($ctx['placed'][$it['id']])) continue;
+        if (!empty($it['external'])) continue;                 // another team's work: kept as committed, never "unscheduled" here
         if ($scopeSet !== null && !$it['schedulable']) continue;
         if (!$it['schedulable']) {
             if ($scopeSet !== null) continue;
@@ -129,20 +148,26 @@ function heuristic_plan(array $model, array $opts = []) {
 }
 
 // ---- state ------------------------------------------------------------------------------------
+// TEAM-09: `share` is the part of the person-day that belongs to the model's scope (1 in a workspace
+// model). cap/res stay the WHOLE day, so an allocation_pct keeps meaning "share of the whole day" and
+// a stored row reads the same everywhere; the ceilings the planner may book up to are share-scaled.
 function pl_init_state(array $model) {
-    $st = ['grid' => [], 'cap' => [], 'res' => [], 'model' => $model];
+    $st = ['grid' => [], 'cap' => [], 'res' => [], 'share' => [], 'model' => $model];
     foreach ($model['people'] as $pid => $p) {
         foreach ($model['days'] as $di => $day) {
             $c = $p['capacity'][$day] ?? ['available' => 0, 'reserve' => 0];
             $st['cap'][$pid][$di] = (float)$c['available'];
             $st['res'][$pid][$di] = min((float)$c['reserve'], (float)$c['available']);
+            $st['share'][$pid][$di] = (float)($c['share'] ?? 1.0);
             $st['grid'][$pid][$di] = ['used' => 0.0, 'res_used' => 0.0, 'items' => []];
         }
     }
     return $st;
 }
-function pl_free(array $st, $pid, $di) { return $st['cap'][$pid][$di] - $st['res'][$pid][$di] - $st['grid'][$pid][$di]['used']; }
-function pl_reserve_free(array $st, $pid, $di) { return $st['res'][$pid][$di] - $st['grid'][$pid][$di]['res_used']; }
+function pl_free(array $st, $pid, $di) { return $st['share'][$pid][$di] * ($st['cap'][$pid][$di] - $st['res'][$pid][$di]) - $st['grid'][$pid][$di]['used']; }
+function pl_reserve_free(array $st, $pid, $di) { return $st['share'][$pid][$di] * $st['res'][$pid][$di] - $st['grid'][$pid][$di]['res_used']; }
+/** Hours of the day the scope may book at all (share × available). */
+function pl_day_ceiling(array $st, $pid, $di) { return $st['share'][$pid][$di] * $st['cap'][$pid][$di]; }
 function pl_consume(array &$st, $pid, $di, $iid, $hours, $allowReserve) {
     $g = &$st['grid'][$pid][$di];
     $fromPlanned = min($hours, max(0.0, pl_free($st, $pid, $di)));
@@ -235,7 +260,8 @@ function pl_try_run(array $st, array $model, array $item, $pid, $startDi, $alloc
     $counts = $item['counts_for_wip'];
     while ($remaining > 1e-6 && $di < $n) {
         $cap = $st['cap'][$pid][$di];
-        if ($cap <= 1e-6) { if ($di === $startDi) return null; $di++; continue; }
+        // A day with no capacity, or none of it belonging to this scope (the person is elsewhere), is skipped like leave.
+        if ($cap <= 1e-6 || pl_day_ceiling($st, $pid, $di) <= 1e-6) { if ($di === $startDi) return null; $di++; continue; }
         $schedulable = $allowReserve ? $cap : max(0.0, $cap - $st['res'][$pid][$di]);
         $perDay = $alloc / 100 * $schedulable;
         if ($perDay <= 1e-6) { if ($di === $startDi) return null; $di++; continue; }
@@ -259,7 +285,7 @@ function pl_find_run(array $st, array $model, array $item, $pid, $minDi, $needHo
     foreach ($allocs as $alloc) {
         for ($s = $minDi; $s < $n; $s++) {
             if ($best !== null && $s > $best['to_di']) break;
-            if ($st['cap'][$pid][$s] <= 1e-6) continue;
+            if ($st['cap'][$pid][$s] <= 1e-6 || pl_day_ceiling($st, $pid, $s) <= 1e-6) continue;
             // Cheap pre-filter, in the same currency as pl_try_run(): a share of that day's
             // schedulable time, claimed in full for every day of the run.
             $sched = $allowReserve ? $st['cap'][$pid][$s] : max(0.0, $st['cap'][$pid][$s] - $st['res'][$pid][$s]);
@@ -462,7 +488,7 @@ function pl_pref_penalty(array $person, array $item) {
 }
 function pl_person_load(array $st, $pid, $fromDi, $toDi) {
     $cap = 0; $used = 0;
-    for ($d = $fromDi; $d <= $toDi; $d++) { $cap += $st['cap'][$pid][$d]; $used += $st['grid'][$pid][$d]['used']; }
+    for ($d = $fromDi; $d <= $toDi; $d++) { $cap += pl_day_ceiling($st, $pid, $d); $used += $st['grid'][$pid][$d]['used']; }
     return $cap > 0 ? $used / $cap * 100 : 100;
 }
 
@@ -589,7 +615,7 @@ function pl_skills_gap(array &$ctx, array $item, array $committedRows) {
 }
 function pl_person_has_capacity(array $model, array $p) {
     $end = $model['windows']['planned_end']; $h = 0;
-    foreach ($p['capacity'] as $day => $c) { if ($day > $end) continue; $h += $c['available'] - $c['reserve']; }
+    foreach ($p['capacity'] as $day => $c) { if ($day > $end) continue; $h += ($c['available'] - $c['reserve']) * ($c['share'] ?? 1); }
     return $h > $model['hours_per_day'];
 }
 
@@ -654,7 +680,7 @@ function plan_objective(array $assignments, array $model, array $unscheduled = n
     while ($d->format('Y-m-d') <= $pe) { $weeks[] = $d->format('Y-m-d'); $d->modify('+7 days'); }
     foreach ($model['people'] as $pid => $p) {
         foreach ($weeks as $wk) {
-            $cap = 0; foreach ($p['capacity'] as $day => $c) if ($day >= $wk && $day < date('Y-m-d', strtotime("$wk +7 days"))) $cap += $c['available'] - $c['reserve'];
+            $cap = 0; foreach ($p['capacity'] as $day => $c) if ($day >= $wk && $day < date('Y-m-d', strtotime("$wk +7 days"))) $cap += ($c['available'] - $c['reserve']) * ($c['share'] ?? 1);
             if ($cap <= 0) continue;
             $h = $perPersonWeek[$pid][$wk]['hours'] ?? 0; $load = $h / $cap * 100;
             if ($load < $model['policy']['target_load_min']) $imb += ($model['policy']['target_load_min'] - $load) / 100;

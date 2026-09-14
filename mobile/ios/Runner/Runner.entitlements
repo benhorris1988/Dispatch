@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- MOB-04: APNs. Xcode switches this to 'production' for App Store / Intune archives. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- Universal Links to the hosted web build. Replace the host with the deployment's and
+	     serve https://<host>/.well-known/apple-app-site-association naming this bundle id. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:localhost</string>
+	</array>
+</dict>
+</plist>

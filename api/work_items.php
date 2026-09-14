@@ -5,6 +5,9 @@ require_once __DIR__ . '/auth_middleware.php';
 require_once __DIR__ . '/items_lib.php';
 require_once __DIR__ . '/engine/priority.php';
 $action = param('action', 'list');
+// REQ-05: the systems an external link can point at. Declared here, not beside external_link_for(),
+// because a const after the action dispatch never executes (functions hoist; constants do not).
+const DP_EXTERNAL_SYSTEMS = ['jira' => 'Jira', 'servicenow' => 'ServiceNow', 'sharepoint' => 'SharePoint', 'azure_devops' => 'Azure DevOps', 'other' => 'Other'];
 
 // ---------------------------------------------------------------------------------------------
 if ($action === 'list') {
@@ -229,6 +232,44 @@ if ($action === 'request_estimate') {
     touch_item($conn, $wi['id']);
     audit($conn, $wsId, 'request', 'estimate', $wi['id'], null, ['kind' => 'estimate_requested', 'notifications' => $sent['ids'], 'to' => $sent['to']], $wi['ref'], $note !== '' ? mb_substr($note, 0, 300) : null);
     ok(['requested' => true, 'notified' => count($sent['ids']), 'to' => $sent['to'], 'item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$wi['id']]))]);
+}
+
+// ---- External record link (REQ-05) -----------------------------------------------------------
+if ($action === 'set_external_link') {
+    require_role('team_lead');
+    $wi = load_item($conn, $wsId);
+    $url = trim((string)require_param('url'));
+    if (mb_strlen($url) > 400) fail('url must be 400 characters or fewer', 422);
+    if (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(strtolower((string)parse_url($url, PHP_URL_SCHEME)), ['http', 'https'], true)) fail('url must be an absolute http(s) URL', 422);
+    // The external record's own reference (a Jira key, an INC number). `external_ref` is the
+    // unambiguous name; `ref` is accepted for it only when the item was addressed by `id`,
+    // because `ref` is otherwise the item lookup key load_item() just consumed.
+    $ref = param('external_ref', idp('id') !== null ? param('ref') : null);
+    $ref = ($ref === null || trim((string)$ref) === '') ? null : mb_substr(trim((string)$ref), 0, 60);
+    $system = param('system');
+    if ($system !== null && $system !== '' && !isset(DP_EXTERNAL_SYSTEMS[$system])) fail('system must be one of ' . implode(', ', array_keys(DP_EXTERNAL_SYSTEMS)), 400);
+    $inferred = external_system_from_url($url);
+    $system = ($system === null || $system === '') ? $inferred : $system;
+    // There is no column for `system`: every read infers it from the host (see external_link_for).
+    // An explicit value is therefore validated, echoed in this response and kept on the audit
+    // row — but a later `get` shows the inferred one, and the response says so when they differ.
+    $before = ['url' => $wi['external_url'], 'ref' => $wi['external_ref']];
+    $after = ['url' => $url, 'ref' => $ref, 'system' => $system];
+    update($conn, 'work_items', ['external_url' => $url, 'external_ref' => $ref, 'updated_at' => date('Y-m-d H:i:s')], 'id = ?', [$wi['id']]);
+    audit($conn, $wsId, 'update', 'work_item', $wi['id'], ['field' => 'external_link', 'value' => $before], ['field' => 'external_link', 'value' => $after], $wi['ref'], param('reason'));
+    $fresh = row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$wi['id']]);
+    $link = external_link_for($conn, $wsId, $fresh);
+    $link['system'] = $system; $link['system_label'] = DP_EXTERNAL_SYSTEMS[$system];
+    if ($system !== $inferred) $link['system_note'] = "system is not stored; reads infer '$inferred' from the host.";
+    ok(['external_link' => $link, 'item' => item_detail($conn, $wsId, $fresh)]);
+}
+if ($action === 'clear_external_link') {
+    require_role('team_lead');
+    $wi = load_item($conn, $wsId);
+    if ($wi['external_url'] === null && $wi['external_ref'] === null) ok(['external_link' => null, 'item' => item_detail($conn, $wsId, $wi)]);
+    update($conn, 'work_items', ['external_url' => null, 'external_ref' => null, 'updated_at' => date('Y-m-d H:i:s')], 'id = ?', [$wi['id']]);
+    audit($conn, $wsId, 'update', 'work_item', $wi['id'], ['field' => 'external_link', 'value' => ['url' => $wi['external_url'], 'ref' => $wi['external_ref']]], ['field' => 'external_link', 'value' => null], $wi['ref'], param('reason'));
+    ok(['external_link' => null, 'item' => item_detail($conn, $wsId, row($conn, "SELECT * FROM dbo.work_items WHERE id = ?", [$wi['id']]))]);
 }
 
 if ($action === 'history') {
@@ -504,6 +545,56 @@ function notify_estimate_requested($conn, $wsId, array $wi, $why = '', $urgent =
     }
     return ['to' => $ids ? 'team_lead' : 'nobody', 'ids' => $ids];
 }
+// ---- External record link (REQ-05) -----------------------------------------------------------
+// DP_EXTERNAL_SYSTEMS is declared at the top of the file: a const below the action dispatch is never reached.
+/** Which system a URL points at, from its host. Anything unrecognised is 'other'. */
+function external_system_from_url($url) {
+    $host = strtolower((string)parse_url((string)$url, PHP_URL_HOST));
+    if ($host === '') return 'other';
+    $ends = fn($suffix) => $host === $suffix || substr($host, -strlen('.' . $suffix)) === '.' . $suffix;
+    if ($ends('atlassian.net') || strpos($host, 'jira') !== false) return 'jira';
+    if ($ends('service-now.com') || $ends('servicenow.com')) return 'servicenow';
+    if ($ends('sharepoint.com')) return 'sharepoint';
+    if ($ends('dev.azure.com') || $ends('visualstudio.com')) return 'azure_devops';
+    return 'other';
+}
+/**
+ * The item's external record and its status badge: {url, ref, system, system_label, badge} or null.
+ *
+ * The badge is honest about where its status comes from. Dispatch has no Jira, ServiceNow or
+ * SharePoint connection, so for a link someone typed in there is nothing to read a status
+ * from, and the badge says exactly that (`state: link_only`) rather than dressing a
+ * hyperlink up as a live integration. The one case where a status IS genuinely known is an
+ * item the intake endpoint raised from a ticket system: `intake_log` records every time
+ * that system posted the ticket, so the badge can say it was raised, and re-posted since
+ * (`duplicate_seen`), with the time of the last post. That is Dispatch's own record of the
+ * caller's behaviour, not the ticket's state in the source system — the badge never claims
+ * the incident is still open or has been closed, because nothing here can know that.
+ */
+function external_link_for($conn, $wsId, array $wi) {
+    $url = $wi['external_url'] ?? null; $ref = $wi['external_ref'] ?? null;
+    if (($url === null || $url === '') && ($ref === null || $ref === '')) return null;
+    $log = row($conn, "SELECT TOP 1 l.outcome, l.received_at, l.detail, s.name AS source_name, s.system AS source_system,
+                              (SELECT COUNT(*) FROM dbo.intake_log l2 WHERE l2.workspace_id = l.workspace_id AND l2.work_item_id = l.work_item_id) AS times_seen
+                       FROM dbo.intake_log l JOIN dbo.intake_sources s ON s.id = l.source_id
+                       WHERE l.workspace_id = ? AND l.work_item_id = ? ORDER BY l.id DESC", [$wsId, $wi['id']]);
+    $system = $log ? ($log['source_system'] ?: 'other') : external_system_from_url($url);
+    if (!isset(DP_EXTERNAL_SYSTEMS[$system])) $system = 'other';
+    $label = DP_EXTERNAL_SYSTEMS[$system];
+    if ($log) {
+        $state = $log['outcome'] === 'created' ? 'raised' : ($log['outcome'] === 'duplicate' ? 'duplicate_seen' : $log['outcome']);
+        $seen = (int)$log['times_seen'];
+        $badge = ['state' => $state, 'live' => true, 'source' => 'intake_log', 'source_name' => $log['source_name'],
+            'last_seen_at' => substr((string)$log['received_at'], 0, 19), 'times_seen' => $seen,
+            'label' => $state === 'raised' ? "Raised from {$log['source_name']}" : ($state === 'duplicate_seen' ? "Re-posted by {$log['source_name']} ($seen times seen)" : ucfirst(str_replace('_', ' ', $state))),
+            'note' => "From Dispatch's own intake record of what {$log['source_name']} posted; it is not the ticket's current state in $label, which no integration here can read."];
+    } else {
+        $badge = ['state' => 'link_only', 'live' => false, 'source' => null, 'last_seen_at' => null, 'label' => "$label link",
+            'note' => "No integration for $label is connected; this is a link."];
+    }
+    return ['url' => $url, 'ref' => $ref, 'system' => $system, 'system_label' => $label, 'badge' => $badge];
+}
+
 function status_label($s) { return ['draft' => 'Draft', 'needs_estimate' => 'Needs estimate', 'needs_benefit' => 'Needs benefit case', 'ready' => 'Ready', 'scheduled' => 'Scheduled', 'in_progress' => 'In progress', 'blocked' => 'Blocked', 'delivered' => 'Delivered', 'cancelled' => 'Cancelled'][$s] ?? $s; }
 
 // allocate_ref() moved to items_lib.php: intake.php needs it too, and an endpoint is
@@ -568,7 +659,8 @@ function item_detail($conn, $wsId, array $wi) {
         'priority_override' => ['points' => $wi['priority_override_points'] !== null ? (int)$wi['priority_override_points'] : null, 'pinned_score' => $wi['priority_pinned_score'] !== null ? (float)$wi['priority_pinned_score'] : null,
             'reason' => $wi['priority_override_reason'], 'expires' => $wi['priority_override_expires'], 'by' => $wi['priority_override_by'] !== null ? (int)$wi['priority_override_by'] : null,
             'active' => ($wi['priority_override_points'] !== null || $wi['priority_pinned_score'] !== null) && (!$wi['priority_override_expires'] || $wi['priority_override_expires'] >= today())],
-        'external_url' => $wi['external_url'], 'external_ref' => $wi['external_ref'], 'delivered_at' => $wi['delivered_at'], 'started_at' => $wi['started_at'],
+        'external_url' => $wi['external_url'], 'external_ref' => $wi['external_ref'], 'external_link' => external_link_for($conn, $wsId, $wi),   // REQ-05
+        'delivered_at' => $wi['delivered_at'], 'started_at' => $wi['started_at'],
         'actual_effort_days' => $wi['actual_effort_days'] !== null ? (float)$wi['actual_effort_days'] : null, 'ready_at' => $wi['ready_at'] ? substr($wi['ready_at'], 0, 19) : null,
         'requires_estimate' => (bool)$type['requires_estimate'], 'requires_benefit' => (bool)$type['requires_benefit'],
         'created_by' => $wi['created_by'] !== null ? (int)$wi['created_by'] : null,

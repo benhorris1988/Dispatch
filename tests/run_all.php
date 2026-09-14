@@ -44,9 +44,12 @@ $suites = [
     'Engine (planner, diff, guardrails, stability)' => 'engine_test.php',
     'Workspace config, people, skills'              => 'config_people_test.php',
     'Work items, estimates, benefits'               => 'work_items_test.php',
+    'Non-financial benefits (BEN-02)'               => 'benefits_qualitative_test.php',
+    'Portfolios and loans (TEAM-09, SCH-13)'        => 'portfolio_test.php',
     'Overview, reports, watch list'                 => 'overview_reports_test.php',
     'Plan, proposals, changes (HTTP smoke)'         => 'http_smoke.php',
     'Public API, webhooks, calendar feed'          => 'public_api_test.php',
+    'Devices and push (MOB-04)'                    => 'devices_test.php',
     'Data retention and purge'                     => 'retention_test.php',
     // Last: it edits the scheduling policy, commits plan versions and runs the nightly cycle,
     // so it leaves the demo furthest from its seeded state.

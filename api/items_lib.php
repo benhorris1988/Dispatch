@@ -21,6 +21,34 @@ const DP_BENEFIT_TYPES = [
     'compliance'     => ['label' => 'Compliance',     'colour' => '#8A94A6'],
     'other'          => ['label' => 'Other',          'colour' => '#5B6B84'],
 ];
+// BEN-02: the qualitative scale for a non-financial benefit. The labels live here, in the API,
+// so the client renders the same words the register and the CSV use rather than inventing its own.
+const DP_QUALITATIVE_SCALE = [1 => 'Minor', 2 => 'Useful', 3 => 'Significant', 4 => 'Major', 5 => 'Transformational'];
+// Default currency-equivalent of one scale point when a non-financial benefit has no proxy value.
+// Overridable per workspace through priority_weights.qualitativeValuePerPoint (see priority.php).
+const DP_QUALITATIVE_VALUE_PER_POINT = 25000;
+function qualitative_scale_list() {
+    $out = [];
+    foreach (DP_QUALITATIVE_SCALE as $k => $v) $out[] = ['scale' => $k, 'label' => $v];
+    return $out;
+}
+/** The per-point default in force for a workspace: the policy's priority_weights.qualitativeValuePerPoint, else 25000. */
+function qualitative_value_per_point($conn, $wsId) {
+    $w = current_policy($conn, $wsId)['priority_weights'] ?: [];
+    $v = $w['qualitativeValuePerPoint'] ?? null;
+    return ($v !== null && is_numeric($v) && (float)$v >= 0) ? (float)$v : (float)DP_QUALITATIVE_VALUE_PER_POINT;
+}
+/**
+ * What a benefit is worth to the Value term of the priority score, before confidence scaling.
+ * A financial benefit is its annual value. A non-financial one is its proxy value when one was
+ * given, else its scale multiplied by the per-point default. Returns [value, source] where source
+ * is 'financial' | 'proxy' | 'scale_default'.
+ */
+function benefit_priority_value(array $b, $perPoint) {
+    if ((int)($b['is_financial'] ?? 1) === 1) return [(float)$b['annual_value'], 'financial'];
+    if ($b['proxy_value'] !== null && $b['proxy_value'] !== '') return [(float)$b['proxy_value'], 'proxy'];
+    return [(float)(int)($b['qualitative_scale'] ?? 0) * (float)$perPoint, 'scale_default'];
+}
 
 /** null for null/'' (ids may be 0, so never use ?: on them). */
 function nz($v) { return ($v === null || $v === '') ? null : $v; }
@@ -268,7 +296,12 @@ function progress_status_after_estimate($conn, $wsId, array $wi) {
 function benefit_shape(array $b) {
     $meta = DP_BENEFIT_TYPES[$b['type']] ?? DP_BENEFIT_TYPES['other'];
     return ['id' => (int)$b['id'], 'work_item_id' => (int)$b['work_item_id'], 'type' => $b['type'], 'type_label' => $meta['label'], 'type_colour' => $meta['colour'],
-        'annual_value' => (int)round((float)$b['annual_value']), 'currency' => $b['currency'], 'confidence' => strtolower($b['confidence']), 'qualitative_scale' => $b['qualitative_scale'] !== null ? (int)$b['qualitative_scale'] : null,
+        'annual_value' => (int)round((float)$b['annual_value']), 'currency' => $b['currency'], 'confidence' => strtolower($b['confidence']),
+        // BEN-02
+        'is_financial' => (int)($b['is_financial'] ?? 1) === 1,
+        'qualitative_scale' => $b['qualitative_scale'] !== null ? (int)$b['qualitative_scale'] : null,
+        'qualitative_label' => $b['qualitative_scale'] !== null ? (DP_QUALITATIVE_SCALE[(int)$b['qualitative_scale']] ?? null) : null,
+        'proxy_value' => ($b['proxy_value'] ?? null) !== null ? (int)round((float)$b['proxy_value']) : null,
         'realisation_from' => $b['realisation_from'], 'realisation_quarter' => $b['realisation_from'] ? quarter_label($b['realisation_from']) : null,
         'owner_person_id' => $b['owner_person_id'] !== null ? (int)$b['owner_person_id'] : null, 'owner_name' => $b['owner_name'] ?: ($b['owner_person_name'] ?? null),
         'narrative' => $b['narrative'], 'status' => $b['status'], 'realised_value' => $b['realised_value'] !== null ? (int)round((float)$b['realised_value']) : null,

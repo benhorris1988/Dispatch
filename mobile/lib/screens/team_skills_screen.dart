@@ -12,15 +12,27 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/adm_metrics.dart';
+import '../widgets/pf_metrics.dart';
 import '../widgets/team_widgets.dart';
+import '../widgets/tm_loan_chip.dart';
+import '../widgets/tm_loan_list.dart';
+import '../widgets/tm_scope_picker.dart';
 import '../widgets/widgets.dart';
 import 'parts/adm_rota_panel.dart';
+import 'parts/tm_loan_dialog.dart';
+import 'portfolio_screen.dart';
 
 /// Team & skills (TEAM-01, TEAM-04, spec 9.4.6).
 ///
 /// Four views over `skills.php matrix` and `people.php list`: the proficiency
 /// matrix with its coverage footer, the people cards, the skills catalogue and
 /// availability by week.
+///
+/// TEAM-09: a scope selector at the top narrows both calls to one team or one
+/// portfolio's teams. A scoped view is that scope's *planning pool* — its home
+/// members plus anyone loaned in for the horizon — so a borrowed person shows
+/// on the row with where they came from, and a home member lent elsewhere with
+/// where they went. Team leads can add and end loans from the People tab.
 class TeamSkillsScreen extends StatefulWidget {
   const TeamSkillsScreen({super.key});
 
@@ -39,6 +51,11 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
   List<Person> _people = const [];
   List<_Team> _teams = const [];
 
+  /// TEAM-09 scope: the whole workspace, a portfolio or a team.
+  PlanScope _scope = const PlanScope.workspace();
+  PlanScopeOptions _scopeOptions = PlanScopeOptions.empty;
+  bool _scopeOptionsLoaded = false;
+
   @override
   void initState() {
     super.initState();
@@ -51,11 +68,21 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
       _error = null;
     });
     try {
+      if (!_scopeOptionsLoaded) {
+        // The picker's portfolios and teams. A failure here leaves the picker
+        // on the workspace rather than failing the screen.
+        try {
+          _scopeOptions = await PlanScopeOptions.load();
+        } on ApiException {
+          _scopeOptions = PlanScopeOptions.empty;
+        }
+        _scopeOptionsLoaded = true;
+      }
       final results = await Future.wait([
-        Api.post('skills.php', 'matrix'),
+        Api.post('skills.php', 'matrix', {..._scope.params}),
         // ADM-03: deactivated people are shown distinctly rather than hidden, so
         // a lead can see who has left and that their work still needs moving.
-        Api.post('people.php', 'list', {'include_inactive': true}),
+        Api.post('people.php', 'list', {'include_inactive': true, ..._scope.params}),
       ]);
       final m = _Matrix.fromJson(results[0]);
       final people = asList(results[1]['people'], Person.fromJson);
@@ -176,6 +203,65 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
     if (saved == true) await _load();
   }
 
+  void _setScope(PlanScope s) {
+    if (s == _scope) return;
+    setState(() => _scope = s);
+    _load();
+  }
+
+  /// The portfolio this view relates to: the one chosen, or the one the chosen
+  /// team sits in.
+  int? get _portfolioId {
+    if (_scope.isPortfolio) return _scope.id;
+    if (_scope.isTeam) return _scopeOptions.teams.where((t) => t.id == _scope.id).firstOrNull?.portfolioId;
+    return null;
+  }
+
+  /// People who can be lent from here: active home members of the scope (in a
+  /// scoped view), or anyone active in the workspace.
+  List<Person> get _lendable => [for (final p in _people) if (p.active && !p.isBorrowed) p];
+
+  Future<void> _addLoan({int? personId}) async {
+    final teams = _scopeOptions.teams.isNotEmpty
+        ? _scopeOptions.teams
+        : [for (final t in _teams) ScopeTeam(id: t.id, name: t.name, portfolioId: t.portfolioId, portfolioName: t.portfolioName)];
+    final saved = await showTmAddLoan(context, people: _lendable, teams: teams, personId: personId, today: _today);
+    if (saved) {
+      if (mounted) tmToast(context, 'Loan added');
+      await _load();
+    }
+  }
+
+  Future<void> _endLoan(Loan loan) async {
+    final done = await confirmTmEndLoan(context, loan, today: _today);
+    if (done) await _load();
+  }
+
+  /// The loan to show on a person's row from this scope's point of view, if any.
+  ({Loan loan, LoanSide side})? _loanFor(Person p) {
+    if (p.loanedFrom != null) return (loan: p.loanedFrom!, side: LoanSide.borrowed);
+    final out = p.onLoanTo ??
+        // Not lent today, but lent within the horizon: still worth a word on the row.
+        p.loans.where((l) => l.fromTeamId == p.teamId && !l.endedBefore(_today)).firstOrNull;
+    if (out == null) return null;
+    // In a portfolio view a loan between two of its own teams is neither in nor out.
+    if (_scope.isPortfolio && _scopeOptions.teams.any((t) => t.id == out.toTeamId && t.portfolioId == _scope.id)) return null;
+    return (loan: out, side: LoanSide.lent);
+  }
+
+  /// Every loan touching anyone in the list, once each, soonest first.
+  List<Loan> get _loans {
+    final seen = <int>{};
+    final out = <Loan>[];
+    for (final p in _people) {
+      for (final l in [...p.loans, if (p.loanedFrom != null) p.loanedFrom!, if (p.onLoanTo != null) p.onLoanTo!]) {
+        if (seen.add(l.id)) out.add(l);
+      }
+    }
+    out.sort((a, b) => a.fromDate.compareTo(b.fromDate));
+    return out;
+  }
+
   // ─── Build ──────────────────────────────────────────────────────────────
 
   @override
@@ -184,9 +270,15 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
     final policy = context.watch<WorkspaceConfig>().policy;
     final m = _matrix;
 
+    final portfolioId = _portfolioId;
     final actions = <Widget>[
       SegmentedTabs(labels: _tabs, selected: _tab, onChanged: (i) => setState(() => _tab = i)),
+      if (_scopeOptions.hasChoices) TmScopePicker(options: _scopeOptions, value: _scope, onChanged: _setScope, enabled: !_loading),
+      if (portfolioId != null)
+        SecondaryButton('Portfolio view', icon: Icons.account_tree_outlined, onPressed: () => context.go(PortfolioScreen.route(portfolioId))),
       SecondaryButton('Export', icon: Icons.file_download_outlined, onPressed: m == null ? null : _exportMatrix),
+      if (session.isTeamLead && _scopeOptions.teams.length > 1)
+        SecondaryButton('Add loan', icon: Icons.swap_horiz_rounded, onPressed: _loading ? null : () => _addLoan()),
       if (session.isTeamLead) PrimaryButton('Add person', icon: Icons.person_add_alt_1_rounded, onPressed: _addPerson),
     ];
 
@@ -198,8 +290,13 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
           subtitle: m == null
               ? 'Proficiency 0–4'
               : dotJoin([
-                  '${m.teamName} team',
-                  '${m.peopleCount} ${m.peopleCount == 1 ? 'person' : 'people'}',
+                  switch (_scope.kind) {
+                    'portfolio' => '${_scope.name} portfolio',
+                    'team' => '${_scope.name} team',
+                    _ => _scopeOptions.teams.length > 1 ? 'Whole workspace' : '${m.teamName} team',
+                  },
+                  '${m.peopleCount} ${m.peopleCount == 1 ? 'person' : 'people'}'
+                      '${m.loanedInCount > 0 ? ' (${m.loanedInCount} on loan in)' : ''}',
                   '${m.skillsCount} tracked skills',
                   'proficiency 0–4',
                 ]),
@@ -214,7 +311,18 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
           const EmptyState(icon: Icons.groups_outlined, title: 'No team yet', message: 'Add people to the workspace to see the skills matrix.')
         else
           switch (_tab) {
-            1 => _PeopleTab(people: _people, policy: policy),
+            1 => _PeopleTab(
+                people: _people,
+                policy: policy,
+                scope: _scope,
+                teams: _teams,
+                loans: _loans,
+                today: _today,
+                loanFor: _loanFor,
+                canLend: session.isTeamLead && _scopeOptions.teams.length > 1,
+                onAddLoan: (pid) => _addLoan(personId: pid),
+                onEndLoan: _endLoan,
+              ),
             2 => _SkillsTab(matrix: m, canManage: session.isAdmin, onChanged: _load),
             3 => _AvailabilityTab(
                 matrix: m,
@@ -230,6 +338,11 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
                 matrix: m,
                 session: session,
                 policy: policy,
+                loanFor: (pid) {
+                  final p = _people.where((x) => x.id == pid).firstOrNull;
+                  return p == null ? null : _loanFor(p);
+                },
+                today: _today,
                 canEdit: (pid) => _canEditSkill(session, pid),
                 onCellTap: (p, s) => _pickLevel(m, p, s),
                 onPairing: _togglePairing,
@@ -247,6 +360,8 @@ class _MatrixTab extends StatelessWidget {
     required this.matrix,
     required this.session,
     required this.policy,
+    required this.loanFor,
+    required this.today,
     required this.canEdit,
     required this.onCellTap,
     required this.onPairing,
@@ -254,6 +369,8 @@ class _MatrixTab extends StatelessWidget {
   final _Matrix matrix;
   final Session session;
   final Policy policy;
+  final ({Loan loan, LoanSide side})? Function(int personId) loanFor;
+  final DateTime today;
   final bool Function(int personId) canEdit;
   final void Function(_MatrixPerson, _SkillRow) onCellTap;
   final void Function(_Development, bool) onPairing;
@@ -272,7 +389,7 @@ class _MatrixTab extends StatelessWidget {
             '${AdmMetrics.load(targetMin: policy.targetLoadMin, targetMax: policy.targetLoadMax)}',
         padding: EdgeInsets.zero,
         dividerAfterHeader: true,
-        child: _MatrixTable(matrix: matrix, canEdit: canEdit, onCellTap: onCellTap),
+        child: _MatrixTable(matrix: matrix, canEdit: canEdit, onCellTap: onCellTap, loanFor: loanFor, today: today),
       ),
       const SizedBox(height: Sp.lg),
       LayoutBuilder(builder: (context, c) {
@@ -324,12 +441,14 @@ class _SummaryStrip extends StatelessWidget {
 }
 
 class _MatrixTable extends StatelessWidget {
-  const _MatrixTable({required this.matrix, required this.canEdit, required this.onCellTap});
+  const _MatrixTable({required this.matrix, required this.canEdit, required this.onCellTap, required this.loanFor, required this.today});
   final _Matrix matrix;
   final bool Function(int personId) canEdit;
   final void Function(_MatrixPerson, _SkillRow) onCellTap;
+  final ({Loan loan, LoanSide side})? Function(int personId) loanFor;
+  final DateTime today;
 
-  static const double _personW = 230;
+  static const double _personW = 250;
   static const double _daysW = 70;
   static const double _skillW = 84;
   static const double _loadW = 120;
@@ -380,6 +499,11 @@ class _MatrixTable extends StatelessWidget {
                             Text(p.name, style: context.text.titleSmall, overflow: TextOverflow.ellipsis),
                             if (p.roleTitle != null)
                               Text(p.roleTitle ?? '', style: context.text.bodySmall?.copyWith(color: context.mutedColor), overflow: TextOverflow.ellipsis),
+                            // TEAM-09: the pool includes borrowed people; say so on the row.
+                            if (loanFor(p.id) case final l?)
+                              Padding(padding: const EdgeInsets.only(top: 3), child: TmLoanChip(l.loan, side: l.side, today: today))
+                            else if (p.loanedIn)
+                              const Padding(padding: EdgeInsets.only(top: 3), child: ToneChip('On loan in', tone: 'info', compact: true)),
                           ]),
                         ),
                       ]),
@@ -676,9 +800,28 @@ class _DemandSupplyPanel extends StatelessWidget {
 // ─── People tab ───────────────────────────────────────────────────────────
 
 class _PeopleTab extends StatelessWidget {
-  const _PeopleTab({required this.people, required this.policy});
+  const _PeopleTab({
+    required this.people,
+    required this.policy,
+    required this.scope,
+    required this.teams,
+    required this.loans,
+    required this.today,
+    required this.loanFor,
+    required this.canLend,
+    required this.onAddLoan,
+    required this.onEndLoan,
+  });
   final List<Person> people;
   final Policy policy;
+  final PlanScope scope;
+  final List<_Team> teams;
+  final List<Loan> loans;
+  final DateTime today;
+  final ({Loan loan, LoanSide side})? Function(Person) loanFor;
+  final bool canLend;
+  final void Function(int? personId) onAddLoan;
+  final void Function(Loan) onEndLoan;
 
   @override
   Widget build(BuildContext context) {
@@ -691,15 +834,33 @@ class _PeopleTab extends StatelessWidget {
     final inactive = people.where((p) => !p.active).toList();
     final ordered = [...active, ...inactive];
 
+    final borrowed = active.where((p) => p.isBorrowed).length;
+    // Teams in the view, with a link to the portfolio each sits in (TEAM-09).
+    final teamsShown = [
+      for (final t in teams)
+        if (scope.isWorkspace || people.any((p) => p.teamId == t.id)) t,
+    ];
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       TmMetricTitle(
         title: 'People and load',
         subtitle: dotJoin([
           '${active.length} active',
+          if (borrowed > 0) '$borrowed on loan in',
           if (inactive.isNotEmpty) '${inactive.length} deactivated',
         ]),
         definition: AdmMetrics.load(targetMin: policy.targetLoadMin, targetMax: policy.targetLoadMax),
       ),
+      if (teamsShown.length > 1 || teamsShown.any((t) => t.portfolioId != null)) ...[
+        const SizedBox(height: Sp.sm),
+        Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [
+          for (final t in teamsShown)
+            InfoPill(
+              dotJoin([t.name, t.portfolioName]),
+              icon: t.portfolioId == null ? Icons.groups_outlined : Icons.account_tree_outlined,
+              onTap: t.portfolioId == null ? null : () => context.go(PortfolioScreen.route(t.portfolioId!)),
+            ),
+        ]),
+      ],
       const SizedBox(height: Sp.md),
       LayoutBuilder(builder: (context, c) {
         final cols = (c.maxWidth / 340).floor().clamp(1, 4);
@@ -732,6 +893,10 @@ class _PeopleTab extends StatelessWidget {
                           const ToneChip('Deactivated', compact: true, icon: Icons.person_off_outlined),
                         ],
                       ]),
+                      if (loanFor(p) case final l?) ...[
+                        const SizedBox(height: Sp.sm),
+                        Align(alignment: Alignment.centerLeft, child: TmLoanChip(l.loan, side: l.side, today: today)),
+                      ],
                       const SizedBox(height: Sp.md),
                       if (p.tagline != null && p.tagline!.isNotEmpty) ...[
                         Text(p.tagline ?? '', style: context.text.bodyMedium, maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -754,7 +919,42 @@ class _PeopleTab extends StatelessWidget {
           ],
         );
       }),
+      const SizedBox(height: Sp.lg),
+      _LoansPanel(loans: loans, today: today, scope: scope, canLend: canLend, onAddLoan: () => onAddLoan(null), onEndLoan: onEndLoan),
     ]);
+  }
+}
+
+/// Loans touching the people in view (TEAM-09): who went where, for how long
+/// and at what share, with *End early* for a team lead. Reasons are business
+/// reasons the lender typed; there is no personal data here (ADM-05).
+class _LoansPanel extends StatelessWidget {
+  const _LoansPanel({required this.loans, required this.today, required this.scope, required this.canLend, required this.onAddLoan, required this.onEndLoan});
+  final List<Loan> loans;
+  final DateTime today;
+  final PlanScope scope;
+  final bool canLend;
+  final VoidCallback onAddLoan;
+  final void Function(Loan) onEndLoan;
+
+  @override
+  Widget build(BuildContext context) {
+    return TmMetricPanel(
+      title: 'Loans between teams',
+      subtitle: loans.isEmpty ? null : '${loans.length} ${loans.length == 1 ? 'loan' : 'loans'} from today to the planning horizon',
+      definition: PfMetrics.loans,
+      trailing: canLend ? SecondaryButton('Add loan', icon: Icons.swap_horiz_rounded, onPressed: onAddLoan) : null,
+      child: loans.isEmpty
+          ? EmptyState(
+              icon: Icons.swap_horiz_rounded,
+              title: 'No loans',
+              message: scope.isWorkspace
+                  ? 'Nobody is lent to another team between now and the planning horizon.'
+                  : 'Nobody is lent into or out of ${scope.phrase} between now and the planning horizon.',
+              compact: true,
+            )
+          : TmLoanList(loans: loans, today: today, canEnd: canLend, onEnd: onEndLoan),
+    );
   }
 }
 
@@ -1198,10 +1398,17 @@ class _MatrixSkeleton extends StatelessWidget {
 // ─── Parsing (skills.php matrix) ──────────────────────────────────────────
 
 class _Team {
-  const _Team({required this.id, required this.name});
+  const _Team({required this.id, required this.name, this.portfolioId, this.portfolioName});
   final int id;
   final String name;
-  factory _Team.fromJson(Map<String, dynamic> j) => _Team(id: asIntOr(j['id'], 0), name: asStrOr(j['name'], ''));
+  final int? portfolioId;
+  final String? portfolioName;
+  factory _Team.fromJson(Map<String, dynamic> j) => _Team(
+        id: asIntOr(j['id'], 0),
+        name: asStrOr(j['name'], ''),
+        portfolioId: asInt(j['portfolio_id']),
+        portfolioName: asStr(j['portfolio_name']),
+      );
 }
 
 class _SkillRow {
@@ -1246,7 +1453,7 @@ class _SkillRow {
 }
 
 class _MatrixPerson {
-  const _MatrixPerson({required this.id, required this.name, this.initials, this.colourHex, this.roleTitle, this.daysPerWeek = 5, this.loadPct});
+  const _MatrixPerson({required this.id, required this.name, this.initials, this.colourHex, this.roleTitle, this.daysPerWeek = 5, this.loadPct, this.loanedIn = false});
   final int id;
   final String name;
   final String? initials;
@@ -1254,6 +1461,8 @@ class _MatrixPerson {
   final String? roleTitle;
   final double daysPerWeek;
   final double? loadPct;
+  /// TEAM-09: borrowed into the scope the matrix was built for.
+  final bool loanedIn;
 
   factory _MatrixPerson.fromJson(Map<String, dynamic> j) => _MatrixPerson(
         id: asIntOr(j['id'], 0),
@@ -1263,6 +1472,7 @@ class _MatrixPerson {
         roleTitle: asStr(j['role_title']),
         daysPerWeek: asDoubleOr(j['days_per_week'], 5),
         loadPct: asDouble(j['load_pct']),
+        loanedIn: asBool(j['loaned_in']),
       );
 }
 
@@ -1388,6 +1598,8 @@ class _Matrix {
 
   /// Cells are keyed `"<person_id>:<skill_id>"`.
   _Cell? cell(int personId, int skillId) => cells['$personId:$skillId'];
+
+  int get loanedInCount => people.where((p) => p.loanedIn).length;
 
   factory _Matrix.fromJson(Map<String, dynamic> j) {
     final summary = asMap(j['summary']);

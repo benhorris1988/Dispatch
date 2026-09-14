@@ -102,7 +102,11 @@ check('export in Appendix A shape', $code === 200 && isset($r['config']['workspa
 // ---- people -------------------------------------------------------------------------------
 echo "people\n";
 [$code, $pl] = api('people.php', ['action' => 'list'], $lead);
-check('list 200 with 8 people', $code === 200 && count($pl['people'] ?? []) === 8, short(count($pl['people'] ?? [])));
+check('list 200 with 12 people across both teams', $code === 200 && count($pl['people'] ?? []) === 12, short(count($pl['people'] ?? [])));
+[$code, $plTeam] = api('people.php', ['action' => 'list', 'team_id' => $pl['teams'][0]['name'] === 'Data Platform' ? $pl['teams'][0]['id'] : $pl['teams'][1]['id']], $lead);
+check('list team_id → the 8 Data Platform members plus 1 loaned in (TEAM-09)', $code === 200 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] === null)) === 8 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] !== null)) === 1, short(count($plTeam['people'] ?? [])));
+check('every person carries loans / on_loan_to / loaned_from', array_key_exists('loans', $pl['people'][0]) && array_key_exists('on_loan_to', $pl['people'][0]) && array_key_exists('loaned_from', $pl['people'][0]));
+$pl['people'] = array_values(array_filter($pl['people'], fn($p) => $p['team_name'] === 'Data Platform'));   // the checks below are about the Data Platform team
 $allLoad = true; foreach ($pl['people'] ?? [] as $p) if (!is_int($p['load_pct'] ?? null)) $allLoad = false;
 check('every person has a numeric load_pct', $allLoad, short(array_map(fn($p) => [$p['name'], $p['load_pct'] ?? null], $pl['people'] ?? [])));
 check('person shape (working_pattern decoded, skills, on_rota_weeks, team_name)', is_array($pl['people'][0]['working_pattern'] ?? null) && isset($pl['people'][0]['skills'], $pl['people'][0]['on_rota_weeks']) && array_key_exists('team_name', $pl['people'][0]));
@@ -170,7 +174,7 @@ if ($member) {
     check("team_member cannot add another person's leave → 403", $code === 403);
 }
 [$code, $r] = api('people.php', ['action' => 'recompute_capacity', 'from' => '2026-09-07', 'to' => '2026-09-18'], $lead);
-check('recompute_capacity writes 8 people × 10 days', $code === 200 && ($r['days_written'] ?? 0) === 80, short($r));
+check('recompute_capacity writes 12 people × 10 days', $code === 200 && ($r['days_written'] ?? 0) === 120, short($r));
 
 // ---- skills -------------------------------------------------------------------------------
 echo "skills\n";
@@ -202,7 +206,7 @@ echo "notifications / audit\n";
 [$code, $n] = api('notifications.php', ['action' => 'list'], $lead);
 check('notifications list 200 with unread count', $code === 200 && isset($n['notifications']) && is_int($n['unread'] ?? null), short($n));
 [$code, $r] = api('notifications.php', ['action' => 'prefs'], $lead);
-check('prefs has 7 default kinds', $code === 200 && count($r['prefs'] ?? []) === 7 && ($r['prefs'][0]['is_default'] ?? null) !== null);
+check('prefs has 8 default kinds (seven of NOT-01 plus the NOT-04 digest)', $code === 200 && count($r['prefs'] ?? []) === 8 && ($r['prefs'][0]['is_default'] ?? null) !== null);
 [$code, $r] = api('notifications.php', ['action' => 'save_prefs', 'kind' => 'change_committed', 'teams' => true, 'digest' => 'weekly'], $lead);
 $cc = null; foreach ($r['prefs'] ?? [] as $p) if ($p['kind'] === 'change_committed') $cc = $p;
 check('save_prefs persists', $code === 200 && ($cc['teams'] ?? null) === true && ($cc['digest'] ?? null) === 'weekly', short($cc));

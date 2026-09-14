@@ -12,6 +12,7 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/schedule_widgets.dart';
+import '../widgets/tm_scope_picker.dart';
 import '../widgets/widgets.dart';
 import 'parts/sch_plan_models.dart';
 
@@ -33,6 +34,10 @@ class ScenariosScreen extends StatefulWidget {
 class _ScenariosScreenState extends State<ScenariosScreen> {
   final List<SchEdit> _edits = [];
   SchPreview? _preview;
+  /// SCH-13: what the what-if is planned for. The result panel repeats it.
+  PlanScope _scope = const PlanScope.workspace();
+  PlanScope? _previewScope;
+  PlanScopeOptions _scopeOptions = PlanScopeOptions.empty;
   List<SchScenario> _scenarios = const [];
   List<SchItemOption> _items = const [];
   List<({int id, String name})> _people = const [];
@@ -61,6 +66,13 @@ class _ScenariosScreenState extends State<ScenariosScreen> {
         _error = null;
       });
       await _loadOptions();
+      // SCH-13: the portfolios and teams a what-if can be planned for.
+      try {
+        final o = await PlanScopeOptions.load();
+        if (mounted) setState(() => _scopeOptions = o);
+      } on ApiException {
+        // The picker stays on the whole workspace.
+      }
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -118,10 +130,12 @@ class _ScenariosScreenState extends State<ScenariosScreen> {
       _previewError = null;
     });
     try {
-      final raw = await Api.post('replan.php', 'preview', {'changes': [for (final e in _edits) e.toJson()]});
+      final scope = _scope;
+      final raw = await Api.post('replan.php', 'preview', {'changes': [for (final e in _edits) e.toJson()], ...scope.params});
       if (!mounted) return;
       setState(() {
         _preview = SchPreview.fromJson(raw);
+        _previewScope = scope;
         _running = false;
       });
     } on ApiException catch (e) {
@@ -651,6 +665,16 @@ class _ScenariosScreenState extends State<ScenariosScreen> {
             spacing: Sp.sm,
             runSpacing: Sp.sm,
             children: [
+              if (_scopeOptions.hasChoices)
+                TmScopePicker(
+                  options: _scopeOptions,
+                  value: _scope,
+                  prefix: 'Plan',
+                  onChanged: (s) => setState(() {
+                    _scope = s;
+                    _preview = null; // the previous result was planned for another scope
+                  }),
+                ),
               PrimaryButton(
                 'Run the preview',
                 icon: Icons.play_arrow_rounded,
@@ -701,7 +725,10 @@ class _ScenariosScreenState extends State<ScenariosScreen> {
       children: [
         Panel(
           title: 'The committed plan and this what-if',
-          subtitle: p.editsApplied.isEmpty ? null : p.editsApplied.join(' · '),
+          subtitle: dotJoin([
+            'Planned for ${(_previewScope ?? _scope).phrase}',
+            if (p.editsApplied.isNotEmpty) p.editsApplied.join(' · '),
+          ]),
           trailing: p.solveSeconds == null ? null : SchChip('Solved in ${p.solveSeconds!.toStringAsFixed(2)}s', tone: 'info'),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,

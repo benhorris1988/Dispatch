@@ -34,7 +34,7 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 ## Verification bar
 
 ```bash
-C:\xampp\php\php.exe tests\run_all.php     # all eight PHP suites; re-seeds before and after
+C:\xampp\php\php.exe tests\run_all.php     # every PHP suite listed in run_all.php; re-seeds before and after
 python engine\test_solver.py               # CP-SAT hard-constraint checks (no server needed)
 "C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze                        # in mobile/
 "C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/screens_smoke_test.dart

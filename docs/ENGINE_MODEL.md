@@ -25,6 +25,12 @@ solver is an optimisation, never a dependency.
       "planned_end": "2026-10-09",        // end of the planned window
       "indicative_end": "2027-03-05"      // end of the modelled horizon
     },
+    "scope": {                            // SCH-13: what this model plans for (see "Planning scope" below)
+      "kind": "workspace",                // workspace | team | portfolio
+      "team_id": null, "portfolio_id": null,
+      "team_ids": null,                   // the teams in scope; null = every team
+      "partial": false                    // true when people[] is not the whole workspace
+    },
     "policy": {
       "objective_weights": {"valueCompletion":1,"lateness":3,"unscheduledValue":5,
                             "loadImbalance":0.5,"contextSwitching":0.5,"stabilityPlanned":2,"preferences":0.2},
@@ -42,7 +48,8 @@ solver is an optimisation, never a dependency.
       "avoid": "Power BI report building",
       "protected": false,                 // STAB-12: doubles the stability cost of moves
       "rota_weeks": ["2026-09-28"],       // Mondays this person is on the incident rota
-      "capacity": [[7.5, 0.9], ...]       // one [available_hours, reserve_hours] pair PER ENTRY OF days[]
+      "capacity": [[7.5, 0.9], ...]       // one [available_hours, reserve_hours] pair PER ENTRY OF days[],
+                                          // already multiplied by the scope's share of that day (TEAM-09; 1 in a workspace model)
     }],
     "items": [{                           // schedulable items with remaining effort only
       "id": 42, "ref": "WI-1042", "policy": "planned",   // planned | interrupt
@@ -88,12 +95,55 @@ from `assignments` are treated as unscheduled and reported on the watch list. `p
 in `cpsat_client.php` re-validates every returned plan against the hard constraints; a violation is
 treated as a solver failure and the heuristic result is used instead.
 
+## Planning scope: teams, portfolios and loans (TEAM-09, SCH-13)
+
+`build_model($conn, $wsId, ['team_id' => n])` or `['portfolio_id' => n]` builds a model for one team,
+or for every team in a portfolio together. With neither option the model is the whole workspace as
+one pool, exactly as before. The PHP-side model (`docs/API.md` → `model.php`) carries three things
+the wire shape above only shows in reduced form:
+
+- **`people[].home`** (bool) and **`people[].loans`**. The pool is the scope's *home members* (active,
+  `team_id` in scope) plus anyone **loaned into** a team in scope during the horizon (`home: false`).
+  A loan (`dbo.person_loans`) moves `allocation_pct` of a person's time to another team between
+  `from_date` and `to_date`, inclusive.
+- **`capacity[day].share`** (0..1): the part of that person-day that belongs to the scope. A home member
+  lent out at 50% has 0.5 on the loan's days and 1 otherwise; a person loaned in at 50% has 0.5 on those
+  days and 0 outside them; when both the lending and the borrowing team are in scope (a portfolio) the
+  share is 1 — a loan inside the scope moves nothing. Shares of one day across teams add up to 1.
+  `available` and `reserve` stay the WHOLE day in the PHP model; the planner books against
+  `share × (available − reserve)` while `allocation_pct` keeps meaning "share of the whole day", so a
+  stored assignment reads the same in every view and a 50% loan can hold at most a 50% allocation. The
+  wire payload multiplies the pairs by the share instead, because the solver has no share concept.
+- **`items[].external`** (bool). In a scoped model an item with a committed row on an *active* person who
+  is not a home member of the scope is another team's work (or shared with one). It is not re-planned:
+  its committed rows are `locked`, the planner reproduces them exactly, and it is never reported as
+  unscheduled by a team that does not own it. Rows on people **outside the pool** are passed through
+  verbatim (pass 1 of the heuristic; `cpsat_solve()` re-appends them), so a scoped candidate is still a
+  **complete workspace plan** and stores, diffs and commits like any other. A leaver's rows are not
+  external — that work must be offered to someone else. `scope.external_item_ids` lists them.
+
+What this gives: under a team model only that team's people (plus anyone lent to it) are eligible, so
+an item needing a skill the team lacks is a skills gap; under a portfolio model the pool spans its teams,
+and an item whose effort is split by skill (`skill_effort`) is placed across them — one portion per
+qualified person, whichever team they sit in (SCH-13). Loans respect their dates: the borrowed person is
+eligible for the borrowing team's work only while, and only to the share that, the loan says.
+
+Two consequences worth knowing. A home member's committed work is booked in full against their scoped
+share, so lending someone out at 50% makes their kept assignments overflow and the planner proposes moving
+them — lending has a cost, and the plan says so. A borrowed person's own (external) commitments book
+against the part of the day that stays with their own team, and only the overflow eats into the lent
+share, so the borrowing team sees exactly what it was promised.
+
+The workspace (nightly) model ignores team boundaries as it always has; loans therefore change nothing
+there. They matter when a cycle is scoped to a team or portfolio, and in every per-team figure
+(`portfolios.php overview`, `people.php list{team_id}`, `skills.php matrix{team_id}`).
+
 ## Hard constraints the solver must honour (spec 8.5)
 
 | Constraint | Rule |
 |---|---|
 | Skills | A person may only work an item if they meet `min_proficiency` for each skill they spend effort on. With `skill_effort`, at least one assigned person must meet each skill. |
-| Capacity | Σ effort per person per day ≤ `available − reserve`. Only `policy: "interrupt"` items may consume `reserve`. |
+| Capacity | Σ effort per person per day ≤ `available − reserve` (the pairs are already the scope's share of the day). Only `policy: "interrupt"` items may consume `reserve`. `plan_check_constraints()` reads a locked row of a loaned-in person as booking their own team's part of the day first. |
 | Availability | No assignment on days where `available` is 0. |
 | Dependencies | `start[j] ≥ finish[i] + 1` for each `deps` entry. `soft_deps` are a penalty, not a bar. |
 | Earliest start / locks | Nothing before `earliest_start`; `committed` entries with `locked: true`, and anything inside `windows.freeze_end`, are reproduced exactly. |

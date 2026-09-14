@@ -21,7 +21,11 @@ services/api.dart         Api, ApiException, listOf()
 services/format.dart      fmt* helpers
 models/{json,user,config,person,work_item,plan,value,models}.dart
 widgets/{chips,person_avatar,panel,stat_tile,indicators,buttons,states,dispatch_logo,widgets}.dart
+widgets/tm_scope_picker.dart   PlanScope, PlanScopeOptions.load() (portfolios.php list), TmScopePicker (TEAM-09 / SCH-13)
+widgets/tm_loan_chip.dart      TmLoanChip, LoanSide, loanChipLabel; widgets/tm_loan_list.dart  TmLoanList, loanStateChip
+widgets/pf_metrics.dart        PfMetrics — definitions for the portfolio and loan figures
 screens/*_screen.dart     one file per route (placeholders use ComingSoon)
+screens/parts/tm_loan_dialog.dart  showTmAddLoan (people.php add_loan, 409 shown verbatim), confirmTmEndLoan (end_loan)
 ```
 
 ## State (provider)
@@ -38,7 +42,7 @@ throws `ApiException(message, code)` (`isAuth`, `isNotImplemented`). `listOf(raw
 `fmtMoneyK` (£210k), `fmtMoney`, `fmtPct`, `fmtDays`, `fmtDelta`, `parseDate`, `dotJoin`, `initialsOf`, `humanise`.
 
 ## Models (`import 'models/models.dart'`; all `fromJson`, null-tolerant)
-`User` (+`UserPerson`, `Workspace`, `DevUser`, `roleRank`, `roleLabel`, `kRoleOrder`), `WorkType`, `SizeClass`, `Policy`, `Person`, `Skill`,
+`User` (+`UserPerson`, `Workspace`, `DevUser`, `roleRank`, `roleLabel`, `kRoleOrder`), `WorkType`, `SizeClass`, `Policy`, `Person` (+`Loan`: `loans`, `onLoanTo`, `loanedFrom`, `isBorrowed`), `Skill`,
 `PersonSkill` (+`kProficiencyLabels`), `WorkItem` (+`SkillRequirement`, `WorkStatus`/`Health` constants, `displayStatus`), `Assignment`,
 `PlanVersion`, `Proposal`, `ChangeProposal` (+`ImpactChip`), `Benefit`, `Estimate` (+`SkillSplit`, `estimateClassLabel`), `AppNotification`.
 Raw readers in `models/json.dart`: `asInt/asIntOr/asDouble/asBool/asStr/asDate/asIntList/asStrList/asMap/asList`.
@@ -59,11 +63,24 @@ If a model lacks a field you need, read the raw map (`asMap(r['x'])`) rather tha
 - `Skeleton({width, height, radius})`, `Skeleton.circle`, `SkeletonPanel({rows})`, `LoadingState`, `ErrorState({title, message, onRetry, compact})`,
   `EmptyState({icon, title, message, action})`, `ComingSoon(title)`
 - `DispatchMark(size)`, `DispatchLogo({size, onDark, showTagline})`
+- `widgets/benefit_widgets.dart` (BEN-02): `BenefitValueLabel.fromJson(benefitRow, {perYear, size})` — money for a financial benefit, the
+  server's qualitative scale label chip plus "≈ £50k proxy" for a non-financial one; `nonFinancialNote(count, proxyTotal)` → "+ 2 non-financial (≈ £75k proxy)".
+- `screens/parts/benefit_form_dialog.dart`: `showBenefitFormDialog(context, {workItemId, workItemLabel, benefit, types, scales})` — the one add/edit form
+  (Financial / Non-financial toggle; scale labels and types from `benefits.php list`, fetched if not passed; server validation shown verbatim).
+- `screens/parts/external_link_panel.dart` (REQ-05): `ExternalLinkPanel({item, canEdit, onChanged})` — system label, ref, Open (`url_launcher`),
+  the server's badge (`live` → coloured chip + "seen N times · last date"; `link_only` → neutral chip + note), Link / Edit / Remove for team_lead+.
+- `screens/parts/digest_view.dart` (NOT-04): `DigestSection({userId})` — `digest.php preview` rendered as panels (next week with effort vs capacity,
+  changes since last digest, awaiting acknowledgement, watch-list mentions, digest-routed notifications) with a delivery footer taken from the
+  response's `delivery_note` / `transport`; admins get "Send now" and the `send` counts verbatim.
 - Shell: `PageBody({child, onRefresh, maxWidth, padding})` — standard padded, width-clamped scroll container; `Breaks.of/isPhone/wide/cols/gutter`.
 
 ## Screens and routes
 `Routes` constants: `/overview /pipeline /items/:ref /items/:ref/estimate /schedule /changes /changes/:id /team /people/:id /estimates /benefits /reports /settings /my-week /add-work /notifications /more /sign-in`; helpers `Routes.item(ref)`, `Routes.change(id)`, `Routes.person(id)`.
-Constructors: `PipelineScreen({query})`, `WorkItemScreen({required ref})`, `EstimateScreen({required ref})`, `ChangeDetailScreen({required id})`, `PersonScreen({required id})`; others no-arg.
+Off the shell's own constants: `/portfolios/:id` (`PortfolioScreen.route(id)`, TEAM-09 — reached from the Team & skills scope picker and its team pills, no sidebar entry).
+Constructors: `PipelineScreen({query})`, `WorkItemScreen({required ref})`, `EstimateScreen({required ref})`, `ChangeDetailScreen({required id})`, `PersonScreen({required id})`, `PortfolioScreen({required id})`; others no-arg.
+
+### Scope (TEAM-09, SCH-13)
+`PlanScope` is *Whole workspace* / a portfolio / a team; `scope.params` is the `{portfolio_id}` or `{team_id}` to spread into a request body, `scope.phrase` reads after "planned for". `TmScopePicker` is a popup behind a pill (it sits in a `Wrap` of header actions at any width). Team & skills sends the scope to `skills.php matrix` and `people.php list`; Scenarios sends it to `replan.php preview`; the Changes empty state sends it to `replan.php propose`; the Schedule's propose sends `team_id` when its team filter is on. The result copy always names the scope it was planned for.
 
 ## Decisions
 - Screens own their own scroll view (`PageBody`); the shell supplies chrome only. Route transitions are `NoTransitionPage`.

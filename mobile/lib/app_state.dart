@@ -18,12 +18,24 @@ class Session extends ChangeNotifier {
 
   User? _user;
   bool _restoring = true;
+  bool _interactive = false;
+  bool _signingOut = false;
 
   User? get user => _user;
   bool get signedIn => _user != null;
 
   /// True until [restore] has finished checking the stored token.
   bool get restoring => _restoring;
+
+  /// True when the current session came from a sign-in the person just performed, false
+  /// when it was restored from storage. The biometric lock (MOB-05) treats a fresh sign-in
+  /// as proof of identity and a restored one as something still to be confirmed.
+  bool get signedInInteractively => _interactive;
+
+  /// Run, and awaited, before the token is cleared on an interactive sign-out — the push
+  /// registrar uses this to unregister the device while it still can (MOB-04). Not run on a
+  /// silent sign-out (a 401), when the token is already dead.
+  final List<Future<void> Function()> beforeSignOut = [];
 
   String get role => _user?.role ?? 'viewer';
 
@@ -40,6 +52,7 @@ class Session extends ChangeNotifier {
       final token = await Api.loadToken();
       if (token != null && token.isNotEmpty) {
         _user = await Api.me();
+        _interactive = false;
       }
     } on ApiException catch (e) {
       debugPrint('[session] restore failed: $e');
@@ -57,6 +70,7 @@ class Session extends ChangeNotifier {
     final (token, user) = await Api.devLogin(userId);
     await Api.setToken(token);
     _user = user;
+    _interactive = true;
     notifyListeners();
   }
 
@@ -64,6 +78,7 @@ class Session extends ChangeNotifier {
   Future<void> adopt(String token, User user) async {
     await Api.setToken(token);
     _user = user;
+    _interactive = true;
     notifyListeners();
   }
 
@@ -78,10 +93,27 @@ class Session extends ChangeNotifier {
   }
 
   Future<void> signOut({bool silent = false}) async {
-    final was = _user != null;
-    _user = null;
-    await Api.setToken(null);
-    if (was || !silent) notifyListeners();
+    // A hook's own request can 401 and call back in here; once is enough.
+    if (_signingOut) return;
+    _signingOut = true;
+    try {
+      final was = _user != null;
+      if (was && !silent) {
+        for (final hook in List.of(beforeSignOut)) {
+          try {
+            await hook();
+          } catch (e) {
+            debugPrint('[session] sign-out hook failed: $e');
+          }
+        }
+      }
+      _user = null;
+      _interactive = false;
+      await Api.setToken(null);
+      if (was || !silent) notifyListeners();
+    } finally {
+      _signingOut = false;
+    }
   }
 }
 

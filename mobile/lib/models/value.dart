@@ -11,7 +11,10 @@ class Benefit {
     this.annualValue = 0,
     this.currency = 'GBP',
     this.confidence = 'medium',
+    this.isFinancial = true,
     this.qualitativeScale,
+    this.qualitativeLabel,
+    this.proxyValue,
     this.realisationFrom,
     this.ownerPersonId,
     this.ownerName,
@@ -29,7 +32,14 @@ class Benefit {
   final double annualValue;
   final String currency;
   final String confidence; // low | medium | high
+
+  /// BEN-02. A non-financial benefit carries a 1–5 [qualitativeScale] (label from
+  /// `benefits.php list.qualitative_scales`) and an optional currency-equivalent
+  /// [proxyValue]; its [annualValue] is 0 and never counts in money totals.
+  final bool isFinancial;
   final int? qualitativeScale; // 1..5
+  final String? qualitativeLabel;
+  final double? proxyValue;
   final DateTime? realisationFrom;
   final int? ownerPersonId;
   final String? ownerName;
@@ -47,7 +57,10 @@ class Benefit {
         annualValue: asDoubleOr(j['annual_value'], 0),
         currency: asStrOr(j['currency'], 'GBP'),
         confidence: asStrOr(j['confidence'], 'medium'),
+        isFinancial: asBool(j['is_financial'], fallback: true),
         qualitativeScale: asInt(j['qualitative_scale']),
+        qualitativeLabel: asStr(j['qualitative_label']),
+        proxyValue: asDouble(j['proxy_value']),
         realisationFrom: asDate(j['realisation_from']),
         ownerPersonId: asInt(j['owner_person_id']),
         ownerName: asStr(j['owner_name']),
@@ -56,6 +69,16 @@ class Benefit {
         realisedValue: asDouble(j['realised_value']),
         createdAt: asDate(j['created_at']),
       );
+}
+
+/// One point on the qualitative scale (BEN-02), as published by
+/// `benefits.php list.qualitative_scales`: 1 minor … 5 transformational. The
+/// labels are the server's; the client never invents them.
+class QualitativeScale {
+  const QualitativeScale({required this.scale, required this.label});
+  final int scale;
+  final String label;
+  factory QualitativeScale.fromJson(Map<String, dynamic> j) => QualitativeScale(scale: asIntOr(j['scale'], 0), label: asStrOr(j['label'], ''));
 }
 
 /// One row of an estimate's skill split.
@@ -162,7 +185,7 @@ class AppNotification {
   });
 
   final int id;
-  final String kind; // change_proposed | change_committed | approval_requested | item_assigned | estimate_requested | realisation_due | watch_list
+  final String kind; // change_proposed | change_committed | approval_requested | item_assigned | estimate_requested | realisation_due | watch_list | digest
   final String title;
   final String? body;
   final String? link; // app route, e.g. /changes/12

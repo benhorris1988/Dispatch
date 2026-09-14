@@ -24,8 +24,22 @@ if ($action === 'schedule') {
     $weeks = []; $d = new DateTime(week_start($from));
     while ($d->format('Y-m-d') <= $to) { $ws0 = $d->format('Y-m-d'); $weeks[] = ['week_start' => $ws0, 'label' => 'w/c ' . ltrim($d->format('j M'), '0'), 'state' => model_state_for($ws0 < $today ? $today : $ws0, $windows), 'is_current' => $ws0 === week_start($today)]; $d->modify('+7 days'); }
     // people (+ filters)
+    // TEAM-09: a team's schedule is its planning pool for the visible range — home members plus
+    // anyone loaned in — not the home roster. A person lent out still appears on their home team
+    // (they are still that team's person) flagged with where they have gone.
     $pSql = "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ? AND p.active = 1"; $pParams = [$wsId];
-    if (param('team_id')) { $pSql .= " AND p.team_id = ?"; $pParams[] = (int)param('team_id'); }
+    $loanFlags = [];
+    if (param('team_id')) {
+        $teamId = (int)param('team_id');
+        $pool = function_exists('team_pool') ? team_pool($conn, $wsId, [$teamId], $from, $to) : [];
+        $poolIds = array_keys($pool) ?: [-1];
+        $pSql .= " AND p.id IN (" . implode(',', array_map('intval', $poolIds)) . ")";
+        foreach ($pool as $pid => $e) foreach ($e['loans'] as $l) {
+            $flag = ['from_date' => $l['from_date'], 'to_date' => $l['to_date'], 'allocation_pct' => (int)round($l['share'] * 100)];
+            if (!empty($l['to_in']) && !$e['home']) $loanFlags[$pid]['loaned_in'] = $flag + ['from_team_id' => (int)$l['from_team_id'], 'from_team_name' => $l['from_team_name']];
+            elseif (!empty($l['from_in']) && $e['home']) $loanFlags[$pid]['on_loan_to'] = $flag + ['to_team_id' => (int)$l['to_team_id'], 'to_team_name' => $l['to_team_name']];
+        }
+    }
     $pSql .= " ORDER BY p.name";
     $peopleRows = rows($conn, $pSql, $pParams);
     $pids = array_map(fn($p) => (int)$p['id'], $peopleRows);
@@ -60,7 +74,8 @@ if ($action === 'schedule') {
             while ($d <= $end) { $cap += (float)($pattern[$d->format('D')] ?? 0); $d->modify('+1 day'); }
         }
         $people[] = ['id' => $pid, 'name' => $p['name'], 'initials' => trim((string)$p['initials']), 'colour' => $p['colour'], 'role_title' => $p['role_title'], 'tagline' => $p['tagline'], 'team_id' => $p['team_id'] !== null ? (int)$p['team_id'] : null, 'team_name' => $p['team_name'],
-            'days_per_week' => (float)$p['days_per_week'], 'load_pct' => $cap > 0 ? round(($assignedHours[$pid] ?? 0) / $cap * 100) : 0, 'assigned_hours' => round($assignedHours[$pid] ?? 0, 1), 'available_hours' => round($cap, 1)];
+            'days_per_week' => (float)$p['days_per_week'], 'load_pct' => $cap > 0 ? round(($assignedHours[$pid] ?? 0) / $cap * 100) : 0, 'assigned_hours' => round($assignedHours[$pid] ?? 0, 1), 'available_hours' => round($cap, 1),
+            'loaned_in' => $loanFlags[$pid]['loaned_in'] ?? null, 'on_loan_to' => $loanFlags[$pid]['on_loan_to'] ?? null];
     }
     $availability = $pids ? array_map(fn($r) => ['id' => (int)$r['id'], 'person_id' => (int)$r['person_id'], 'from_date' => substr($r['from_date'], 0, 10), 'to_date' => substr($r['to_date'], 0, 10), 'type' => $r['type'], 'fraction' => (float)$r['fraction'], 'label' => $r['label'] ?: ucfirst($r['type'])],
         rows($conn, "SELECT * FROM dbo.availability WHERE workspace_id = ? AND to_date >= ? AND from_date <= ? AND person_id IN (" . implode(',', $pids) . ")", [$wsId, $from, $to])) : [];

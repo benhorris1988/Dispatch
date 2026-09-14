@@ -31,13 +31,18 @@ if ($action === 'list') {
         -- whole backlog overstates what the team is on course to deliver: an unscheduled
         -- item's benefit is precisely the value that is NOT yet in the plan. in_pipeline
         -- carries the wider figure for anyone who wants it.
-        SUM(CASE WHEN wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS in_plan,
-        SUM(CASE WHEN wi.status NOT IN ('delivered','cancelled') THEN b.annual_value ELSE 0 END) AS in_pipeline,
-        SUM(CASE WHEN b.status = 'at_risk' THEN b.annual_value ELSE 0 END) AS at_risk,
+        -- BEN-02: the money totals are financial-only. A non-financial benefit's proxy value is a
+        -- stand-in for the priority score, not a forecast anyone will be asked to realise, so it
+        -- is reported alongside (non_financial_count, qualitative_proxy_total) rather than added in.
+        SUM(CASE WHEN b.is_financial = 1 AND wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS in_plan,
+        SUM(CASE WHEN b.is_financial = 1 AND wi.status NOT IN ('delivered','cancelled') THEN b.annual_value ELSE 0 END) AS in_pipeline,
+        SUM(CASE WHEN b.is_financial = 1 AND b.status = 'at_risk' THEN b.annual_value ELSE 0 END) AS at_risk,
         SUM(CASE WHEN b.status = 'at_risk' THEN 1 ELSE 0 END) AS at_risk_count,
-        SUM(CASE WHEN b.created_at >= ? AND wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS added_this_quarter,
-        COUNT(*) AS benefit_count, COUNT(DISTINCT b.work_item_id) AS items_with_benefits
-        FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id WHERE b.workspace_id = ?", [$qStart, $wsId]);
+        SUM(CASE WHEN b.is_financial = 1 AND b.created_at >= ? AND wi.status IN ('scheduled','in_progress') THEN b.annual_value ELSE 0 END) AS added_this_quarter,
+        COUNT(*) AS benefit_count, COUNT(DISTINCT b.work_item_id) AS items_with_benefits,
+        SUM(CASE WHEN b.is_financial = 0 AND wi.status <> 'cancelled' THEN 1 ELSE 0 END) AS non_financial_count,
+        SUM(CASE WHEN b.is_financial = 0 AND wi.status <> 'cancelled' THEN COALESCE(b.proxy_value, ISNULL(b.qualitative_scale, 0) * ?) ELSE 0 END) AS qualitative_proxy_total
+        FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id WHERE b.workspace_id = ?", [$qStart, qualitative_value_per_point($conn, $wsId), $wsId]);
     $realisedYtd = (float)scalar($conn, "SELECT ISNULL(SUM(r.realised_value),0) FROM dbo.benefit_realisations r JOIN dbo.benefits b ON b.id = r.benefit_id
         WHERE b.workspace_id = ? AND r.realised_value IS NOT NULL AND r.confirmed_at IS NOT NULL AND r.quarter LIKE ?", [$wsId, "% $year"]);
     $plannedYear = (float)scalar($conn, "SELECT ISNULL(SUM(r.planned_value),0) FROM dbo.benefit_realisations r JOIN dbo.benefits b ON b.id = r.benefit_id WHERE b.workspace_id = ? AND r.quarter LIKE ?", [$wsId, "% $year"]);
@@ -54,7 +59,8 @@ if ($action === 'list') {
     }
     $totals = ['in_plan' => (int)round((float)$t['in_plan']), 'in_pipeline' => (int)round((float)$t['in_pipeline']), 'realised_ytd' => (int)round($realisedYtd), 'at_risk' => (int)round((float)$t['at_risk']), 'at_risk_count' => (int)$t['at_risk_count'],
         'items_without_case' => count($without), 'items_without_case_note' => $note, 'items_total' => count($openItems), 'items_with_benefits' => (int)$t['items_with_benefits'], 'benefit_count' => (int)$t['benefit_count'],
-        'added_this_quarter' => (int)round((float)$t['added_this_quarter']), 'target_annual' => (int)round($plannedYear), 'target_pct' => $plannedYear > 0 ? (int)round($realisedYtd / $plannedYear * 100) : null, 'year' => (int)$year];
+        'added_this_quarter' => (int)round((float)$t['added_this_quarter']), 'target_annual' => (int)round($plannedYear), 'target_pct' => $plannedYear > 0 ? (int)round($realisedYtd / $plannedYear * 100) : null, 'year' => (int)$year,
+        'non_financial_count' => (int)$t['non_financial_count'], 'qualitative_proxy_total' => (int)round((float)$t['qualitative_proxy_total'])];
 
     $byType = [];
     foreach (rows($conn, "SELECT b.type, SUM(b.annual_value) AS v, COUNT(*) AS n FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id WHERE b.workspace_id = ? AND wi.status <> 'cancelled' GROUP BY b.type ORDER BY SUM(b.annual_value) DESC", [$wsId]) as $r) {
@@ -71,9 +77,11 @@ if ($action === 'list') {
             FROM dbo.benefits b LEFT JOIN dbo.people p ON p.id = b.owner_person_id JOIN dbo.work_items wi ON wi.id = b.work_item_id WHERE b.workspace_id = ? AND wi.status <> 'cancelled' GROUP BY COALESCE(b.owner_name, p.name, 'Unassigned') ORDER BY SUM(b.annual_value) DESC", [$wsId]));
     $pw = current_policy($conn, $wsId)['priority_weights'] ?: [];
     $cs = $pw['confidenceScale'] ?? ['high' => 1, 'medium' => 0.7, 'low' => 0.4];
+    $perPoint = qualitative_value_per_point($conn, $wsId);
     ok(['benefits' => $benefits, 'totals' => $totals, 'by_type' => $byType, 'by_quarter' => $byQuarter, 'by_owner' => $byOwner,
-        'priority_note' => sprintf('Benefit value contributes %d%% of the priority score. Confidence scales it: High ×%s, Medium ×%s, Low ×%s.', (int)($pw['value'] ?? 40), $cs['high'] ?? 1, $cs['medium'] ?? 0.7, $cs['low'] ?? 0.4),
-        'types' => array_map(fn($k, $v) => ['type' => $k] + $v, array_keys(DP_BENEFIT_TYPES), DP_BENEFIT_TYPES)]);
+        'priority_note' => sprintf('Benefit value contributes %d%% of the priority score. Confidence scales it: High ×%s, Medium ×%s, Low ×%s. A non-financial benefit counts its proxy value, or %s per scale point when it has none.', (int)($pw['value'] ?? 40), $cs['high'] ?? 1, $cs['medium'] ?? 0.7, $cs['low'] ?? 0.4, number_format($perPoint)),
+        'types' => array_map(fn($k, $v) => ['type' => $k] + $v, array_keys(DP_BENEFIT_TYPES), DP_BENEFIT_TYPES),
+        'qualitative_scales' => qualitative_scale_list(), 'qualitative_value_per_point' => (int)round($perPoint)]);
 }
 
 if ($action === 'get') {
@@ -94,10 +102,25 @@ if ($action === 'save') {
     $type = param('type', $ex['type'] ?? null); if (!isset(DP_BENEFIT_TYPES[$type])) fail('type must be one of ' . implode(', ', array_keys(DP_BENEFIT_TYPES)), 400);
     $conf = strtolower(param('confidence', $ex['confidence'] ?? 'medium')); if (!in_array($conf, ['low','medium','high'], true)) fail('confidence must be low, medium or high', 400);
     $status = param('status', $ex['status'] ?? 'planned'); if (!in_array($status, ['planned','in_flight','realising','realised','at_risk'], true)) fail('Invalid status', 400);
-    $val = param('annual_value', $ex['annual_value'] ?? null);
-    if ($val === null || $val === '' || (float)$val < 0) fail('annual_value is required (whole currency units; 0 allowed for qualitative benefits)', 422);
+    // BEN-02: a benefit is financial (annual_value carries it) or non-financial (a 1..5 qualitative
+    // scale carries it, with an optional currency-equivalent proxy value). Defaults to financial so
+    // every existing caller is unchanged.
+    $isFinancialRaw = param('is_financial', $ex !== null ? (int)$ex['is_financial'] : true);
+    $isFinancial = filter_var($isFinancialRaw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    if ($isFinancial === null) fail('is_financial must be true or false', 400);
+    $scaleRaw = param('qualitative_scale', $ex['qualitative_scale'] ?? null);
+    $scale = ($scaleRaw === null || $scaleRaw === '') ? null : (int)$scaleRaw;
+    if ($scale !== null && !isset(DP_QUALITATIVE_SCALE[$scale])) fail('qualitative_scale must be 1 (minor) to 5 (transformational)', 422, ['qualitative_scales' => qualitative_scale_list()]);
+    if (!$isFinancial && $scale === null) fail('A non-financial benefit needs a qualitative_scale of 1 (minor) to 5 (transformational)', 422, ['qualitative_scales' => qualitative_scale_list()]);
+    $proxyRaw = param('proxy_value', $ex['proxy_value'] ?? null);
+    $proxy = ($proxyRaw === null || $proxyRaw === '') ? null : round((float)$proxyRaw, 2);
+    if ($proxy !== null && (!is_numeric($proxyRaw) || $proxy < 0)) fail('proxy_value must be a non-negative currency-equivalent amount', 422);
+    if ($isFinancial) $proxy = null;   // a proxy stands in for a value a financial benefit already has
+    $val = param('annual_value', $ex['annual_value'] ?? ($isFinancial ? null : 0));
+    if (!$isFinancial && ($val === null || $val === '')) $val = 0;
+    if ($val === null || $val === '' || !is_numeric($val) || (float)$val < 0) fail('annual_value is required for a financial benefit (whole currency units; 0 allowed for a non-financial one)', 422);
     $data = ['work_item_id' => $wid, 'type' => $type, 'annual_value' => round((float)$val, 2), 'currency' => param('currency', $ex['currency'] ?? 'GBP'), 'confidence' => $conf,
-        'qualitative_scale' => param('qualitative_scale', $ex['qualitative_scale'] ?? null) !== null ? (int)param('qualitative_scale', $ex['qualitative_scale'] ?? null) : null,
+        'is_financial' => $isFinancial ? 1 : 0, 'qualitative_scale' => $scale, 'proxy_value' => $proxy,
         'realisation_from' => nz(param('realisation_from', $ex['realisation_from'] ?? null)),
         'owner_person_id' => nz(param('owner_person_id', $ex['owner_person_id'] ?? null)), 'owner_name' => param('owner_name', $ex['owner_name'] ?? null),
         'narrative' => param('narrative', $ex['narrative'] ?? null), 'status' => $status];
@@ -161,12 +184,14 @@ if ($action === 'record_realisation') {
 }
 
 if ($action === 'export_csv') {
-    $rows = rows($conn, "SELECT wi.ref, wi.title, wt.name AS work_type, b.type, b.annual_value, b.currency, b.confidence, b.realisation_from, COALESCE(b.owner_name, p.name) AS owner, b.status, b.realised_value, b.narrative
+    $rows = rows($conn, "SELECT wi.ref, wi.title, wt.name AS work_type, b.type, b.annual_value, b.currency, b.confidence, b.is_financial, b.qualitative_scale, b.proxy_value, b.realisation_from, COALESCE(b.owner_name, p.name) AS owner, b.status, b.realised_value, b.narrative
         FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id JOIN dbo.work_types wt ON wt.id = wi.work_type_id LEFT JOIN dbo.people p ON p.id = b.owner_person_id
         WHERE b.workspace_id = ? ORDER BY wi.ref, b.annual_value DESC", [$wsId]);
     $fh = fopen('php://temp', 'w+');
-    fputcsv($fh, ['Ref','Title','Work type','Benefit type','Annual value','Currency','Confidence','Realisation from','Realisation quarter','Owner','Status','Realised to date','Narrative']);
-    foreach ($rows as $r) fputcsv($fh, [$r['ref'], $r['title'], $r['work_type'], DP_BENEFIT_TYPES[$r['type']]['label'] ?? $r['type'], (int)round((float)$r['annual_value']), $r['currency'], ucfirst($r['confidence']), $r['realisation_from'], $r['realisation_from'] ? quarter_label($r['realisation_from']) : '', $r['owner'], $r['status'], $r['realised_value'] !== null ? (int)round((float)$r['realised_value']) : '', $r['narrative']]);
+    fputcsv($fh, ['Ref','Title','Work type','Benefit type','Financial','Annual value','Currency','Confidence','Qualitative scale','Qualitative label','Proxy value','Realisation from','Realisation quarter','Owner','Status','Realised to date','Narrative']);
+    foreach ($rows as $r) fputcsv($fh, [$r['ref'], $r['title'], $r['work_type'], DP_BENEFIT_TYPES[$r['type']]['label'] ?? $r['type'], (int)$r['is_financial'] === 1 ? 'Yes' : 'No', (int)round((float)$r['annual_value']), $r['currency'], ucfirst($r['confidence']),
+        $r['qualitative_scale'] !== null ? (int)$r['qualitative_scale'] : '', $r['qualitative_scale'] !== null ? (DP_QUALITATIVE_SCALE[(int)$r['qualitative_scale']] ?? '') : '', $r['proxy_value'] !== null ? (int)round((float)$r['proxy_value']) : '',
+        $r['realisation_from'], $r['realisation_from'] ? quarter_label($r['realisation_from']) : '', $r['owner'], $r['status'], $r['realised_value'] !== null ? (int)round((float)$r['realised_value']) : '', $r['narrative']]);
     rewind($fh); $csv = stream_get_contents($fh); fclose($fh);
     audit($conn, $wsId, 'export', 'benefit', null, null, ['rows' => count($rows)], 'benefits register');
     ok(['csv' => $csv, 'rows' => count($rows), 'filename' => 'benefits-' . today() . '.csv']);

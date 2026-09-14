@@ -39,7 +39,7 @@ check('200 ok', $c === 200 && ($o['status'] ?? '') === 'ok', json_encode($o));
 foreach (['today','today_label','workspace_name','people_count','plan_pill','committed','load','stability','reserve','proposals','watch_list','effort_by_week','next_proposal_at'] as $k) check("has $k", array_key_exists($k, $o));
 check('today is 2026-09-08', ($o['today'] ?? '') === '2026-09-08', $o['today'] ?? '');
 check('plan_pill mentions committed', stripos($o['plan_pill'] ?? '', 'Plan committed to') === 0, $o['plan_pill'] ?? '');
-check('people_count = 8', ($o['people_count'] ?? 0) === 8, (string)($o['people_count'] ?? 'null'));
+check('people_count = 12 (8 Data Platform + 4 Integration Platform)', ($o['people_count'] ?? 0) === 12, (string)($o['people_count'] ?? 'null'));
 $cm = $o['committed'] ?? [];
 check('committed.count > 0', ($cm['count'] ?? 0) > 0, (string)($cm['count'] ?? 'null'));
 check('committed.items count matches', count($cm['items'] ?? []) === ($cm['count'] ?? -1));

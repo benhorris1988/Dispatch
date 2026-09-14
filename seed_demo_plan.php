@@ -463,7 +463,7 @@ foreach ($integrations as $g) {
 // -------------------------------------------------------------------------------------
 // 11. SUMMARY
 // -------------------------------------------------------------------------------------
-$tables = ['workspaces', 'users', 'work_types', 'size_classes', 'scheduling_policies', 'teams', 'people', 'skills',
+$tables = ['workspaces', 'users', 'work_types', 'size_classes', 'scheduling_policies', 'teams', 'portfolios', 'people', 'person_loans', 'skills',
     'person_skills', 'availability', 'incident_rota', 'capacity_days', 'work_items', 'ref_sequences', 'tasks',
     'dependencies', 'skill_requirements', 'estimates', 'day_rates', 'benefits', 'benefit_realisations',
     'plan_versions', 'assignments', 'proposals', 'change_proposals', 'replan_triggers', 'audit_events',

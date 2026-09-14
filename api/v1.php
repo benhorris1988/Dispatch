@@ -158,9 +158,11 @@ if ($segments[0] === 'proposals') {
 if ($segments[0] === 'benefits') {
     $limit = v1_page(); $after = v1_cursor();
     $out = rows($conn, "SELECT TOP ($limit) b.id, wi.ref, wi.title, b.type, b.annual_value, b.currency, b.confidence,
-            b.realisation_from, b.status, b.realised_value, b.owner_name
+            b.realisation_from, b.status, b.realised_value, b.owner_name, b.is_financial, b.qualitative_scale, b.proxy_value
         FROM dbo.benefits b JOIN dbo.work_items wi ON wi.id = b.work_item_id
         WHERE b.workspace_id = ? AND b.id > ? ORDER BY b.id", [$wsId, $after]);
+    foreach ($out as &$b) { $b['is_financial'] = (bool)$b['is_financial']; $b['qualitative_scale'] = $b['qualitative_scale'] === null ? null : (int)$b['qualitative_scale']; }
+    unset($b);
     v1_ok(['benefits' => $out], ['limit' => $limit, 'next_cursor' => v1_next($out, $limit)]);
 }
 

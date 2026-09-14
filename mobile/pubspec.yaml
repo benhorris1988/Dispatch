@@ -1,7 +1,7 @@
 name: dispatch_app
 description: "Dispatch — delivery planning and resource management."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ^3.11.5
@@ -17,6 +17,8 @@ dependencies:
   go_router: ^17.0.0
   fl_chart: ^1.2.0
   collection: ^1.18.0
+  local_auth: ^3.0.2
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:

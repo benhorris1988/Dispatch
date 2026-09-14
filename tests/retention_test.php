@@ -104,7 +104,8 @@ check($orphans === 0, 'no assignment was orphaned by the purge');
 
 section('Work, people and value are never touched — this removes history, not the record');
 check(one($conn, "SELECT COUNT(*) FROM dbo.work_items WHERE workspace_id = ?", [$wsId]) === 88, 'every work item is still there');
-check(one($conn, "SELECT COUNT(*) FROM dbo.people WHERE workspace_id = ?", [$wsId]) === 8, 'every person is still there');
+check(one($conn, "SELECT COUNT(*) FROM dbo.people WHERE workspace_id = ?", [$wsId]) === 12, 'every person is still there');
+check(one($conn, "SELECT COUNT(*) FROM dbo.person_loans WHERE workspace_id = ?", [$wsId]) === 1, 'the loan is still there (a loan that happened is history, not plan history)');
 check(one($conn, "SELECT COUNT(*) FROM dbo.benefits WHERE workspace_id = ?", [$wsId]) === 31, 'every benefit is still there');
 check(one($conn, "SELECT COUNT(*) FROM dbo.estimates e JOIN dbo.work_items w ON w.id = e.work_item_id WHERE w.workspace_id = ?", [$wsId]) > 0, 'estimates are still there');
 

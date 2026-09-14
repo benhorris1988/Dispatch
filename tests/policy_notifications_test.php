@@ -102,7 +102,8 @@ check((int)($req3['notified'] ?? -1) === (int)$req['notified'] - 1, "one fewer r
 check(count(myNotifications('estimate_requested')) === $before + 2, 'and no notification row is written for the reader who turned it off');
 api('notifications', ['action' => 'save_prefs', 'kind' => 'estimate_requested', 'in_app' => true, 'email_digest' => false, 'digest' => 'daily']);
 [, $prefs] = api('notifications', ['action' => 'prefs']);
-check(count($prefs['prefs'] ?? []) === 7, 'all seven notification kinds have preferences (' . count($prefs['prefs'] ?? []) . ')');
+check(count($prefs['prefs'] ?? []) === 8, 'all eight notification kinds have preferences, the weekly digest included (' . count($prefs['prefs'] ?? []) . ')');
+check(in_array('digest', $prefs['kinds'] ?? [], true), 'digest is one of them (NOT-04)');
 
 section('An item moving to needs_estimate raises estimate_requested (NOT-01)');
 [, $ready] = api('work_items', ['action' => 'list', 'status' => 'ready']);
@@ -220,6 +221,98 @@ check((int)($committed2['ack_required'] ?? -1) === 0, 'no acknowledgement is req
 [, $got2] = api('changes', ['action' => 'get', 'id' => $propId2]);
 check(count($got2['awaiting_ack'] ?? []) === 0, 'and nothing is awaiting one');
 savePolicy(['require_ack_inside_horizon' => true]);
+
+// ---------------------------------------------------------------------------------------------
+section("The weekly digest: next week's plan and what changed since the last one (NOT-04)");
+// $affectedUser has just had a change committed for them (above), in real time, so it is
+// inside the default "since" window of a first digest.
+$digestUser = $affectedUser ?? $usersByPerson[array_key_first($usersByPerson)];
+loginUser((int)$admin['id']);
+[, $pv] = api('digest', ['action' => 'preview', 'user_id' => (int)$digestUser['id']]);
+$d = $pv['digest'] ?? [];
+check(($d['user']['id'] ?? 0) === (int)$digestUser['id'] && ($d['user']['person_id'] ?? null) !== null, "a team lead can preview {$digestUser['display_name']}'s digest");
+$expectedFrom = date('Y-m-d', strtotime(date('Y-m-d', strtotime("$today monday this week")) . ' +7 days'));
+check(($d['period']['week_from'] ?? '') === $expectedFrom && date('D', strtotime($d['period']['week_to'] ?? 'now')) === 'Sun', "next week runs from Monday {$d['period']['week_from']} to Sunday {$d['period']['week_to']}");
+check(array_key_exists('last_digest_at', $d) && $d['last_digest_at'] === null && ($d['since_is_default'] ?? false) === true, 'no digest has gone out yet, so "since" defaults to a week ago');
+check(is_array($d['next_week'] ?? null) && ($d['summary']['assignments'] ?? -1) === count($d['next_week']), "next week's assignments come from the committed plan (" . count($d['next_week'] ?? []) . ')');
+$inWeek = true; foreach ($d['next_week'] ?? [] as $a) if ($a['in_week_from'] < $d['period']['week_from'] || $a['in_week_to'] > $d['period']['week_to'] || $a['days_in_week'] < 1 || $a['days_in_week'] > 5) $inWeek = false;
+check($inWeek, 'each assignment is clipped to the week and carries 1-5 days in it');
+check((int)($d['summary']['changes'] ?? 0) >= 1, 'the change committed above appears in "changes since" (' . ($d['summary']['changes'] ?? '-') . ')');
+$hasHeadline = false; foreach ($d['changes'] ?? [] as $c) if (!empty($c['headline']) && !empty($c['at']) && !empty($c['link'])) $hasHeadline = true;
+check($hasHeadline, 'with a headline, a time and a link to the change');
+check(is_array($d['awaiting_ack'] ?? null) && is_array($d['watch_list'] ?? null) && is_array($d['carried_notifications'] ?? null), 'awaiting_ack, watch_list and carried_notifications sections are present');
+check(strpos($d['text'] ?? '', "NEXT WEEK'S PLAN") !== false && strpos($d['text'] ?? '', 'CHANGES SINCE') !== false, 'the plain-text rendering has both sections');
+check(strpos($d['html'] ?? '', htmlspecialchars($digestUser['display_name'], ENT_QUOTES)) !== false && strpos($d['html'] ?? '', '<table') !== false, 'the HTML rendering names the person and lays out the plan');
+check(!empty($d['subject']) && !empty($d['summary_line']), 'subject: ' . ($d['subject'] ?? '-'));
+check(array_key_exists('transport', $pv), 'the preview states the transport a send would use (' . var_export($pv['transport'] ?? null, true) . ')');
+$transport = $pv['transport'] ?? null;
+
+// A team member cannot preview someone else's; a lead cannot send.
+loginUser((int)$digestUser['id']);
+[$code] = api('digest', ['action' => 'preview', 'user_id' => (int)$admin['id']], 403);
+check($code === 403, "a team member cannot preview another user's digest");
+[, $own] = api('digest', ['action' => 'preview']);
+check(($own['digest']['user']['id'] ?? 0) === (int)$digestUser['id'], 'but can preview their own');
+loginUser((int)$lead['id']);
+[$code] = api('digest', ['action' => 'send', 'user_id' => (int)$digestUser['id']], 403);
+check($code === 403, 'send is admin-only');
+
+// Send to one person. There is no SMTP here, so it must land in-app and say so.
+loginUser((int)$digestUser['id']); $digestsBefore = count(myNotifications('digest')); loginUser((int)$admin['id']);
+[, $snd] = api('digest', ['action' => 'send', 'user_id' => (int)$digestUser['id']]);
+$res = $snd['results'][0] ?? [];
+check((int)($snd['recipients'] ?? 0) === 1 && ($res['user_id'] ?? 0) === (int)$digestUser['id'], 'one digest was addressed');
+if ($transport === null) {
+    check(($res['sent'] ?? true) === false && ($res['in_app'] ?? false) === true && ($res['delivered'] ?? false) === true, 'without a mail transport it is delivered in-app, and `sent` stays false');
+    check(($res['reason'] ?? '') === 'no mail transport configured', 'the reason is stated: ' . ($res['reason'] ?? '-'));
+    check((int)($snd['emailed'] ?? -1) === 0 && (int)($snd['in_app'] ?? 0) === 1 && !empty($snd['note']), 'the summary never claims an email went out');
+    check(!empty($res['notification_id']), 'and names the notification row (' . ($res['notification_id'] ?? '-') . ')');
+    loginUser((int)$digestUser['id']);
+    $dg = myNotifications('digest');
+    check(count($dg) === $digestsBefore + 1, "{$digestUser['display_name']} has a new in-app digest (" . count($dg) . ')');
+    check(($dg[0]['title'] ?? '') === ($res['subject'] ?? 'x') && ($dg[0]['link'] ?? '') === '/my-week' && ($dg[0]['channel'] ?? '') === 'in_app', 'titled with the digest subject and linking to My week');
+    check(strpos($dg[0]['body'] ?? '', 'next week') !== false, 'the body is the summary line: ' . substr($dg[0]['body'] ?? '-', 0, 90));
+    loginUser((int)$admin['id']);
+} else {
+    note("a mail transport ($transport) is configured on this box; the in-app fallback assertions are skipped. sent=" . var_export($res['sent'] ?? null, true));
+}
+check(!empty($res['last_digest_at']) && $res['last_digest_at'] > ($d['since'] ?? ''), 'last_digest_at advanced to now (' . ($res['last_digest_at'] ?? '-') . ')');
+[, $pv2] = api('digest', ['action' => 'preview', 'user_id' => (int)$digestUser['id']]);
+$d2 = $pv2['digest'] ?? [];
+check(($d2['last_digest_at'] ?? null) === ($res['last_digest_at'] ?? 'x') && ($d2['since'] ?? '') === ($res['last_digest_at'] ?? 'x') && ($d2['since_is_default'] ?? true) === false, 'the next digest starts where this one ended');
+check((int)($d2['summary']['changes'] ?? -1) === 0, 'and nothing has changed for them since it went out');
+[, $aud] = api('audit', ['action' => 'list', 'entity' => 'digest', 'limit' => 20]);
+$sendEv = array_values(array_filter($aud['events'] ?? [], fn($e) => ($e['action'] ?? '') === 'send' && (int)($e['entity_id'] ?? 0) === (int)$digestUser['id']));
+check(count($sendEv) >= 1 && array_key_exists('sent', $sendEv[0]['after'] ?? []) && array_key_exists('in_app', $sendEv[0]['after'] ?? []), 'the send is audited with what actually happened');
+
+// Send to everyone opted in: the recipient set is "email_digest on for any kind, cadence not off".
+[, $none] = api('digest', ['action' => 'send']);
+$noneIds = array_column($none['results'] ?? [], 'user_id');
+loginUser((int)$digestUser['id']);
+api('notifications', ['action' => 'save_prefs', 'kind' => 'watch_list', 'email_digest' => true, 'digest' => 'weekly']);
+loginUser((int)$admin['id']);
+[, $all] = api('digest', ['action' => 'send']);
+$allIds = array_column($all['results'] ?? [], 'user_id');
+check(in_array((int)$digestUser['id'], $allIds, true) && !in_array((int)$digestUser['id'], $noneIds, true), 'turning an email digest on for any kind makes them a recipient of the weekly run');
+check((int)($all['recipients'] ?? 0) === count($allIds) && (int)($all['recipients'] ?? 0) >= 1, 'recipients counted (' . ($all['recipients'] ?? '-') . ')');
+
+// In-app off for the digest kind, and no mail: nothing can carry it, and last_digest_at must not move.
+if ($transport === null) {
+    loginUser((int)$digestUser['id']);
+    api('notifications', ['action' => 'save_prefs', 'kind' => 'digest', 'in_app' => false]);
+    loginUser((int)$admin['id']);
+    [, $pvB] = api('digest', ['action' => 'preview', 'user_id' => (int)$digestUser['id']]);
+    [, $off] = api('digest', ['action' => 'send', 'user_id' => (int)$digestUser['id']]);
+    $ro = $off['results'][0] ?? [];
+    check(($ro['delivered'] ?? true) === false && ($ro['in_app'] ?? true) === false && (int)($off['undelivered'] ?? 0) === 1, 'with in-app off and no mail, the digest is reported undelivered rather than pretended');
+    check(strpos($ro['reason'] ?? '', 'turned off') !== false, 'and says why: ' . ($ro['reason'] ?? '-'));
+    check(($ro['last_digest_at'] ?? 'x') === ($pvB['digest']['last_digest_at'] ?? 'y'), 'last_digest_at did not advance, so nothing is lost for the next one');
+    loginUser((int)$digestUser['id']);
+    api('notifications', ['action' => 'save_prefs', 'kind' => 'digest', 'in_app' => true]);
+}
+loginUser((int)$digestUser['id']);
+api('notifications', ['action' => 'save_prefs', 'kind' => 'watch_list', 'email_digest' => false]);
+loginUser((int)$lead['id']);
 
 // ---------------------------------------------------------------------------------------------
 section('reestimate_class_threshold blocks entry to the committed window (EST-09)');

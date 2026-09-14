@@ -178,3 +178,114 @@ function person_shape(array $p) {
         'protected_until' => $p['protected_until'] ? substr($p['protected_until'], 0, 10) : null,
     ];
 }
+
+// ---- TEAM-09: teams, portfolios and loans ---------------------------------------------------------
+// A loan moves a SHARE of a person's time to another team for a dated period. capacity_days stays
+// one row per person-day (how many hours exist); these helpers answer "whose hours are they" at read
+// time, so every reader of capacity_days keeps working and a loan is a fact about ownership, not size.
+
+/** Team ids for a planning scope: ['team_id' => n] | ['portfolio_id' => n] | [] (whole workspace → team_ids null). Unknown id → null. */
+function scope_team_ids($conn, $wsId, array $opts) {
+    if (isset($opts['team_id']) && $opts['team_id'] !== '') {
+        $t = row($conn, "SELECT id, name FROM dbo.teams WHERE id = ? AND workspace_id = ?", [(int)$opts['team_id'], $wsId]);
+        return $t ? ['kind' => 'team', 'team_id' => (int)$t['id'], 'portfolio_id' => null, 'name' => $t['name'], 'team_ids' => [(int)$t['id']]] : null;
+    }
+    if (isset($opts['portfolio_id']) && $opts['portfolio_id'] !== '') {
+        $pf = row($conn, "SELECT id, name FROM dbo.portfolios WHERE id = ? AND workspace_id = ?", [(int)$opts['portfolio_id'], $wsId]);
+        if (!$pf) return null;
+        $ids = array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND portfolio_id = ? ORDER BY id", [$wsId, (int)$pf['id']]));
+        return ['kind' => 'portfolio', 'team_id' => null, 'portfolio_id' => (int)$pf['id'], 'name' => $pf['name'], 'team_ids' => $ids];
+    }
+    return ['kind' => 'workspace', 'team_id' => null, 'portfolio_id' => null, 'name' => null, 'team_ids' => null];
+}
+
+/** Loan rows overlapping [$from,$to], dates as Y-m-d, share as a fraction. Optional person / team filters. */
+function loans_in_window($conn, $wsId, $from, $to, $personIds = null, $teamIds = null) {
+    $sql = "SELECT l.*, tf.name AS from_team_name, tt.name AS to_team_name, p.name AS person_name
+            FROM dbo.person_loans l JOIN dbo.teams tf ON tf.id = l.from_team_id JOIN dbo.teams tt ON tt.id = l.to_team_id JOIN dbo.people p ON p.id = l.person_id
+            WHERE l.workspace_id = ? AND l.from_date <= ? AND l.to_date >= ?";
+    $params = [$wsId, $to, $from];
+    if ($personIds !== null) {
+        $personIds = array_values(array_map('intval', (array)$personIds)); if (!$personIds) return [];
+        $sql .= " AND l.person_id IN (" . implode(',', array_fill(0, count($personIds), '?')) . ")"; $params = array_merge($params, $personIds);
+    }
+    if ($teamIds !== null) {
+        $teamIds = array_values(array_map('intval', (array)$teamIds)); if (!$teamIds) return [];
+        $in = implode(',', array_fill(0, count($teamIds), '?'));
+        $sql .= " AND (l.from_team_id IN ($in) OR l.to_team_id IN ($in))"; $params = array_merge($params, $teamIds, $teamIds);
+    }
+    $out = [];
+    foreach (rows($conn, $sql . " ORDER BY l.from_date, l.id", $params) as $l) $out[] = loan_shape($l);
+    return $out;
+}
+function loan_shape(array $l) {
+    return ['id' => (int)$l['id'], 'person_id' => (int)$l['person_id'], 'person_name' => $l['person_name'] ?? null,
+        'from_team_id' => (int)$l['from_team_id'], 'from_team_name' => $l['from_team_name'] ?? null,
+        'to_team_id' => (int)$l['to_team_id'], 'to_team_name' => $l['to_team_name'] ?? null,
+        'from_date' => substr($l['from_date'], 0, 10), 'to_date' => substr($l['to_date'], 0, 10),
+        'allocation_pct' => (int)$l['allocation_pct'], 'share' => (int)$l['allocation_pct'] / 100,
+        'reason' => $l['reason'] ?? null, 'created_by' => $l['created_by'] !== null ? (int)$l['created_by'] : null, 'created_at' => $l['created_at'] ?? null];
+}
+
+/**
+ * The people whose time belongs, wholly or partly, to a set of teams during [$from,$to]:
+ * active home members plus anyone loaned into one of the teams. Keyed by person id:
+ *   ['home' => bool (home team in the set), 'team_id' => home team, 'loans' => [loan_shape + 'to_in','from_in']]
+ * Pass $teamIds = null for the whole workspace (everyone, share 1).
+ */
+function team_pool($conn, $wsId, $teamIds, $from, $to) {
+    $people = rows($conn, "SELECT id, team_id FROM dbo.people WHERE workspace_id = ? AND active = 1 ORDER BY id", [$wsId]);
+    $homeTeam = []; foreach ($people as $p) $homeTeam[(int)$p['id']] = $p['team_id'] !== null ? (int)$p['team_id'] : null;
+    if ($teamIds === null) { $out = []; foreach ($homeTeam as $pid => $tid) $out[$pid] = ['home' => true, 'team_id' => $tid, 'loans' => []]; return $out; }
+    $set = array_flip(array_map('intval', $teamIds));
+    $out = [];
+    foreach ($homeTeam as $pid => $tid) if ($tid !== null && isset($set[$tid])) $out[$pid] = ['home' => true, 'team_id' => $tid, 'loans' => []];
+    foreach (loans_in_window($conn, $wsId, $from, $to, null, $teamIds) as $l) {
+        $pid = $l['person_id'];
+        if (!array_key_exists($pid, $homeTeam)) continue;          // inactive person: no capacity to lend
+        $l['to_in'] = isset($set[$l['to_team_id']]); $l['from_in'] = isset($set[$l['from_team_id']]);
+        if (!isset($out[$pid])) { if (!$l['to_in']) continue; $out[$pid] = ['home' => false, 'team_id' => $homeTeam[$pid], 'loans' => []]; }
+        $out[$pid]['loans'][] = $l;
+    }
+    return $out;
+}
+
+/** Share (0..1) of a pooled person's capacity on $day that belongs to the team set: home ? (1 - loaned out) : loaned in. */
+function team_share_for(array $entry, $day) {
+    $ls = 0.0; $toIn = false;
+    foreach ($entry['loans'] as $l) if ($day >= $l['from_date'] && $day <= $l['to_date']) { $ls = $l['share']; $toIn = !empty($l['to_in']); break; }
+    $share = ($entry['home'] ? 1 - $ls : 0.0) + ($toIn ? $ls : 0.0);
+    return max(0.0, min(1.0, round($share, 4)));
+}
+
+/**
+ * Team-attributed load over [$from,$to]: per person and in total, with capacity and committed
+ * assignment hours both weighted by the team's share of that person on each day, so a person
+ * lent at 50% counts half for each team and the two teams' figures add up to the person.
+ * Returns ['people' => [pid => {available_hours, assigned_hours, load_pct, home, share_days}],
+ *          'available_hours', 'assigned_hours', 'load_pct', 'headcount', 'loaned_in', 'loaned_out'].
+ */
+function team_load($conn, $wsId, $teamIds, $from, $to) {
+    ensure_capacity($conn, $wsId, $from, $to);
+    $pool = team_pool($conn, $wsId, $teamIds, $from, $to);
+    if (!$pool) return ['people' => [], 'available_hours' => 0.0, 'assigned_hours' => 0.0, 'load_pct' => 0, 'headcount' => 0, 'loaned_in' => 0, 'loaned_out' => 0];
+    $ids = array_keys($pool);
+    $ws = workspace_row($conn, $wsId);
+    $cap = capacity_map($conn, $wsId, $from, $to, $ids);
+    $asg = assigned_hours_map($conn, $wsId, $from, $to, $cap, $ids, (float)($ws['hours_per_day'] ?? 7.5));
+    $people = []; $availT = 0.0; $usedT = 0.0; $in = 0; $outN = 0;
+    foreach ($pool as $pid => $e) {
+        $avail = 0.0; $used = 0.0; $shareDays = 0.0;
+        foreach ($cap[$pid] ?? [] as $day => $c) {
+            $s = team_share_for($e, $day);
+            $avail += $c['available'] * $s; $used += ($asg[$pid][$day] ?? 0) * $s;
+            if ($c['available'] > 0) $shareDays += $s;
+        }
+        $people[$pid] = ['available_hours' => round($avail, 2), 'assigned_hours' => round($used, 2), 'load_pct' => $avail > 0 ? (int)round($used / $avail * 100) : 0, 'home' => $e['home'], 'share_days' => round($shareDays, 2)];
+        $availT += $avail; $usedT += $used;
+        if (!$e['home']) $in++;
+        elseif (array_filter($e['loans'], fn($l) => empty($l['to_in']))) $outN++;
+    }
+    return ['people' => $people, 'available_hours' => round($availT, 2), 'assigned_hours' => round($usedT, 2), 'load_pct' => $availT > 0 ? (int)round($usedT / $availT * 100) : 0,
+        'headcount' => count(array_filter($pool, fn($e) => $e['home'])), 'loaned_in' => $in, 'loaned_out' => $outN];
+}

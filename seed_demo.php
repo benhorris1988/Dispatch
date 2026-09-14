@@ -20,19 +20,20 @@ $TODAY = '2026-09-08';
 // webhook_deliveries before its subscriptions, and the cursor with them: a cursor left
 // pointing past a rebuilt audit log would stop every webhook silently (webhook_lib.php
 // rewinds defensively, but the demo should not depend on that).
-$wipe = ['webhook_deliveries','webhook_subscriptions','webhook_cursor','calendar_feeds',
+$wipe = ['webhook_deliveries','webhook_subscriptions','webhook_cursor','calendar_feeds','push_deliveries','device_tokens',
   'item_comments','notifications','notification_prefs','person_change_log','progress_logs','replan_triggers',
   'change_proposals','proposals','assignments','plan_versions','benefit_realisations','benefits','estimates',
   'skill_requirements','dependencies','tasks','work_items','ref_sequences','capacity_days','incident_rota','availability',
-  'person_skills','skills','day_rates','stability_weeks','audit_events','integrations','scheduling_policies','size_classes','work_types'];
-// users <-> people <-> teams are circular: null the links first
-x($conn, "UPDATE dbo.users SET person_id = NULL"); x($conn, "UPDATE dbo.teams SET lead_person_id = NULL");
+  'person_skills','skills','day_rates','stability_weeks','audit_events','integrations','scheduling_policies','size_classes','work_types',
+  'person_loans'];
+// users <-> people <-> teams <-> portfolios are circular: null the links first
+x($conn, "UPDATE dbo.users SET person_id = NULL"); x($conn, "UPDATE dbo.teams SET lead_person_id = NULL, portfolio_id = NULL");
 foreach ($wipe as $t) x($conn, "DELETE FROM dbo.$t");
-foreach (['people','users','teams','workspaces'] as $t) x($conn, "DELETE FROM dbo.$t");
-$identityTables = ['workspaces','users','work_types','size_classes','scheduling_policies','teams','people','skills','availability','incident_rota',
+foreach (['portfolios','people','users','teams','workspaces'] as $t) x($conn, "DELETE FROM dbo.$t");   // portfolios before people: lead_person_id
+$identityTables = ['workspaces','users','work_types','size_classes','scheduling_policies','teams','portfolios','person_loans','people','skills','availability','incident_rota',
   'work_items','tasks','dependencies','skill_requirements','estimates','day_rates','benefits','benefit_realisations','plan_versions','assignments',
   'proposals','change_proposals','replan_triggers','audit_events','notifications','item_comments','person_change_log','progress_logs','integrations',
-  'webhook_subscriptions','webhook_deliveries','calendar_feeds'];
+  'webhook_subscriptions','webhook_deliveries','calendar_feeds','device_tokens','push_deliveries'];
 foreach ($identityTables as $t) x($conn, "DBCC CHECKIDENT ('dbo.$t', RESEED, 0) WITH NO_INFOMSGS");
 echo "Wiped.\n";
 
@@ -178,6 +179,42 @@ foreach ($matrix as $first => $levels) foreach ($levels as $i => $lvl) { if ($lv
   x($conn, "INSERT INTO dbo.person_skills (" . implode(',', array_keys($cols)) . ") VALUES (" . implode(',', array_fill(0, count($cols), '?')) . ")", array_values($cols));
 }
 
+// ---------------------------------------------------------------- second team (TEAM-09 / SCH-13)
+// "Integration Platform": four people whose skills complement Data Platform — API integration and Security at
+// L3+, where Data Platform has one person each. Everything the suites count for Data Platform (8 people, the
+// committed plan, the benefits) is untouched: these people hold no assignments and own no items. Nobody here
+// reaches Terraform L3, so it stays the workspace's single point of failure (asserted by the suites).
+$TEAM2 = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Integration Platform']);
+$peopleRows2 = [ // name, initials, colour, role, days, pattern, pattern_label, tagline, prefers, avoid, max_conc
+  ['Tariq Hussain', 'TH', '#0F766E', 'Integration lead', 5, $full, 'Mon–Fri full time', 'API platform and integration patterns', 'API and integration work', 'Report building', null],
+  ['Mei Chen', 'MC', '#7C3AED', 'Integration engineer', 5, $full, 'Mon–Fri full time', 'Event streaming and API build', 'Event streaming and API work', null, null],
+  ['Oliver Grant', 'OG', '#B45309', 'Security engineer', 4.0, '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5}', 'Mon–Thu, no Fridays', 'Identity, access and platform security', 'Security and access work', 'Report building', null],
+  ['Nadia Petrova', 'NP', '#BE185D', 'Platform engineer', 5, $full, 'Mon–Fri full time', 'Azure platform and automation', 'Platform and infrastructure work', null, null],
+];
+foreach ($peopleRows2 as $r) {
+  [$first, $last] = explode(' ', $r[0]);
+  $id = xid($conn, 'people', ['workspace_id' => $W, 'team_id' => $TEAM2, 'name' => $r[0], 'initials' => $r[1], 'email' => strtolower("$first.$last@example.org"), 'role_title' => $r[3], 'tagline' => $r[7],
+    'days_per_week' => $r[4], 'working_pattern' => $r[5], 'pattern_label' => $r[6], 'max_concurrent' => $r[10], 'min_focus_days' => null, 'prefers' => $r[8], 'avoid' => $r[9],
+    'line_manager' => 'Dana K.', 'colour' => $r[2], 'active' => 1, 'created_at' => '2026-06-01 09:30:00']);
+  $P[$r[0]] = $id; $PN[$first] = $id;
+  $U[$first] = xid($conn, 'users', ['workspace_id' => $W, 'email' => strtolower("$first.$last@example.org"), 'display_name' => $r[0], 'short_name' => $first . ' ' . $last[0] . '.', 'role' => 'team_member', 'person_id' => $id, 'active' => 1, 'created_at' => '2026-06-01 09:30:00']);
+}
+x($conn, "UPDATE dbo.teams SET lead_person_id = ? WHERE id = ?", [$PN['Tariq'], $TEAM2]);
+// Same column order as $matrix: Azure, Databricks, Terraform, Python, SQL, Data modelling, Event streaming, Power BI, API integration, Security, ADF, Procurement domain
+$matrix2 = [
+  'Tariq'  => [3, 1, 2, 3, 2, 1, 3, 0, 4, 3, 1, 0],
+  'Mei'    => [2, 2, 1, 3, 2, 1, 3, 0, 3, 2, 1, 0],
+  'Oliver' => [3, 0, 2, 2, 1, 0, 1, 0, 2, 4, 0, 0],
+  'Nadia'  => [3, 2, 2, 3, 3, 1, 2, 0, 3, 3, 2, 0],
+];
+foreach ($matrix2 as $first => $levels) foreach ($levels as $i => $lvl) { if ($lvl === 0) continue;
+  $sk = $allSkills[$i]; $extra = [];
+  if ($first === 'Mei' && $sk === 'Security') $extra = ['development_target' => 3, 'pairing_enabled' => 1];
+  if ($first === 'Tariq' && $sk === 'API integration') $extra['certified'] = 1;
+  $cols = array_merge(['person_id' => $PN[$first], 'skill_id' => $S[$sk], 'proficiency' => $lvl, 'updated_at' => '2026-08-20 10:00:00'], $extra);
+  x($conn, "INSERT INTO dbo.person_skills (" . implode(',', array_keys($cols)) . ") VALUES (" . implode(',', array_fill(0, count($cols), '?')) . ")", array_values($cols));
+}
+
 // ---------------------------------------------------------------- availability, rota, capacity
 $avail = [ // person, from, to, type, source, label
   ['Hana', '2026-09-07', '2026-09-11', 'leave', 'hr', 'Leave'],
@@ -191,7 +228,7 @@ foreach ($avail as $a) xid($conn, 'availability', ['workspace_id' => $W, 'person
 $rota = ['2026-09-07' => 'Ravi', '2026-09-14' => 'Ravi', '2026-09-21' => 'Jon', '2026-09-28' => 'Priya', '2026-10-05' => 'Hana'];
 foreach ($rota as $wk => $who) xid($conn, 'incident_rota', ['workspace_id' => $W, 'person_id' => $PN[$who], 'week_start' => $wk]);
 
-foreach ($peopleRows as $r) {
+foreach (array_merge($peopleRows, $peopleRows2) as $r) {
   $pid = $P[$r[0]]; $pattern = json_decode($r[5], true);
   foreach (workDays('2026-08-31', '2027-03-05') as $d) {
     $hours = $pattern[date('D', strtotime($d))] ?? 0;
@@ -203,6 +240,16 @@ foreach ($peopleRows as $r) {
     x($conn, "INSERT INTO dbo.capacity_days (workspace_id, person_id, day, available_hours, reserve_hours, derived_at) VALUES (?,?,?,?,?,?)", [$W, $pid, $d, $availH, $reserve, '2026-09-08 02:00:00']);
   }
 }
-echo "Config, team, skills, capacity done.\n";
+// ---------------------------------------------------------------------------------- portfolio and loan (TEAM-09)
+// "Data & Integration" holds both teams. Mei Chen is lent to Data Platform for the two weeks after the
+// committed window opens (14–25 Sep) at 50%: for those days half of her time belongs to Data Platform and she
+// is eligible for its work in a Data Platform or portfolio model. A seeded fact, so no replan trigger row —
+// the trigger ids in seed_demo_plan.php are hand-numbered.
+$PORTFOLIO = xid($conn, 'portfolios', ['workspace_id' => $W, 'name' => 'Data & Integration', 'description' => 'Data Platform and Integration Platform: one pipeline, two teams, planned together where an item needs both.',
+  'lead_person_id' => $PN['Priya'], 'created_at' => '2026-06-01 09:00:00']);
+x($conn, "UPDATE dbo.teams SET portfolio_id = ? WHERE id IN (?, ?)", [$PORTFOLIO, $TEAM, $TEAM2]);
+$LOAN = xid($conn, 'person_loans', ['workspace_id' => $W, 'person_id' => $PN['Mei'], 'from_team_id' => $TEAM2, 'to_team_id' => $TEAM, 'from_date' => '2026-09-14', 'to_date' => '2026-09-25',
+  'allocation_pct' => 50, 'reason' => 'Reference data service API work (WI-1039)', 'created_by' => $U['ben'], 'created_at' => '2026-09-04 11:00:00']);
+echo "Config, teams, portfolio, skills, capacity done.\n";
 
 require __DIR__ . '/seed_demo_items.php';   // work items, estimates, benefits, plans, proposals, reporting rows

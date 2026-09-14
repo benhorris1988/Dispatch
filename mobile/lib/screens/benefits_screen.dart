@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -12,9 +10,11 @@ import '../shell/app_shell.dart';
 import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
+import '../widgets/benefit_widgets.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/wc_filters.dart';
 import '../widgets/widgets.dart';
+import 'parts/benefit_form_dialog.dart';
 
 /// Benefits (BEN-*, spec 9.4.9). The register totals value in plan, realised to
 /// date and at risk; realisation by quarter compares planned with
@@ -193,14 +193,16 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
     }
   }
 
+  List<BenefitTypeOption> get _typeOptions => [for (final t in _data?.types ?? const <_TypeOption>[]) BenefitTypeOption(type: t.type, label: t.label)];
+
   Future<void> _addBenefit() async {
-    final saved = await showDialog<bool>(context: context, builder: (context) => _BenefitDialog(types: _data?.types ?? const []));
-    if (saved == true) await _load();
+    final saved = await showBenefitFormDialog(context, types: _typeOptions, scales: _data?.scales ?? const []);
+    if (saved) await _load();
   }
 
   Future<void> _editBenefit(_BenefitRow b) async {
-    final saved = await showDialog<bool>(context: context, builder: (context) => _BenefitDialog(types: _data?.types ?? const [], benefit: b));
-    if (saved == true) await _load();
+    final saved = await showBenefitFormDialog(context, benefit: Benefit.fromJson(b.raw), types: _typeOptions, scales: _data?.scales ?? const []);
+    if (saved) await _load();
   }
 
   Future<void> _recordRealisation(_BenefitRow b) async {
@@ -224,6 +226,7 @@ class _BenefitsScreenState extends State<BenefitsScreen> {
               : dotJoin([
                   'Benefits register',
                   '${d.totals.benefitCount} benefits across ${d.totals.itemsWithBenefits} items',
+                  d.totals.nonFinancialCount > 0 ? '${d.totals.nonFinancialCount} non-financial' : null,
                   'values are annual, owner-confirmed',
                 ]),
           actions: [
@@ -289,14 +292,27 @@ class _Totals extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = totals;
+    // Money totals are financial-only (BEN-02). Non-financial benefits are
+    // counted beside them, with their qualitative proxy as a secondary figure:
+    // a stand-in for the priority score, not a forecast anyone will realise.
+    final nonFinancial = nonFinancialNote(t.nonFinancialCount, t.qualitativeProxyTotal);
     return StatRow(tiles: [
       StatTile(
         label: 'Value in the plan',
         value: fmtMoneyK(t.inPlan),
         unit: 'per year',
-        footnote: '${fmtMoneyK(t.addedThisQuarter)} added this quarter',
+        footnote: dotJoin(['${fmtMoneyK(t.addedThisQuarter)} added this quarter', nonFinancial]),
         tone: StatTone.good,
       ),
+      if (t.nonFinancialCount > 0)
+        StatTile(
+          label: 'Non-financial benefits',
+          value: '${t.nonFinancialCount}',
+          unit: t.nonFinancialCount == 1 ? 'benefit' : 'benefits',
+          footnote: t.qualitativeProxyTotal > 0 ? '≈ ${fmtMoneyK(t.qualitativeProxyTotal)} proxy, priority only' : 'Rated on the qualitative scale',
+          tone: StatTone.neutral,
+          footnoteIcon: Icons.auto_awesome_outlined,
+        ),
       StatTile(
         label: 'Realised, year to date',
         value: fmtMoneyK(t.realisedYtd),
@@ -378,7 +394,7 @@ class _RegisterTab extends StatelessWidget {
                       const SizedBox(height: Sp.sm),
                       Wrap(spacing: Sp.sm, runSpacing: Sp.sm, crossAxisAlignment: WrapCrossAlignment.center, children: [
                         TypeChip(b.typeLabel, colourHex: b.typeColour, compact: true),
-                        Text('${(b.annualValue / 1000).round()}k/yr', style: DispatchTheme.numeric(size: 13.5, weight: FontWeight.w800, color: context.inkColor)),
+                        BenefitValueLabel.fromJson(b.raw, perYear: true),
                         ConfidenceDots(b.confidence, showLabel: true),
                         StatusChip(b.status, compact: true),
                       ]),
@@ -394,7 +410,7 @@ class _RegisterTab extends StatelessWidget {
           columns: const [
             TmCol('Work', flex: 4),
             TmCol('Type', width: 140),
-            TmCol('£k / yr', width: 80, align: TextAlign.right),
+            TmCol('Value / yr', width: 150),
             TmCol('Confidence', width: 130),
             TmCol('Realised from', width: 120),
             TmCol('Status', width: 108),
@@ -414,8 +430,7 @@ class _RegisterTab extends StatelessWidget {
                   ),
                 ),
                 TypeChip(b.typeLabel, colourHex: b.typeColour, compact: true),
-                Text('${(b.annualValue / 1000).round()}',
-                    style: DispatchTheme.numeric(size: 14, weight: FontWeight.w800, color: context.inkColor)),
+                BenefitValueLabel.fromJson(b.raw, size: 14),
                 ConfidenceDots(b.confidence, showLabel: true),
                 Text(b.realisationQuarter ?? '—', style: context.text.bodyMedium),
                 StatusChip(b.status, compact: true),
@@ -470,7 +485,9 @@ class _RealisationTab extends StatelessWidget {
                             Text(dotJoin([b.ref, b.title]), style: context.text.titleSmall),
                             const SizedBox(height: 4),
                             Text(
-                              'From ${b.realisationQuarter ?? '—'} · ${fmtMoneyK(b.annualValue)} a year · realised ${fmtMoneyK(b.realisedValue ?? 0)}',
+                              b.isFinancial
+                                  ? 'From ${b.realisationQuarter ?? '—'} · ${fmtMoneyK(b.annualValue)} a year · realised ${fmtMoneyK(b.realisedValue ?? 0)}'
+                                  : 'From ${b.realisationQuarter ?? '—'} · non-financial (${b.qualitativeLabel ?? 'scale ${b.qualitativeScale ?? '—'}'})',
                               style: context.text.bodySmall?.copyWith(color: context.mutedColor),
                             ),
                             if (canRecord) ...[
@@ -503,7 +520,9 @@ class _RealisationTab extends StatelessWidget {
                         ]),
                       ),
                       Text(b.realisationQuarter ?? '—', style: context.text.bodyMedium),
-                      Text('${(b.annualValue / 1000).round()}', style: DispatchTheme.numeric(size: 14, weight: FontWeight.w700, color: context.inkColor)),
+                      b.isFinancial
+                          ? Text('${(b.annualValue / 1000).round()}', style: DispatchTheme.numeric(size: 14, weight: FontWeight.w700, color: context.inkColor))
+                          : Align(alignment: Alignment.centerRight, child: BenefitValueLabel.fromJson(b.raw, size: 14)),
                       Text(b.realisedValue == null ? '—' : '${(b.realisedValue! / 1000).round()}',
                           style: DispatchTheme.numeric(size: 14, weight: FontWeight.w700, color: (b.realisedValue ?? 0) > 0 ? DispatchColors.green : context.mutedColor)),
                       StatusChip(b.status, compact: true),
@@ -612,259 +631,6 @@ class _SidePanels extends StatelessWidget {
 }
 
 // ─── Dialogs ──────────────────────────────────────────────────────────────
-
-/// Add or edit a benefit. New benefits are attached with a work-item search.
-class _BenefitDialog extends StatefulWidget {
-  const _BenefitDialog({required this.types, this.benefit});
-  final List<_TypeOption> types;
-  final _BenefitRow? benefit;
-
-  @override
-  State<_BenefitDialog> createState() => _BenefitDialogState();
-}
-
-class _BenefitDialogState extends State<_BenefitDialog> {
-  final TextEditingController _search = TextEditingController();
-  late final TextEditingController _value = TextEditingController(text: widget.benefit == null ? '' : widget.benefit!.annualValue.round().toString());
-  late final TextEditingController _owner = TextEditingController(text: widget.benefit?.ownerName ?? '');
-  late final TextEditingController _narrative = TextEditingController(text: widget.benefit?.narrative);
-
-  Timer? _debounce;
-  bool _searching = false;
-  List<({int id, String ref, String title})> _results = const [];
-  int? _workItemId;
-  String? _workItemLabel;
-
-  late String _type = widget.benefit?.type ?? 'cost_avoidance';
-  late String _confidence = widget.benefit?.confidence ?? 'medium';
-  late DateTime? _from = widget.benefit?.realisationFrom;
-  late String _status = widget.benefit?.status ?? 'planned';
-  bool _busy = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.benefit != null) {
-      _workItemId = widget.benefit!.workItemId;
-      _workItemLabel = dotJoin([widget.benefit!.ref, widget.benefit!.title]);
-    }
-  }
-
-  @override
-  void dispose() {
-    _debounce?.cancel();
-    _search.dispose();
-    _value.dispose();
-    _owner.dispose();
-    _narrative.dispose();
-    super.dispose();
-  }
-
-  void _onSearchChanged(String q) {
-    _debounce?.cancel();
-    if (q.trim().length < 2) {
-      setState(() => _results = const []);
-      return;
-    }
-    _debounce = Timer(const Duration(milliseconds: 300), () => _runSearch(q.trim()));
-  }
-
-  Future<void> _runSearch(String q) async {
-    setState(() => _searching = true);
-    try {
-      final r = await Api.post('work_items.php', 'list', {'q': q, 'limit': 8});
-      final items = <({int id, String ref, String title})>[];
-      for (final raw in (r['items'] as List? ?? const [])) {
-        if (raw is Map) {
-          items.add((id: asIntOr(raw['id'], 0), ref: asStrOr(raw['ref'], ''), title: asStrOr(raw['title'], '')));
-        }
-      }
-      if (mounted) {
-        setState(() {
-          _results = items;
-          _searching = false;
-        });
-      }
-    } on ApiException {
-      if (mounted) setState(() => _searching = false);
-    }
-  }
-
-  Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final d = await showDatePicker(
-      context: context,
-      initialDate: _from ?? now,
-      firstDate: DateTime(now.year - 2),
-      lastDate: DateTime(now.year + 5),
-    );
-    if (d != null) setState(() => _from = d);
-  }
-
-  String _iso(DateTime d) => '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-
-  Future<void> _save() async {
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await Api.post('benefits.php', 'save', {
-        if (widget.benefit != null) 'id': widget.benefit!.id,
-        if (_workItemId != null) 'work_item_id': _workItemId,
-        'type': _type,
-        'annual_value': double.tryParse(_value.text.trim().replaceAll(',', '')) ?? 0,
-        'confidence': _confidence,
-        if (_from != null) 'realisation_from': _iso(_from!),
-        'owner_name': _owner.text.trim(),
-        'narrative': _narrative.text.trim(),
-        'status': _status,
-      });
-      if (mounted) Navigator.of(context).pop(true);
-    } on ApiException catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.message;
-          _busy = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isNew = widget.benefit == null;
-    return AlertDialog(
-      title: Text(isNew ? 'Add benefit' : 'Edit benefit'),
-      content: SizedBox(
-        width: 520,
-        child: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            if (isNew) ...[
-              TmField(
-                label: 'Work item',
-                hint: 'Search by reference or title, for example “WI-1042” or “telemetry”.',
-                child: TextField(
-                  controller: _search,
-                  onChanged: _onSearchChanged,
-                  decoration: InputDecoration(
-                    hintText: 'Search work items',
-                    prefixIcon: const Icon(Icons.search_rounded, size: 18),
-                    suffixIcon: _searching ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))) : null,
-                  ),
-                ),
-              ),
-              if (_workItemLabel != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: Sp.sm),
-                  child: Row(children: [
-                    const Icon(Icons.check_circle_rounded, size: 16, color: DispatchColors.green),
-                    const SizedBox(width: 6),
-                    Expanded(child: Text(_workItemLabel!, style: context.text.bodyMedium)),
-                  ]),
-                ),
-              if (_results.isNotEmpty)
-                Container(
-                  margin: const EdgeInsets.only(top: Sp.sm),
-                  constraints: const BoxConstraints(maxHeight: 170),
-                  decoration: BoxDecoration(borderRadius: DispatchRadius.cardR, border: Border.all(color: context.borderColor)),
-                  child: ListView(
-                    shrinkWrap: true,
-                    children: [
-                      for (final it in _results)
-                        ListTile(
-                          dense: true,
-                          title: Text(dotJoin([it.ref, it.title]), style: context.text.bodyMedium),
-                          onTap: () => setState(() {
-                            _workItemId = it.id;
-                            _workItemLabel = dotJoin([it.ref, it.title]);
-                            _results = const [];
-                            _search.text = '';
-                          }),
-                        ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: Sp.md),
-            ],
-            Row(children: [
-              Expanded(
-                child: TmField(
-                  label: 'Type',
-                  child: DropdownButtonFormField<String>(
-                    initialValue: _type,
-                    items: [for (final t in widget.types) DropdownMenuItem(value: t.type, child: Text(t.label))],
-                    onChanged: (v) => setState(() => _type = v ?? _type),
-                  ),
-                ),
-              ),
-              const SizedBox(width: Sp.md),
-              Expanded(
-                child: TmField(
-                  label: 'Annual value (£)',
-                  child: TextField(controller: _value, keyboardType: TextInputType.number),
-                ),
-              ),
-            ]),
-            const SizedBox(height: Sp.md),
-            Row(children: [
-              Expanded(
-                child: TmField(
-                  label: 'Confidence',
-                  child: DropdownButtonFormField<String>(
-                    initialValue: _confidence,
-                    items: const [
-                      DropdownMenuItem(value: 'high', child: Text('High')),
-                      DropdownMenuItem(value: 'medium', child: Text('Medium')),
-                      DropdownMenuItem(value: 'low', child: Text('Low')),
-                    ],
-                    onChanged: (v) => setState(() => _confidence = v ?? _confidence),
-                  ),
-                ),
-              ),
-              const SizedBox(width: Sp.md),
-              Expanded(
-                child: TmField(
-                  label: 'Realisation from',
-                  child: SecondaryButton(_from == null ? 'Choose a date' : fmtShortDate(_from), icon: Icons.calendar_today_outlined, expand: true, onPressed: _pickDate),
-                ),
-              ),
-            ]),
-            const SizedBox(height: Sp.md),
-            Row(children: [
-              Expanded(child: TmField(label: 'Owner', child: TextField(controller: _owner))),
-              const SizedBox(width: Sp.md),
-              Expanded(
-                child: TmField(
-                  label: 'Status',
-                  child: DropdownButtonFormField<String>(
-                    initialValue: _status,
-                    items: const [
-                      DropdownMenuItem(value: 'planned', child: Text('Planned')),
-                      DropdownMenuItem(value: 'in_flight', child: Text('In flight')),
-                      DropdownMenuItem(value: 'realising', child: Text('Realising')),
-                      DropdownMenuItem(value: 'realised', child: Text('Realised')),
-                      DropdownMenuItem(value: 'at_risk', child: Text('At risk')),
-                    ],
-                    onChanged: (v) => setState(() => _status = v ?? _status),
-                  ),
-                ),
-              ),
-            ]),
-            const SizedBox(height: Sp.md),
-            TmField(label: 'Narrative', child: TextField(controller: _narrative, maxLines: 3)),
-            if (_error != null) TmInlineError(_error!),
-          ]),
-        ),
-      ),
-      actions: [
-        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-        PrimaryButton('Save', busy: _busy, onPressed: _workItemId == null ? null : _save),
-      ],
-    );
-  }
-}
 
 /// Record realised value for one quarter (benefit_owner and above).
 class _RealisationDialog extends StatefulWidget {
@@ -999,6 +765,11 @@ class _BenefitRow {
     this.narrative,
     this.status = 'planned',
     this.realisedValue,
+    this.isFinancial = true,
+    this.qualitativeScale,
+    this.qualitativeLabel,
+    this.proxyValue,
+    this.raw = const {},
   });
 
   final int id;
@@ -1017,7 +788,21 @@ class _BenefitRow {
   final String status;
   final double? realisedValue;
 
+  /// BEN-02: false for a benefit rated on the qualitative scale.
+  final bool isFinancial;
+  final int? qualitativeScale;
+  final String? qualitativeLabel;
+  final double? proxyValue;
+
+  /// The row as the API sent it, for the shared form and value label.
+  final Map<String, dynamic> raw;
+
   factory _BenefitRow.fromJson(Map<String, dynamic> j) => _BenefitRow(
+        raw: j,
+        isFinancial: asBool(j['is_financial'], fallback: true),
+        qualitativeScale: asInt(j['qualitative_scale']),
+        qualitativeLabel: asStr(j['qualitative_label']),
+        proxyValue: asDouble(j['proxy_value']),
         id: asIntOr(j['id'], 0),
         workItemId: asIntOr(j['work_item_id'], 0),
         ref: asStr(j['ref']),
@@ -1049,7 +834,13 @@ class _Totals2 {
     this.benefitCount = 0,
     this.addedThisQuarter = 0,
     this.targetPct = 0,
+    this.nonFinancialCount = 0,
+    this.qualitativeProxyTotal = 0,
   });
+
+  /// BEN-02: counted beside the money totals, never inside them.
+  final int nonFinancialCount;
+  final double qualitativeProxyTotal;
 
   final double inPlan;
   final double realisedYtd;
@@ -1075,6 +866,8 @@ class _Totals2 {
         benefitCount: asIntOr(j['benefit_count'], 0),
         addedThisQuarter: asDoubleOr(j['added_this_quarter'], 0),
         targetPct: asIntOr(j['target_pct'], 0),
+        nonFinancialCount: asIntOr(j['non_financial_count'], 0),
+        qualitativeProxyTotal: asDoubleOr(j['qualitative_proxy_total'], 0),
       );
 }
 
@@ -1146,6 +939,7 @@ class _Register {
     required this.byOwner,
     required this.types,
     required this.priorityNote,
+    this.scales = const [],
   });
 
   final List<_BenefitRow> benefits;
@@ -1156,6 +950,9 @@ class _Register {
   final List<_TypeOption> types;
   final String priorityNote;
 
+  /// The qualitative scale's labels (BEN-02), published by the server.
+  final List<QualitativeScale> scales;
+
   factory _Register.fromJson(Map<String, dynamic> j) => _Register(
         benefits: asList(j['benefits'], _BenefitRow.fromJson),
         totals: _Totals2.fromJson(asMap(j['totals'])),
@@ -1164,5 +961,6 @@ class _Register {
         byOwner: asList(j['by_owner'], _OwnerTotal.fromJson),
         types: asList(j['types'], _TypeOption.fromJson),
         priorityNote: asStrOr(j['priority_note'], ''),
+        scales: asList(j['qualitative_scales'], QualitativeScale.fromJson),
       );
 }

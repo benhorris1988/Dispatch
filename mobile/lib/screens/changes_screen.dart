@@ -12,6 +12,7 @@ import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/schedule_widgets.dart';
+import '../widgets/tm_scope_picker.dart';
 import '../widgets/widgets.dart';
 import 'parts/sch_change_card.dart';
 import 'parts/sch_models.dart';
@@ -226,12 +227,33 @@ class _ChangesScreenState extends State<ChangesScreen> {
     });
   }
 
+  /// SCH-13: what a manual propose is planned for. Whole workspace unless the
+  /// lead narrows it to a portfolio or a team.
+  PlanScope _scope = const PlanScope.workspace();
+  PlanScopeOptions _scopeOptions = PlanScopeOptions.empty;
+  bool _scopeOptionsRequested = false;
+
+  Future<void> _loadScopeOptions() async {
+    if (_scopeOptionsRequested) return;
+    _scopeOptionsRequested = true;
+    try {
+      final o = await PlanScopeOptions.load();
+      if (mounted) setState(() => _scopeOptions = o);
+    } on ApiException {
+      // The button still proposes for the whole workspace.
+    }
+  }
+
   Future<void> _proposeNow() async {
     await _run(() async {
-      final r = await Api.post('replan.php', 'propose', {'kind': 'manual'});
+      final scope = _scope;
+      final r = await Api.post('replan.php', 'propose', {'kind': 'manual', ...scope.params});
       if (!mounted) return;
       final n = asIntOr(r['changes'], 0);
-      _snack(n == 0 ? 'The replan found nothing worth changing' : '$n ${n == 1 ? 'change' : 'changes'} proposed');
+      final held = asIntOr(r['held'], 0);
+      _snack(n == 0
+          ? 'The replan found nothing worth changing for ${scope.phrase}'
+          : '$n ${n == 1 ? 'change' : 'changes'} proposed for ${scope.phrase}${held > 0 ? ', $held held by guardrails' : ''}');
       await _load(silent: true);
     });
   }
@@ -537,6 +559,7 @@ class _ChangesScreenState extends State<ChangesScreen> {
 
   Widget _emptyBody(ChangesData? data) {
     final session = context.read<Session>();
+    if (session.isDeliveryLead) _loadScopeOptions();
     return PageBody(
       onRefresh: () => _load(silent: true),
       child: Column(
@@ -551,7 +574,13 @@ class _ChangesScreenState extends State<ChangesScreen> {
               icon: Icons.task_alt,
               title: 'No proposal is waiting for review',
               message: 'The next one runs at 02:00, or propose a replan now.',
-              action: session.isDeliveryLead ? PrimaryButton('Propose a replan', icon: Icons.auto_awesome_outlined, busy: _busy, onPressed: _busy ? null : _proposeNow) : null,
+              action: session.isDeliveryLead
+                  ? Wrap(spacing: Sp.sm, runSpacing: Sp.sm, crossAxisAlignment: WrapCrossAlignment.center, alignment: WrapAlignment.center, children: [
+                      if (_scopeOptions.hasChoices)
+                        TmScopePicker(options: _scopeOptions, value: _scope, prefix: 'Plan', enabled: !_busy, onChanged: (s) => setState(() => _scope = s)),
+                      PrimaryButton('Propose a replan', icon: Icons.auto_awesome_outlined, busy: _busy, onPressed: _busy ? null : _proposeNow),
+                    ])
+                  : null,
             ),
           ),
           const SizedBox(height: Sp.lg),

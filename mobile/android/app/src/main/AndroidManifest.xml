@@ -1,0 +1,77 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The app is nothing without the API. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- MOB-05: fingerprint / face unlock through BiometricPrompt. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <!-- MOB-04: showing notifications needs an opt-in on Android 13+. The app only asks once a
+         push sender is configured; see lib/services/push_service.dart. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <application
+        android:label="Dispatch"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <!-- Hand incoming links to the Flutter router (go_router), not a native handler. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="true" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- MOB-04 deep links: dispatch://items/WI-1042, dispatch://changes/12, dispatch://my-week -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="dispatch"/>
+            </intent-filter>
+            <!-- https App Links to the hosted web build, e.g.
+                 https://<appLinkHost>/mobile/build/web/#/items/WI-1042
+                 appLinkHost is a manifest placeholder set in build.gradle.kts (default localhost;
+                 override with -P appLinkHost=...). autoVerify needs the host to serve
+                 /.well-known/assetlinks.json naming this package and its signing certificate;
+                 until it does, Android offers a chooser instead of opening the app directly. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="${appLinkHost}" android:pathPrefix="/mobile/build/web"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

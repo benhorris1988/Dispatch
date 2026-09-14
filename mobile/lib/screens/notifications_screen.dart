@@ -11,9 +11,10 @@ import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/widgets.dart';
+import 'parts/digest_view.dart';
 
 /// Notifications (NOT-01..03): newest first, with per-kind delivery
-/// preferences underneath.
+/// preferences underneath, and the weekly digest (NOT-04) composed on demand.
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
 
@@ -28,6 +29,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   List<_Pref> _prefs = const [];
   int _unread = 0;
   bool _showPrefs = true;
+
+  /// NOT-04: the digest is composed by the server when asked for, so it is
+  /// shown on request rather than fetched with every visit.
+  bool _showDigest = false;
 
   @override
   void initState() {
@@ -108,6 +113,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           subtitle: _loading ? null : (_unread == 0 ? 'Nothing unread' : '$_unread unread'),
           actions: [
             SecondaryButton(
+              _showDigest ? 'Hide digest' : 'Weekly digest',
+              icon: Icons.calendar_view_week_rounded,
+              onPressed: () => setState(() => _showDigest = !_showDigest),
+            ),
+            SecondaryButton(
               _showPrefs ? 'Hide preferences' : 'Preferences',
               icon: Icons.tune_rounded,
               onPressed: () => setState(() => _showPrefs = !_showPrefs),
@@ -121,6 +131,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         else if (_error != null)
           ErrorState(title: 'We could not load your notifications', message: _error, onRetry: _load)
         else ...[
+          if (_showDigest) ...[
+            const DigestSection(),
+            const SizedBox(height: Sp.lg),
+          ],
           Panel(
             padding: EdgeInsets.zero,
             child: _items.isEmpty
@@ -163,6 +177,7 @@ class _NotificationTile extends StatelessWidget {
         'estimate_requested' => Icons.straighten_rounded,
         'realisation_due' => Icons.savings_outlined,
         'watch_list' => Icons.visibility_outlined,
+        'digest' => Icons.calendar_view_week_rounded,
         _ => Icons.notifications_none_rounded,
       };
 
@@ -235,7 +250,7 @@ class _PrefsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Panel(
       title: 'Preferences',
-      subtitle: 'How each kind of notification reaches you',
+      subtitle: 'How each kind of notification reaches you. "Email digest" makes you a recipient of the weekly digest; the cadence says how often a kind is gathered into it.',
       child: prefs.isEmpty
           ? const EmptyState(icon: Icons.tune_rounded, title: 'No preferences', message: 'Defaults apply until you change something.', compact: true)
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [

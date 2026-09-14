@@ -1,6 +1,6 @@
 <?php
 // Engine entry points (SCH-*, STAB-*). Actions:
-//   propose{kind, scope_person_ids?, engine?} (delivery_lead)      preview{changes:[...]}       scenario_save{name, changes}
+//   propose{kind, scope_person_ids?, engine?, team_id?|portfolio_id?} (delivery_lead)   preview{changes:[...], team_id?|portfolio_id?}       scenario_save{name, changes, team_id?|portfolio_id?}
 //   scenarios   scenario_adopt{id} (delivery_lead)                 watch_list                   run_nightly (CLI or cron_key)
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/engine/proposals.php';
@@ -31,14 +31,14 @@ if ($action === 'propose') {
         $hasUrgent = scalar($conn, "SELECT COUNT(*) FROM dbo.replan_triggers WHERE workspace_id = ? AND processed_at IS NULL AND class = 'urgent'", [$wsId]);
         if (!$hasUrgent) fail('An urgent cycle needs scope_person_ids or an unprocessed urgent trigger', 400);
     }
-    $r = run_propose($conn, $wsId, ['kind' => $kind, 'scope_person_ids' => (array)param('scope_person_ids', []), 'engine' => $engine]);
+    $r = run_propose($conn, $wsId, ['kind' => $kind, 'scope_person_ids' => (array)param('scope_person_ids', []), 'engine' => $engine] + plan_scope_opts($conn, $wsId));
     ok($r);
 }
 
 if ($action === 'preview') {
     // What-if within 2 s: hypothetical edits applied in memory, nothing persisted (SCH-08, SCH-11 lite).
     $edits = (array)param('changes', []);
-    $r = preview_with_edits($conn, $wsId, $edits);
+    $r = preview_with_edits($conn, $wsId, $edits, plan_scope_opts($conn, $wsId));
     ok(['summary_before' => $r['summary_before'], 'summary_after' => $r['summary_after'], 'changes' => array_map('change_lite', $r['changes']), 'held' => array_map('change_lite', $r['held']),
         'improvement_pct' => $r['improvement_pct'], 'below_threshold' => $r['below_threshold'], 'unscheduled' => $r['unscheduled'], 'solver_stats' => $r['solver_stats'], 'edits_applied' => $r['edits_applied']]);
 }
@@ -47,9 +47,10 @@ if ($action === 'scenario_save') {
     require_role('team_lead');
     $name = trim((string)require_param('name'));
     $edits = (array)param('changes', []);
-    $r = preview_with_edits($conn, $wsId, $edits);
+    $scope = plan_scope_opts($conn, $wsId);
+    $r = preview_with_edits($conn, $wsId, $edits, $scope);
     $vid = store_plan_version($conn, $wsId, $r['model'], $r['candidate'], ['status' => 'scenario', 'engine' => 'heuristic', 'objective_score' => $r['objective_after']['score'], 'objective_terms' => $r['objective_after']['terms'],
-        'stability_cost_days' => $r['summary_after']['assignment_days_changed'], 'solver_stats' => array_merge($r['solver_stats'], ['edits' => $edits, 'summary_before' => $r['summary_before'], 'summary_after' => $r['summary_after'], 'improvement_pct' => $r['improvement_pct']]),
+        'stability_cost_days' => $r['summary_after']['assignment_days_changed'], 'solver_stats' => array_merge($r['solver_stats'], ['edits' => $edits, 'scope' => $scope ?: null, 'summary_before' => $r['summary_before'], 'summary_after' => $r['summary_after'], 'improvement_pct' => $r['improvement_pct']]),
         'scenario_name' => mb_substr($name, 0, 120), 'notes' => mb_substr(scenario_note($edits), 0, 400)]);
     audit($conn, $wsId, 'create', 'scenario', $vid, null, ['name' => $name, 'edits' => $edits], $name);
     ok(['scenario' => scenario_shape(row($conn, "SELECT * FROM dbo.plan_versions WHERE id = ?", [$vid]))]);
@@ -65,7 +66,7 @@ if ($action === 'scenario_adopt') {
     $stats = json_col($sc['solver_stats'], []);
     $edits = $stats['edits'] ?? [];
     // Re-run with the scenario's edits so the proposal reflects today's data, then persist it as a manual proposal.
-    $r = run_propose($conn, $wsId, ['kind' => 'manual', 'engine' => 'heuristic', 'model_overrides' => fn($m) => apply_edits_to_model($m, $edits)['model']]);
+    $r = run_propose($conn, $wsId, ['kind' => 'manual', 'engine' => 'heuristic', 'model_overrides' => fn($m) => apply_edits_to_model($m, $edits)['model']] + (array)($stats['scope'] ?? []));
     update($conn, 'proposals', ['carried_over_note' => mb_substr('Adopted from scenario "' . $sc['scenario_name'] . '"', 0, 300)], 'id = ?', [$r['proposal_id']]);
     audit($conn, $wsId, 'update', 'scenario', $id, ['status' => 'scenario'], ['adopted_as_proposal' => $r['proposal_id']], $sc['scenario_name']);
     ok($r);
@@ -254,9 +255,30 @@ function apply_edits_to_model(array $model, array $edits) {
     return ['model' => $model, 'applied' => $applied];
 }
 
-function preview_with_edits($conn, $wsId, array $edits) {
+/**
+ * SCH-13: optional planning scope from the request — `team_id` (one team's people and work) or
+ * `portfolio_id` (every team in the portfolio, so cross-team items can be planned across them).
+ * Both must belong to this workspace; neither given means the whole workspace, as before.
+ */
+function plan_scope_opts($conn, $wsId) {
+    $opts = [];
+    if (param('team_id') !== null && param('team_id') !== '') {
+        $tid = (int)param('team_id');
+        if (scalar($conn, "SELECT COUNT(*) FROM dbo.teams WHERE id = ? AND workspace_id = ?", [$tid, $wsId]) == 0) fail('Team not found', 404);
+        $opts['team_id'] = $tid;
+    }
+    if (param('portfolio_id') !== null && param('portfolio_id') !== '') {
+        if (isset($opts['team_id'])) fail('Give team_id or portfolio_id, not both', 400);
+        $pfid = (int)param('portfolio_id');
+        if (scalar($conn, "SELECT COUNT(*) FROM dbo.portfolios WHERE id = ? AND workspace_id = ?", [$pfid, $wsId]) == 0) fail('Portfolio not found', 404);
+        $opts['portfolio_id'] = $pfid;
+    }
+    return $opts;
+}
+
+function preview_with_edits($conn, $wsId, array $edits, array $scope = []) {
     $applied = [];
-    $r = run_propose($conn, $wsId, ['kind' => 'manual', 'engine' => 'heuristic', 'persist' => false, 'model_overrides' => function ($m) use ($edits, &$applied) { $x = apply_edits_to_model($m, $edits); $applied = $x['applied']; return $x['model']; }]);
+    $r = run_propose($conn, $wsId, ['kind' => 'manual', 'engine' => 'heuristic', 'persist' => false, 'model_overrides' => function ($m) use ($edits, &$applied) { $x = apply_edits_to_model($m, $edits); $applied = $x['applied']; return $x['model']; }] + $scope);
     $r['edits_applied'] = $applied;
     return $r;
 }
@@ -268,5 +290,5 @@ function scenario_note(array $edits) { $x = apply_edits_to_model(['items' => [],
 function scenario_shape(array $v) {
     $stats = json_col($v['solver_stats'], []);
     return ['id' => (int)$v['id'], 'name' => $v['scenario_name'], 'version_no' => (int)$v['version_no'], 'generated_at' => $v['generated_at'], 'objective_score' => $v['objective_score'] !== null ? (float)$v['objective_score'] : null,
-        'stability_cost_days' => $v['stability_cost_days'] !== null ? (float)$v['stability_cost_days'] : null, 'edits' => $stats['edits'] ?? [], 'summary_before' => $stats['summary_before'] ?? null, 'summary_after' => $stats['summary_after'] ?? null, 'improvement_pct' => $stats['improvement_pct'] ?? null, 'notes' => $v['notes']];
+        'stability_cost_days' => $v['stability_cost_days'] !== null ? (float)$v['stability_cost_days'] : null, 'edits' => $stats['edits'] ?? [], 'scope' => $stats['scope'] ?? null, 'summary_before' => $stats['summary_before'] ?? null, 'summary_after' => $stats['summary_after'] ?? null, 'improvement_pct' => $stats['improvement_pct'] ?? null, 'notes' => $v['notes']];
 }

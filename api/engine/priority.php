@@ -43,12 +43,22 @@ function compute_priority_scores($conn, $wsId, $itemIds = null) {
     $in = implode(',', array_keys($byId));
 
     // Confidence-scaled benefit value per item, plus dominant benefit type for the risk default.
-    $value = []; $rawValue = []; $riskFromType = [];
-    foreach (rows($conn, "SELECT work_item_id, type, annual_value, confidence FROM dbo.benefits WHERE work_item_id IN ($in)") as $b) {
+    // BEN-02: a non-financial benefit still weighs on the score. It contributes its proxy value
+    // when one was recorded, otherwise its qualitative scale × a per-point default
+    // (priority_weights.qualitativeValuePerPoint, 25000 when unset). Both halves are kept
+    // separately so the item page can show where the number came from.
+    $perPoint = qualitative_value_per_point($conn, $wsId);
+    $value = []; $rawValue = []; $riskFromType = []; $valueParts = [];
+    foreach (rows($conn, "SELECT work_item_id, type, annual_value, confidence, is_financial, qualitative_scale, proxy_value FROM dbo.benefits WHERE work_item_id IN ($in)") as $b) {
         $id = (int)$b['work_item_id'];
         $scale = (float)($confScale[strtolower($b['confidence'])] ?? 0.7);
-        $value[$id] = ($value[$id] ?? 0) + (float)$b['annual_value'] * $scale;
-        $rawValue[$id] = ($rawValue[$id] ?? 0) + (float)$b['annual_value'];
+        [$v, $source] = benefit_priority_value($b, $perPoint);
+        $value[$id] = ($value[$id] ?? 0) + $v * $scale;
+        $rawValue[$id] = ($rawValue[$id] ?? 0) + $v;
+        $parts = &$valueParts[$id]; $parts = $parts ?? ['financial' => 0.0, 'qualitative' => 0.0, 'proxy_used' => false, 'scale_default_used' => false, 'non_financial_count' => 0];
+        if ($source === 'financial') $parts['financial'] += $v * $scale;
+        else { $parts['qualitative'] += $v * $scale; $parts['non_financial_count']++; if ($source === 'proxy') $parts['proxy_used'] = true; else $parts['scale_default_used'] = true; }
+        unset($parts);
         $riskFromType[$id] = max($riskFromType[$id] ?? 0, $riskDefaults[$b['type']] ?? 0);
     }
     $p90 = dp_percentile(array_values($value), 90);
@@ -81,7 +91,12 @@ function compute_priority_scores($conn, $wsId, $itemIds = null) {
             // Value
             $v = $value[$id] ?? 0.0;
             $vn = $p90 > 0 ? min(1.0, $v / $p90) : 0.0;
-            $terms['value'] = ['input' => (int)round($v), 'input_raw' => (int)round($rawValue[$id] ?? 0), 'p90' => (int)round($p90), 'normalised' => round($vn, 2), 'weight' => $W['value'], 'contribution' => round($vn * $W['value'], 1)];
+            $vp = $valueParts[$id] ?? ['financial' => 0.0, 'qualitative' => 0.0, 'proxy_used' => false, 'scale_default_used' => false, 'non_financial_count' => 0];
+            $terms['value'] = ['input' => (int)round($v), 'input_raw' => (int)round($rawValue[$id] ?? 0), 'p90' => (int)round($p90), 'normalised' => round($vn, 2), 'weight' => $W['value'], 'contribution' => round($vn * $W['value'], 1),
+                // BEN-02 working: confidence-scaled financial and qualitative halves of `input`, and how the qualitative half was valued.
+                'financial' => (int)round($vp['financial']), 'qualitative' => (int)round($vp['qualitative']), 'proxy_used' => $vp['proxy_used'],
+                'qualitative_source' => $vp['non_financial_count'] === 0 ? null : ($vp['proxy_used'] && $vp['scale_default_used'] ? 'mixed' : ($vp['proxy_used'] ? 'proxy' : 'scale_default')),
+                'qualitative_value_per_point' => (int)round($perPoint), 'non_financial_count' => $vp['non_financial_count']];
             // Urgency: slack (working days) between the expected finish and needed_by.
             $effort = $it['likely'] !== null ? (float)$it['likely'] : ($it['planning_days'] !== null ? (float)$it['planning_days'] : ($it['custom_effort_days'] !== null ? (float)$it['custom_effort_days'] : 0));
             $remaining = $effort * (1 - min(100, max(0, (int)$it['progress_pct'])) / 100);

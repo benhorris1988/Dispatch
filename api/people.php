@@ -1,12 +1,45 @@
 <?php
 // Team, profiles, skills-per-person, availability, rota and capacity (TEAM-*).
 // Actions: list | get | save | deactivate | set_skill | endorse_skill | add_availability | delete_availability |
-//          set_rota | clear_rota | capacity | recompute_capacity
+//          set_rota | clear_rota | capacity | recompute_capacity | add_loan | end_loan | loans   (TEAM-09 loans)
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/auth_middleware.php';
 require_once __DIR__ . '/engine/capacity.php';
 $action = param('action', 'list');
 $today = today();
+/** Loans (TEAM-09) are reported up to the end of the modelled horizon, like everything else the planner sees. */
+function loan_horizon_end($conn, $wsId, $today) { return date('Y-m-d', strtotime(week_start($today) . ' +' . (int)current_policy($conn, $wsId)['model_horizon_weeks'] . ' weeks -1 day')); }
+/**
+ * Loan fields for one person: `loans` (every loan touching [$from,$to]), `on_loan_to` (the loan that
+ * moves them elsewhere today, or null) and `loaned_from` (set when this person is in the caller's team
+ * view only because of a loan into it — i.e. $teamIds given and their home team is not in it).
+ */
+function loan_fields(array $person, array $loans, $today, $teamIds = null) {
+    $mine = array_values(array_filter($loans, fn($l) => $l['person_id'] === $person['id']));
+    $active = null; foreach ($mine as $l) if ($l['from_date'] <= $today && $l['to_date'] >= $today) { $active = $l; break; }
+    $set = $teamIds === null ? null : array_flip(array_map('intval', $teamIds));
+    $loanedFrom = null;
+    if ($set !== null && ($person['team_id'] === null || !isset($set[$person['team_id']]))) {
+        foreach ($mine as $l) if (isset($set[$l['to_team_id']])) { $loanedFrom = $l; break; }
+    }
+    return ['loans' => $mine, 'on_loan_to' => $active, 'loaned_from' => $loanedFrom];
+}
+/**
+ * Who may lend or recall (TEAM-09): a delivery lead or admin always; a team lead when their own person
+ * sits in, or leads, either team. A team-lead account with no linked person has nothing to scope the
+ * check to and passes on role alone.
+ */
+function require_loan_authority($conn, $wsId, $fromTeamId, $toTeamId) {
+    global $personId;
+    if (has_role('delivery_lead')) return;
+    require_role('team_lead');
+    if ($personId === null) return;
+    $me = row($conn, "SELECT team_id FROM dbo.people WHERE id = ? AND workspace_id = ?", [$personId, $wsId]);
+    $myTeam = $me && $me['team_id'] !== null ? (int)$me['team_id'] : null;
+    $leads = array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND lead_person_id = ?", [$wsId, $personId]));
+    foreach ([(int)$fromTeamId, (int)$toTeamId] as $t) if ($t === $myTeam || in_array($t, $leads, true)) return;
+    fail('Forbidden: only a lead of the lending or borrowing team (or a delivery lead) can do that', 403);
+}
 const LEVEL_NAMES = ['None', 'Aware', 'Practitioner', 'Independent', 'Expert'];
 const NUMBER_WORDS = ['zero','one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve'];
 function number_word($n) { return $n >= 0 && $n < count(NUMBER_WORDS) ? NUMBER_WORDS[$n] : (string)$n; }
@@ -72,8 +105,21 @@ function availability_shape(array $a) {
 if ($action === 'list') {
     [$from, $to] = four_week_window($today);
     $includeInactive = (bool)param('include_inactive', false);
+    // TEAM-09: team_id / portfolio_id narrow the list to that scope's planning pool — home members plus
+    // anyone loaned into it (flagged with loaned_from). Load is then the scope's share of each person.
+    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'portfolio_id' => param('portfolio_id')]);
+    if ($scope === null) fail('Team or portfolio not found', 404);
+    $horizonEnd = loan_horizon_end($conn, $wsId, $today);
     $people = rows($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ?" . ($includeInactive ? '' : ' AND p.active = 1') . " ORDER BY p.name", [$wsId]);
-    $load = load_pct_map($conn, $wsId, $from, $to);
+    if ($scope['team_ids'] !== null) {
+        $pool = team_pool($conn, $wsId, $scope['team_ids'], $today, $horizonEnd);
+        $people = array_values(array_filter($people, fn($p) => isset($pool[(int)$p['id']])));
+        $tl = team_load($conn, $wsId, $scope['team_ids'], $from, $to);
+        $load = array_map(fn($x) => $x['load_pct'], $tl['people']);
+    } else {
+        $load = load_pct_map($conn, $wsId, $from, $to);
+    }
+    $loans = loans_in_window($conn, $wsId, $today, $horizonEnd);
     $skills = [];
     foreach (rows($conn, "SELECT ps.person_id, ps.skill_id, ps.proficiency FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id WHERE p.workspace_id = ?", [$wsId]) as $r)
         $skills[(int)$r['person_id']][] = ['skill_id' => (int)$r['skill_id'], 'proficiency' => (int)$r['proficiency']];
@@ -86,11 +132,13 @@ if ($action === 'list') {
         $s['load_pct'] = $load[$s['id']] ?? 0;
         $s['skills'] = $skills[$s['id']] ?? [];
         $s['on_rota_weeks'] = $rota[$s['id']] ?? [];
+        $s += loan_fields($s, $loans, $today, $scope['team_ids']);
         $out[] = $s;
     }
-    $teams = rows($conn, "SELECT id, name, lead_person_id FROM dbo.teams WHERE workspace_id = ? ORDER BY name", [$wsId]);
-    foreach ($teams as &$t) { $t['id'] = (int)$t['id']; $t['lead_person_id'] = $t['lead_person_id'] !== null ? (int)$t['lead_person_id'] : null; }
-    ok(['people' => $out, 'teams' => $teams, 'window' => ['from' => $from, 'to' => $to]]);
+    $teams = rows($conn, "SELECT t.id, t.name, t.lead_person_id, t.portfolio_id, pf.name AS portfolio_name FROM dbo.teams t LEFT JOIN dbo.portfolios pf ON pf.id = t.portfolio_id WHERE t.workspace_id = ? ORDER BY t.name", [$wsId]);
+    foreach ($teams as &$t) { $t['id'] = (int)$t['id']; $t['lead_person_id'] = $t['lead_person_id'] !== null ? (int)$t['lead_person_id'] : null; $t['portfolio_id'] = $t['portfolio_id'] !== null ? (int)$t['portfolio_id'] : null; }
+    unset($t);
+    ok(['people' => $out, 'teams' => $teams, 'window' => ['from' => $from, 'to' => $to], 'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids']))]);
 }
 
 if ($action === 'get') {
@@ -139,6 +187,8 @@ if ($action === 'get') {
     $skills = skills_for_person($conn, $wsId, $id);
     $hpd = (float)$ws['hours_per_day'];
     $patternNote = pattern_note($person['working_pattern'], $hpd);
+    // TEAM-09: loans in the same window as availability (90 days back to the end of the horizon), the one active today as on_loan_to.
+    $person += loan_fields($person, loans_in_window($conn, $wsId, date('Y-m-d', strtotime("$today -90 days")), loan_horizon_end($conn, $wsId, $today), [$id]), $today);
 
     ok(['person' => $person, 'skills' => $skills, 'assignments' => $assignments, 'availability' => $availability, 'rota' => $rota,
         'stats' => ['load_pct_4w' => $loadPct, 'load_note' => $loadNote, 'target_load_min' => $targetMin, 'target_load_max' => $targetMax,
@@ -162,10 +212,31 @@ if ($action === 'capacity') {
     $cap = capacity_map($conn, $wsId, $from, $to, $ids);
     $ws = workspace_row($conn, $wsId);
     $asg = assigned_hours_map($conn, $wsId, $from, $to, $cap, $ids, (float)$ws['hours_per_day']);
+    // TEAM-09: with team_id, each day also carries the share of it that belongs to that team (1 for a home
+    // member with no loan, the loan's share for a borrowed person, 0 when the person is entirely elsewhere).
+    $pool = null;
+    if (param('team_id') !== null && param('team_id') !== '') {
+        $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id')]);
+        if ($scope === null) fail('Team not found', 404);
+        $pool = team_pool($conn, $wsId, $scope['team_ids'], $from, $to);
+    }
     $days = [];
-    foreach ($cap as $p => $ds) foreach ($ds as $day => $c) $days[] = ['person_id' => $p, 'day' => $day, 'available_hours' => $c['available'], 'reserve_hours' => $c['reserve'], 'assigned_hours' => round($asg[$p][$day] ?? 0, 2)];
+    foreach ($cap as $p => $ds) foreach ($ds as $day => $c) {
+        $row = ['person_id' => $p, 'day' => $day, 'available_hours' => $c['available'], 'reserve_hours' => $c['reserve'], 'assigned_hours' => round($asg[$p][$day] ?? 0, 2)];
+        if ($pool !== null) { $row['team_share'] = isset($pool[$p]) ? team_share_for($pool[$p], $day) : 0.0; $row['team_available_hours'] = round($c['available'] * $row['team_share'], 2); }
+        $days[] = $row;
+    }
     usort($days, fn($a, $b) => [$a['person_id'], $a['day']] <=> [$b['person_id'], $b['day']]);
     ok(['days' => $days]);
+}
+
+if ($action === 'loans') {
+    // TEAM-09: loans touching [from, to] (default: today to the end of the modelled horizon), for one person, one team, or the workspace.
+    $from = param('from', $today); $to = param('to', loan_horizon_end($conn, $wsId, $today));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) fail('Dates must be YYYY-MM-DD', 400);
+    $pid = param('person_id') !== null && param('person_id') !== '' ? [(int)param('person_id')] : null;
+    $tid = param('team_id') !== null && param('team_id') !== '' ? [(int)param('team_id')] : null;
+    ok(['loans' => loans_in_window($conn, $wsId, $from, $to, $pid, $tid), 'window' => ['from' => $from, 'to' => $to]]);
 }
 
 // ---- mutations ---------------------------------------------------------------------
@@ -331,6 +402,76 @@ if ($action === 'set_rota' || $action === 'clear_rota') {
     $written = derive_capacity($conn, $wsId, $wk, date('Y-m-d', strtotime("$wk +6 days")), [$pid]);
     $rota = array_map(fn($r) => substr($r['week_start'], 0, 10), rows($conn, "SELECT week_start FROM dbo.incident_rota WHERE workspace_id = ? AND person_id = ? AND week_start >= ? ORDER BY week_start", [$wsId, $pid, week_start($today)]));
     ok(['rota' => $rota, 'days_written' => $written]);
+}
+
+// ---- TEAM-09 loans -----------------------------------------------------------------------------------
+// A loan moves a share of a person's time to another team for a dated period. Capacity rows are not
+// touched (see capacity.php); what changes is who the hours belong to, so both teams' plans may move.
+// That is a `leave`-class trigger, urgent when it starts inside the freeze horizon — the same rule as
+// add_availability — because inside the horizon the borrowing team cannot wait for the nightly cycle.
+if ($action === 'add_loan') {
+    $pid = (int)require_param('person_id'); $toTeam = (int)require_param('to_team_id');
+    $p = person_row($conn, $wsId, $pid);
+    if (!(int)$p['active']) fail('An inactive person cannot be lent', 409);
+    if ($p['team_id'] === null) fail('This person has no home team, so there is nothing to lend them from', 409);
+    $fromTeam = (int)$p['team_id'];
+    if ($fromTeam === $toTeam) fail('to_team_id is already this person\'s home team', 400);
+    $to = row($conn, "SELECT id, name FROM dbo.teams WHERE id = ? AND workspace_id = ?", [$toTeam, $wsId]);
+    if (!$to) fail('Team not found', 404);
+    require_loan_authority($conn, $wsId, $fromTeam, $toTeam);
+    $from = require_param('from_date'); $until = require_param('to_date');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $until)) fail('Dates must be YYYY-MM-DD', 400);
+    if ($until < $from) fail('to_date must not be before from_date', 400);
+    $pct = param('allocation_pct') !== null && param('allocation_pct') !== '' ? (int)param('allocation_pct') : 100;
+    if ($pct < 1 || $pct > 100) fail('allocation_pct must be between 1 and 100', 400);
+    $overlap = row($conn, "SELECT l.*, tt.name AS to_team_name, tf.name AS from_team_name FROM dbo.person_loans l JOIN dbo.teams tt ON tt.id = l.to_team_id JOIN dbo.teams tf ON tf.id = l.from_team_id
+                           WHERE l.workspace_id = ? AND l.person_id = ? AND l.from_date <= ? AND l.to_date >= ? ORDER BY l.from_date", [$wsId, $pid, $until, $from]);
+    if ($overlap) fail("{$p['name']} is already on loan to {$overlap['to_team_name']} " . fmt_range(substr($overlap['from_date'], 0, 10), substr($overlap['to_date'], 0, 10)) . '; end that loan first', 409, ['overlaps' => loan_shape($overlap)]);
+    $reason = param('reason') !== null ? mb_substr(trim((string)param('reason')), 0, 300) : null;
+    $id = insert($conn, 'person_loans', ['workspace_id' => $wsId, 'person_id' => $pid, 'from_team_id' => $fromTeam, 'to_team_id' => $toTeam,
+        'from_date' => $from, 'to_date' => $until, 'allocation_pct' => $pct, 'reason' => $reason !== '' ? $reason : null, 'created_by' => $userId]);
+    $loan = loans_in_window($conn, $wsId, $from, $until, [$pid])[0] ?? null;
+    $label = "{$p['name']} lent to {$to['name']} " . fmt_range($from, $until) . ($pct < 100 ? " ({$pct}%)" : '');
+    audit($conn, $wsId, 'create', 'person_loan', $id, null, $loan, $label, $reason);
+    $policy = current_policy($conn, $wsId);
+    $freezeEnd = freeze_horizon_end($conn, $wsId, $policy);
+    $class = $from <= $freezeEnd ? 'urgent' : 'batched';
+    $triggerId = add_trigger($conn, $wsId, 'leave', $class, $label . " · capacity moves from {$p['team_name']} to {$to['name']}", 'person_loan', $id, [$pid]);
+    $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
+    ok(['loan' => $loan, 'trigger' => ['id' => $triggerId, 'class' => $class], 'freeze_horizon_end' => $freezeEnd] + ($replan ? ['urgent_replan' => $replan] : []));
+}
+
+if ($action === 'end_loan') {
+    $id = (int)require_param('id');
+    $l = row($conn, "SELECT l.*, tt.name AS to_team_name, tf.name AS from_team_name, p.name AS person_name FROM dbo.person_loans l JOIN dbo.teams tt ON tt.id = l.to_team_id JOIN dbo.teams tf ON tf.id = l.from_team_id JOIN dbo.people p ON p.id = l.person_id WHERE l.id = ? AND l.workspace_id = ?", [$id, $wsId]);
+    if (!$l) fail('Loan not found', 404);
+    require_loan_authority($conn, $wsId, (int)$l['from_team_id'], (int)$l['to_team_id']);
+    $before = loan_shape($l);
+    $pid = (int)$l['person_id'];
+    $policy = current_policy($conn, $wsId);
+    $freezeEnd = freeze_horizon_end($conn, $wsId, $policy);
+    $until = param('to_date');
+    if ($until !== null && $until !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $until)) fail('to_date must be YYYY-MM-DD', 400);
+    if ($before['from_date'] > $today && ($until === null || $until === '' || $until < $before['from_date'])) {
+        // Not started yet: nothing happened, so there is no history to keep. Cancel it outright.
+        q($conn, "DELETE FROM dbo.person_loans WHERE id = ? AND workspace_id = ?", [$id, $wsId]);
+        audit($conn, $wsId, 'delete', 'person_loan', $id, $before, null, "{$l['person_name']} · loan to {$l['to_team_name']} cancelled before it started");
+        $class = $before['from_date'] <= $freezeEnd ? 'urgent' : 'batched';
+        $triggerId = add_trigger($conn, $wsId, 'leave', $class, "{$l['person_name']}'s loan to {$l['to_team_name']} cancelled · capacity stays with {$l['from_team_name']}", 'person_loan', $id, [$pid]);
+        $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
+        ok(['loan' => null, 'cancelled' => true, 'trigger' => ['id' => $triggerId, 'class' => $class]] + ($replan ? ['urgent_replan' => $replan] : []));
+    }
+    if ($until === null || $until === '') $until = max($before['from_date'], date('Y-m-d', strtotime("$today -1 day")));   // "ends now": yesterday was the last day
+    if ($until < $before['from_date']) fail('to_date must not be before from_date', 400);
+    if ($until > $before['to_date']) fail('end_loan can only shorten a loan; make a new loan to extend it', 400);
+    update($conn, 'person_loans', ['to_date' => $until], 'id = ? AND workspace_id = ?', [$id, $wsId]);
+    $after = loans_in_window($conn, $wsId, $before['from_date'], $until, [$pid])[0] ?? null;
+    audit($conn, $wsId, 'update', 'person_loan', $id, $before, $after, "{$l['person_name']} · loan to {$l['to_team_name']} now ends " . fmt_day($until), param('reason') !== null ? mb_substr((string)param('reason'), 0, 300) : null);
+    // The days handed back run from the new end to the old one; urgent when any of them is inside the horizon.
+    $class = $until <= $freezeEnd ? 'urgent' : 'batched';
+    $triggerId = add_trigger($conn, $wsId, 'leave', $class, "{$l['person_name']}'s loan to {$l['to_team_name']} ends " . fmt_day($until) . " (was " . fmt_day($before['to_date']) . ") · capacity returns to {$l['from_team_name']}", 'person_loan', $id, [$pid]);
+    $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
+    ok(['loan' => $after, 'trigger' => ['id' => $triggerId, 'class' => $class]] + ($replan ? ['urgent_replan' => $replan] : []));
 }
 
 if ($action === 'recompute_capacity') {

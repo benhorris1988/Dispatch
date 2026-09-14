@@ -11,8 +11,11 @@ import '../shell/breaks.dart';
 import '../shell/nav.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
+import '../widgets/benefit_widgets.dart';
 import '../widgets/widgets.dart';
 import '../widgets/work_widgets.dart';
+import 'parts/benefit_form_dialog.dart';
+import 'parts/external_link_panel.dart';
 import 'parts/wc_dependency_dialog.dart';
 
 /// Work item (web-03 / mobile-work-item): what it is, who can do it, what it
@@ -599,6 +602,9 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     final right = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       _planPanel(row, plan),
       const SizedBox(height: Sp.lg),
+      // REQ-05: the ticket or page this came from, with the server's honest badge.
+      ExternalLinkPanel(item: _item ?? const {}, canEdit: context.watch<Session>().isTeamLead, onChanged: _load),
+      const SizedBox(height: Sp.lg),
       _romPanel(),
       const SizedBox(height: Sp.lg),
       _benefitPanel(),
@@ -921,7 +927,15 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
       decoration: BoxDecoration(color: context.scheme.surfaceContainerHighest, borderRadius: DispatchRadius.cardR),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         for (final e in shown)
-          if (terms[e.key] is Map) _priorityTermRow(e.value, asMap(terms[e.key])),
+          if (terms[e.key] is Map) ...[
+            _priorityTermRow(e.value, asMap(terms[e.key])),
+            // BEN-02: how the Value term was made up, financial and qualitative.
+            if (e.key == 'value' && _valueWorking(asMap(terms[e.key])) != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 120, bottom: 4),
+                child: Text(_valueWorking(asMap(terms[e.key]))!, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+              ),
+          ],
         // The API has not sent a severity term yet: say what drives the score
         // rather than leave the expander empty.
         if (hidePlanned && severity.isEmpty)
@@ -977,6 +991,24 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
         ),
       ]),
     );
+  }
+
+  /// "Financial £147k · qualitative ≈ £50k (proxy)" from `priority_terms.value`
+  /// (BEN-02). Null when the term carries no working (an older score, or an
+  /// interrupt item), so nothing is invented.
+  static String? _valueWorking(Map<String, dynamic> value) {
+    if (!value.containsKey('financial') && !value.containsKey('qualitative')) return null;
+    final financial = asDoubleOr(value['financial'], 0);
+    final qualitative = asDoubleOr(value['qualitative'], 0);
+    final count = asIntOr(value['non_financial_count'], 0);
+    if (qualitative <= 0 && count == 0) return 'Financial ${fmtMoneyK(financial)}';
+    final source = switch (asStr(value['qualitative_source'])) {
+      'proxy' => 'proxy',
+      'scale_default' => 'scale × ${fmtMoneyK(asDoubleOr(value['qualitative_value_per_point'], 0))} per point',
+      'mixed' => 'proxy and scale',
+      _ => asBool(value['proxy_used']) ? 'proxy' : null,
+    };
+    return 'Financial ${fmtMoneyK(financial)} · qualitative ≈ ${fmtMoneyK(qualitative)}${source == null ? '' : ' ($source)'}';
   }
 
   Widget _priorityTermRow(String label, Map<String, dynamic> term) {
@@ -1077,6 +1109,16 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     final confidence = asStr(_item?['benefit_confidence']);
     final payback = asDouble(_item?['payback_months']);
     final realisedFrom = asDate(_item?['benefit_realised_from']);
+    final canEdit = context.read<Session>().can('benefit_owner');
+
+    // BEN-02: the money figure is financial-only; non-financial benefits are
+    // counted beside it with the qualitative proxy the priority score used.
+    // Same sum as the register's `qualitative_proxy_total`: proxy_value, else
+    // scale × the policy's per-point value (which the priority term reports).
+    final perPoint = asDoubleOr(asMap(asMap(_item?['priority_terms'])['value'])['qualitative_value_per_point'], 0);
+    final nonFinancialRows = benefits.where((b) => !asBool(b['is_financial'], fallback: true)).toList();
+    final nonFinancial = nonFinancialRows.length;
+    final proxyTotal = nonFinancialRows.fold<double>(0, (sum, b) => sum + (asDouble(b['proxy_value']) ?? asIntOr(b['qualitative_scale'], 0) * perPoint));
 
     return Panel(
       title: 'Business benefit',
@@ -1087,7 +1129,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
               title: 'No benefit case yet',
               message: 'Benefit value feeds the priority score, scaled by its confidence.',
               compact: true,
-              action: context.read<Session>().can('benefit_owner') ? PrimaryButton('Add a benefit', onPressed: _addBenefit) : null,
+              action: canEdit ? PrimaryButton('Add a benefit', onPressed: _addBenefit) : null,
             )
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
@@ -1095,6 +1137,10 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                 Expanded(child: _figure('Payback', payback == null ? '—' : payback.toStringAsFixed(1), unit: 'months')),
                 Expanded(child: _figure('Realised from', realisedFrom == null ? '—' : _quarter(realisedFrom))),
               ]),
+              if (nonFinancial > 0) ...[
+                const SizedBox(height: Sp.xs),
+                Text(nonFinancialNote(nonFinancial, proxyTotal), style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+              ],
               const SizedBox(height: Sp.lg),
               for (final b in benefits)
                 Padding(
@@ -1110,10 +1156,22 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
                         style: context.text.bodyMedium,
                       ),
                     ),
-                    Text(fmtMoneyK(asIntOr(b['annual_value'], 0)), style: DispatchTheme.numeric(size: 13.5)),
+                    const SizedBox(width: Sp.sm),
+                    // Flexible: a scale label plus its proxy can be wider than a
+                    // money figure, and must give way to the title on a phone.
+                    Flexible(child: BenefitValueLabel.fromJson(b)),
+                    if (canEdit)
+                      IconButton(
+                        tooltip: 'Edit this benefit',
+                        icon: const Icon(Icons.edit_outlined, size: 16),
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        onPressed: () => _editBenefit(b),
+                      ),
                   ]),
                 ),
-              if (context.read<Session>().can('benefit_owner')) ...[
+              if (canEdit) ...[
                 const SizedBox(height: Sp.md),
                 SecondaryButton('Add a benefit', icon: Icons.add_rounded, onPressed: _addBenefit),
               ],
@@ -1134,88 +1192,20 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     ]);
   }
 
+  /// BEN-01/BEN-02: the shared form, fixed to this item. Types and scale
+  /// labels come from `benefits.php list`, so nothing here is hard-coded.
   Future<void> _addBenefit() async {
-    final value = TextEditingController();
-    final narrative = TextEditingController();
-    var type = 'cost_avoidance';
-    var confidence = 'medium';
-    DateTime realisationFrom = DateTime.now().add(const Duration(days: 90));
-    const types = {
-      'cost_avoidance': 'Cost avoidance',
-      'productivity': 'Productivity',
-      'revenue': 'Revenue',
-      'risk_reduction': 'Risk reduction',
-      'compliance': 'Compliance',
-      'other': 'Other',
-    };
+    final saved = await showBenefitFormDialog(context, workItemId: _row.id, workItemLabel: dotJoin([_row.ref, _row.title]));
+    if (!saved) return;
+    _snack('Benefit saved.');
+    await _load();
+  }
 
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setLocal) => AlertDialog(
-          title: const Text('Add a benefit'),
-          content: SizedBox(
-            width: 460,
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              DropdownButtonFormField<String>(
-                initialValue: type,
-                decoration: const InputDecoration(labelText: 'Benefit type'),
-                items: [for (final e in types.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
-                onChanged: (v) => setLocal(() => type = v ?? 'other'),
-              ),
-              const SizedBox(height: Sp.md),
-              TextField(controller: value, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Annual value, £')),
-              const SizedBox(height: Sp.md),
-              DropdownButtonFormField<String>(
-                initialValue: confidence,
-                decoration: const InputDecoration(labelText: 'Confidence'),
-                items: const [
-                  DropdownMenuItem(value: 'low', child: Text('Low')),
-                  DropdownMenuItem(value: 'medium', child: Text('Medium')),
-                  DropdownMenuItem(value: 'high', child: Text('High')),
-                ],
-                onChanged: (v) => setLocal(() => confidence = v ?? 'medium'),
-              ),
-              const SizedBox(height: Sp.md),
-              TextField(controller: narrative, decoration: const InputDecoration(labelText: 'What changes (optional)')),
-              const SizedBox(height: Sp.md),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.event_rounded, size: 18),
-                label: Align(alignment: Alignment.centerLeft, child: Text('Realised from ${fmtDate(realisationFrom)}')),
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: dialogContext,
-                    initialDate: realisationFrom,
-                    firstDate: DateTime(DateTime.now().year - 1),
-                    lastDate: DateTime(DateTime.now().year + 5),
-                  );
-                  if (picked != null) setLocal(() => realisationFrom = picked);
-                },
-              ),
-            ]),
-          ),
-          actions: [
-            SecondaryButton('Cancel', onPressed: () => Navigator.of(dialogContext).pop(false)),
-            PrimaryButton('Save benefit', onPressed: () => Navigator.of(dialogContext).pop(true)),
-          ],
-        ),
-      ),
-    );
-    if (ok != true) return;
-    try {
-      await Api.post('benefits.php', 'save', {
-        'work_item_id': _row.id,
-        'type': type,
-        'annual_value': double.tryParse(value.text.trim().replaceAll(',', '')) ?? 0,
-        'confidence': confidence,
-        'realisation_from': _iso(realisationFrom),
-        if (narrative.text.trim().isNotEmpty) 'narrative': narrative.text.trim(),
-      });
-      _snack('Benefit saved.');
-      await _load();
-    } on ApiException catch (e) {
-      _snack(e.message);
-    }
+  Future<void> _editBenefit(Map<String, dynamic> raw) async {
+    final saved = await showBenefitFormDialog(context, workItemId: _row.id, workItemLabel: dotJoin([_row.ref, _row.title]), benefit: Benefit.fromJson(raw));
+    if (!saved) return;
+    _snack('Benefit saved.');
+    await _load();
   }
 
   // ─── Other tabs ─────────────────────────────────────────────────────────

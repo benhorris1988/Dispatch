@@ -24,6 +24,7 @@ import 'package:dispatch_app/screens/overview_screen.dart';
 import 'package:dispatch_app/screens/person_screen.dart';
 import 'package:dispatch_app/screens/pipeline_screen.dart';
 import 'package:dispatch_app/screens/plan_versions_screen.dart';
+import 'package:dispatch_app/screens/portfolio_screen.dart';
 import 'package:dispatch_app/screens/reports_screen.dart';
 import 'package:dispatch_app/screens/scenarios_screen.dart';
 import 'package:dispatch_app/screens/schedule_screen.dart';
@@ -128,6 +129,7 @@ Future<void> main() async {
     'Changes': const ChangesScreen(),
     'Team & skills': const TeamSkillsScreen(),
     'Person': const PersonScreen(id: '1'),
+    'Portfolio': const PortfolioScreen(id: '1'),
     'Work item': const WorkItemScreen(ref: 'WI-1042'),
     'Estimate': const EstimateScreen(ref: 'WI-1042'),
     'Estimates': const EstimatesScreen(),
