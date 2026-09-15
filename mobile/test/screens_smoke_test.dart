@@ -24,14 +24,14 @@ import 'package:dispatch_app/screens/overview_screen.dart';
 import 'package:dispatch_app/screens/person_screen.dart';
 import 'package:dispatch_app/screens/pipeline_screen.dart';
 import 'package:dispatch_app/screens/plan_versions_screen.dart';
-import 'package:dispatch_app/screens/portfolio_screen.dart';
+import 'package:dispatch_app/screens/org_chart_screen.dart';
+import 'package:dispatch_app/screens/role_family_screen.dart';
 import 'package:dispatch_app/screens/reports_screen.dart';
 import 'package:dispatch_app/screens/scenarios_screen.dart';
 import 'package:dispatch_app/screens/schedule_screen.dart';
 import 'package:dispatch_app/screens/settings_screen.dart';
 import 'package:dispatch_app/screens/team_skills_screen.dart';
 import 'package:dispatch_app/screens/work_item_screen.dart';
-import 'package:dispatch_app/services/api.dart';
 import 'package:dispatch_app/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -56,13 +56,16 @@ Future<void> main() async {
   await initializeDateFormatting('en_GB');
 
   setUpAll(() async {
-    final devUsers = await Api.listDevUsers().timeout(const Duration(seconds: 20));
-    expect(devUsers, isNotEmpty, reason: 'the API returned no dev users — is the demo seeded?');
-    final lead = devUsers.firstWhere((u) => u.role == 'delivery_lead',
-        orElse: () => throw StateError('no delivery_lead dev user'));
+    // Sign-in is Google (ADM-01), which a test cannot perform, so the suite is handed a
+    // token minted straight from the database instead:
+    //   flutter test test/screens_smoke_test.dart --dart-define=TEST_TOKEN=<token>
+    //   (C:\\xampp\\php\\php.exe tests\\mint_token.php delivery_lead prints one)
+    const token = String.fromEnvironment('TEST_TOKEN');
+    expect(token, isNotEmpty, reason: 'run with --dart-define=TEST_TOKEN=<jwt>, minted by: php tests/mint_token.php delivery_lead');
     _session = Session();
-    await _session.signInDev(lead.id);
-    expect(_session.signedIn, isTrue, reason: 'dev sign-in failed');
+    await _session.signInWithToken(token).timeout(const Duration(seconds: 20));
+    expect(_session.signedIn, isTrue, reason: 'the token was refused — stale, or the demo reseeded since?');
+    expect(_session.isDeliveryLead, isTrue, reason: 'the TEST_TOKEN account must be a delivery lead or an administrator');
     _config = WorkspaceConfig();
     await _config.load();
     expect(_config.workTypes, isNotEmpty, reason: 'workspace config did not load');
@@ -129,7 +132,8 @@ Future<void> main() async {
     'Changes': const ChangesScreen(),
     'Team & skills': const TeamSkillsScreen(),
     'Person': const PersonScreen(id: '1'),
-    'Portfolio': const PortfolioScreen(id: '1'),
+    'Organisation': const OrgChartScreen(),
+    'Role family': const RoleFamilyScreen(id: '1'),
     'Work item': const WorkItemScreen(ref: 'WI-1042'),
     'Estimate': const EstimateScreen(ref: 'WI-1042'),
     'Estimates': const EstimatesScreen(),
@@ -154,6 +158,32 @@ Future<void> main() async {
     }
   }
 
+
+  // Settings hides eleven sections behind a side nav, and the screens map only
+  // ever draws the first one. A layout fault in a later section is a blank panel
+  // that every check above is perfectly happy with — which is exactly how one got
+  // through. Open each section and look at it.
+  const settingsSections = [
+    'General', 'Work types', 'Size classes', 'Day rates', 'Scheduling & stability',
+    'Priority & objective', 'Skills catalogue', 'Teams & roles', 'Integrations',
+    'Notifications', 'Audit log',
+  ];
+  for (final section in settingsSections) {
+    testWidgets('Settings: $section', (tester) async {
+      await render(tester, const SettingsScreen(), _sizes['desktop']!);
+      final tab = find.text(section);
+      expect(tab, findsWidgets, reason: 'no "$section" entry in the Settings nav');
+      await tester.runAsync(() async {
+        await tester.tap(tab.first, warnIfMissed: false);
+        for (var i = 0; i < 20; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await tester.pump(const Duration(milliseconds: 120));
+        }
+      });
+      expect(tester.takeException(), isNull, reason: 'Settings → $section threw');
+      expectLoaded(tester, 'Settings → $section');
+    });
+  }
 
   testWidgets('screens render in dark theme', (tester) async {
     for (final name in ['Overview', 'Schedule', 'Benefits']) {

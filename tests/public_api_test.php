@@ -2,6 +2,8 @@
 // Public REST API, outbound webhooks and the iCalendar feed (INT-07, VIEW-09, INT-04 publish half).
 //   php tests/public_api_test.php [base=http://localhost:8090]
 // Needs the local server and a seeded demo DB. Starts its own webhook receiver on 8099.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 $BASE = rtrim($argv[1] ?? 'http://localhost:8090', '/');
@@ -55,17 +57,11 @@ function api($endpoint, array $body, $bearer = null) {
 
 // ---------------------------------------------------------------------------------------
 section('Sign in');
-[, $users] = api('auth', ['action' => 'list_dev_users']);
-$lead = null; $admin = null;
-foreach ($users['users'] ?? [] as $u) {
-    if ($u['role'] === 'delivery_lead' && $lead === null) $lead = $u;
-    if ($u['role'] === 'admin' && $admin === null) $admin = $u;
-}
+$lead = user_for('delivery_lead');
+$admin = user_for('admin');
 check($lead !== null && $admin !== null, 'a delivery lead and an admin exist');
-[, $l] = api('auth', ['action' => 'dev_login', 'user_id' => $lead['id']]);
-$token = $l['token'] ?? null;
-[, $a] = api('auth', ['action' => 'dev_login', 'user_id' => $admin['id']]);
-$adminToken = $a['token'] ?? null;
+$token = token_for('delivery_lead');
+$adminToken = token_for('admin');
 check(!empty($token) && !empty($adminToken), 'both tokens issued');
 
 // ---------------------------------------------------------------------------------------

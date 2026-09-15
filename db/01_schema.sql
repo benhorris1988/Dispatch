@@ -750,34 +750,18 @@ CREATE TABLE dbo.push_deliveries (
 GO
 
 -- ---------------------------------------------------------------------------------------
--- TEAM-09 / SCH-13: portfolios and loans.
---
--- A portfolio is a named grouping of teams for cross-team views and for planning across
--- teams (SCH-13). A team belongs to at most one portfolio, so the relationship is a nullable
--- column on dbo.teams rather than a join table.
+-- TEAM-09 / SCH-13: loans.
 --
 -- A loan lends a person to another team for a dated period at a share of their time. It is
 -- deliberately NOT a team dimension on dbo.capacity_days: a loan does not change how many
 -- hours the person has, only which team those hours belong to, so the split is resolved
--- at read time (capacity.php team_share_map) from this table. Loans that happened are
+-- at read time (capacity.php team_share_for) from this table. Loans that happened are
 -- history: end_loan shortens to_date rather than deleting the row.
+--
+-- Cross-team structure lives in the ORG block at the foot of this file: teams nest under
+-- teams (ORG-01) and a role family is a discipline people belong to across teams (ORG-02,
+-- renamed from portfolios, which used to group whole teams).
 -- ---------------------------------------------------------------------------------------
-IF OBJECT_ID('dbo.portfolios') IS NULL
-CREATE TABLE dbo.portfolios (
-  id INT IDENTITY(1,1) PRIMARY KEY,
-  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
-  name NVARCHAR(80) NOT NULL,
-  description NVARCHAR(300) NULL,
-  lead_person_id INT NULL REFERENCES dbo.people(id),
-  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-  CONSTRAINT uq_portfolio_name UNIQUE (workspace_id, name)
-);
-
-IF COL_LENGTH('dbo.teams', 'portfolio_id') IS NULL
-  ALTER TABLE dbo.teams ADD portfolio_id INT NULL;
-IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_teams_portfolio')
-  ALTER TABLE dbo.teams ADD CONSTRAINT fk_teams_portfolio FOREIGN KEY (portfolio_id) REFERENCES dbo.portfolios(id);
-
 IF OBJECT_ID('dbo.person_loans') IS NULL
 CREATE TABLE dbo.person_loans (
   id INT IDENTITY(1,1) PRIMARY KEY,
@@ -796,4 +780,86 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_person_loans_person')
   CREATE INDEX ix_person_loans_person ON dbo.person_loans(workspace_id, person_id, from_date, to_date);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_person_loans_team')
   CREATE INDEX ix_person_loans_team ON dbo.person_loans(workspace_id, to_team_id, from_date, to_date);
+GO
+
+-- ---------------------------------------------------------------------------------------
+-- ORG-01..05: team hierarchy, reporting lines, role families, restricted teams.
+--
+-- Teams nest under teams (parent_team_id). The planning scope of a team is the team plus
+-- every descendant, resolved in api/engine/org_lib.php (team_closure) rather than in SQL,
+-- so one query per request answers every ancestor/descendant question.
+--
+-- A role family is a discipline a PERSON belongs to (Data engineering, Analytics), not a
+-- group of teams: it spans the tree. It replaces dbo.portfolios, which grouped whole teams;
+-- the rename below migrates each team's portfolio onto that team's people, then drops the
+-- column. Everything is visible to everyone unless a team is explicitly restricted with a
+-- stated reason (ORG-04) — a business reason about the work, never personal data (ADM-05).
+-- ---------------------------------------------------------------------------------------
+IF COL_LENGTH('dbo.teams', 'parent_team_id') IS NULL
+  ALTER TABLE dbo.teams ADD parent_team_id INT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_teams_parent')
+  ALTER TABLE dbo.teams ADD CONSTRAINT fk_teams_parent FOREIGN KEY (parent_team_id) REFERENCES dbo.teams(id);
+IF COL_LENGTH('dbo.teams', 'sort_order') IS NULL
+  ALTER TABLE dbo.teams ADD sort_order INT NOT NULL CONSTRAINT df_teams_sort_order DEFAULT 0;
+IF COL_LENGTH('dbo.teams', 'description') IS NULL
+  ALTER TABLE dbo.teams ADD description NVARCHAR(300) NULL;
+IF COL_LENGTH('dbo.teams', 'directory_object_id') IS NULL
+  ALTER TABLE dbo.teams ADD directory_object_id NVARCHAR(64) NULL;   -- Entra group object id, for a later sync
+IF COL_LENGTH('dbo.teams', 'visibility') IS NULL
+  ALTER TABLE dbo.teams ADD visibility NVARCHAR(12) NOT NULL CONSTRAINT df_teams_visibility DEFAULT 'everyone';  -- everyone|restricted
+IF COL_LENGTH('dbo.teams', 'visibility_reason') IS NULL
+  ALTER TABLE dbo.teams ADD visibility_reason NVARCHAR(300) NULL;
+GO
+-- New columns are only visible to a later batch, so the keys and indexes over them follow a GO.
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name='ck_teams_visibility')
+  ALTER TABLE dbo.teams ADD CONSTRAINT ck_teams_visibility CHECK (visibility IN ('everyone','restricted'));
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_teams_parent')
+  CREATE INDEX ix_teams_parent ON dbo.teams(workspace_id, parent_team_id, sort_order);
+
+-- Reporting line (ORG-02). people.line_manager stays as a free-text legacy column but is never
+-- written again: the API returns the manager's name derived from this FK.
+IF COL_LENGTH('dbo.people', 'manager_person_id') IS NULL
+  ALTER TABLE dbo.people ADD manager_person_id INT NULL;
+IF COL_LENGTH('dbo.people', 'role_family_id') IS NULL
+  ALTER TABLE dbo.people ADD role_family_id INT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_people_manager')
+  ALTER TABLE dbo.people ADD CONSTRAINT fk_people_manager FOREIGN KEY (manager_person_id) REFERENCES dbo.people(id);
+
+-- portfolios -> role_families. sp_rename keeps the data and the identity values on an existing
+-- database; a fresh database falls through to the CREATE.
+IF OBJECT_ID('dbo.portfolios') IS NOT NULL AND OBJECT_ID('dbo.role_families') IS NULL
+BEGIN
+  EXEC sp_rename 'dbo.portfolios', 'role_families';
+  IF EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'uq_portfolio_name')
+    EXEC sp_rename 'dbo.uq_portfolio_name', 'uq_role_family_name', 'OBJECT';
+END
+
+IF OBJECT_ID('dbo.role_families') IS NULL
+CREATE TABLE dbo.role_families (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  name NVARCHAR(80) NOT NULL,                -- 'Data engineering', 'Analytics'
+  description NVARCHAR(300) NULL,
+  lead_person_id INT NULL REFERENCES dbo.people(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
+  CONSTRAINT uq_role_family_name UNIQUE (workspace_id, name)
+);
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_people_role_family')
+  ALTER TABLE dbo.people ADD CONSTRAINT fk_people_role_family FOREIGN KEY (role_family_id) REFERENCES dbo.role_families(id);
+
+-- One-off: a team's portfolio becomes a role family on each of that team's people, then the
+-- column goes. Dynamic SQL because this file must still compile once the column is dropped.
+IF COL_LENGTH('dbo.teams', 'portfolio_id') IS NOT NULL
+BEGIN
+  EXEC('UPDATE p SET p.role_family_id = t.portfolio_id FROM dbo.people p JOIN dbo.teams t ON t.id = p.team_id
+        WHERE p.role_family_id IS NULL AND t.portfolio_id IS NOT NULL');
+  IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name='fk_teams_portfolio')
+    ALTER TABLE dbo.teams DROP CONSTRAINT fk_teams_portfolio;
+  EXEC('ALTER TABLE dbo.teams DROP COLUMN portfolio_id');
+END
+
+-- ADM-01: which identity provider owns the account. google | entra | seed | test.
+IF COL_LENGTH('dbo.users', 'auth_provider') IS NULL
+  ALTER TABLE dbo.users ADD auth_provider NVARCHAR(20) NULL;
 GO

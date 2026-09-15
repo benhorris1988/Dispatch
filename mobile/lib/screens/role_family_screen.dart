@@ -14,31 +14,28 @@ import '../widgets/pf_metrics.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/tm_loan_list.dart';
 import '../widgets/widgets.dart';
-import 'parts/tm_loan_dialog.dart';
 
-/// Portfolio view (TEAM-09): a portfolio's teams side by side, each with the
-/// same six figures, and the portfolio computed the same way as a team
+/// Role family view (ORG-02, TEAM-09): one discipline's people, grouped by the
+/// team each of them sits in, with the same six figures per row and the family
 /// beneath — not summed, so the single-skill count can be lower than any one
-/// team's when another team covers the skill. Reads `portfolios.php overview`;
+/// computed the same way as a row. Reads `role_families.php overview`;
 /// admin can rename it and move teams in and out.
-class PortfolioScreen extends StatefulWidget {
-  const PortfolioScreen({super.key, required this.id});
+class RoleFamilyScreen extends StatefulWidget {
+  const RoleFamilyScreen({super.key, required this.id});
   final String id;
 
-  static String route(Object id) => '/portfolios/$id';
+  static String route(Object id) => '/role-families/$id';
 
   @override
-  State<PortfolioScreen> createState() => _PortfolioScreenState();
+  State<RoleFamilyScreen> createState() => _RoleFamilyScreenState();
 }
 
-class _PortfolioScreenState extends State<PortfolioScreen> {
+class _RoleFamilyScreenState extends State<RoleFamilyScreen> {
   bool _loading = true;
   String? _error;
   _Overview? _data;
-  /// Every team in the workspace, for the add-team picker.
-  List<_TeamOption> _allTeams = const [];
 
-  int get _portfolioId => int.tryParse(widget.id) ?? 0;
+  int get _roleFamilyId => int.tryParse(widget.id) ?? 0;
 
   ShellState? _shell;
 
@@ -49,7 +46,7 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
   }
 
   @override
-  void didUpdateWidget(covariant PortfolioScreen oldWidget) {
+  void didUpdateWidget(covariant RoleFamilyScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.id != widget.id) _load();
   }
@@ -73,16 +70,11 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
       _error = null;
     });
     try {
-      final results = await Future.wait([
-        Api.post('portfolios.php', 'overview', {'portfolio_id': _portfolioId}),
-        Api.post('people.php', 'list'),
-      ]);
-      final d = _Overview.fromJson(results[0]);
-      final teams = asList(results[1]['teams'], _TeamOption.fromJson);
+      final r = await Api.post('role_families.php', 'overview', {'role_family_id': _roleFamilyId});
+      final d = _Overview.fromJson(r);
       if (!mounted) return;
       setState(() {
         _data = d;
-        _allTeams = teams;
         _loading = false;
       });
       final shell = context.read<ShellState>();
@@ -105,66 +97,6 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
     if (saved == true) await _load();
   }
 
-  Future<void> _addTeam() async {
-    final d = _data;
-    if (d == null) return;
-    final inHere = d.teams.map((t) => t.id).toSet();
-    final candidates = _allTeams.where((t) => !inHere.contains(t.id)).toList();
-    if (candidates.isEmpty) {
-      tmToast(context, 'Every team is already in this portfolio');
-      return;
-    }
-    final teamId = await showDialog<int>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('Add a team'),
-        children: [
-          for (final t in candidates)
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(context).pop(t.id),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                Text(t.name, style: context.text.bodyLarge),
-                if (t.portfolioName != null)
-                  Text('Moves out of ${t.portfolioName}', style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
-              ]),
-            ),
-        ],
-      ),
-    );
-    if (teamId == null || !mounted) return;
-    try {
-      await Api.post('portfolios.php', 'add_team', {'portfolio_id': _portfolioId, 'team_id': teamId});
-      if (mounted) tmToast(context, 'Team added');
-      await _load();
-    } on ApiException catch (e) {
-      if (mounted) tmToast(context, e.message, bad: true);
-    }
-  }
-
-  Future<void> _removeTeam(_TeamFigures t) async {
-    final ok = await showTmConfirm(
-      context,
-      title: 'Remove ${t.name}?',
-      message: 'The team leaves this portfolio and is planned on its own until it is added to another. Nothing about its people or work changes.',
-      confirmLabel: 'Remove',
-      danger: true,
-    );
-    if (!ok || !mounted) return;
-    try {
-      await Api.post('portfolios.php', 'remove_team', {'team_id': t.id});
-      if (mounted) tmToast(context, '${t.name} removed');
-      await _load();
-    } on ApiException catch (e) {
-      if (mounted) tmToast(context, e.message, bad: true);
-    }
-  }
-
-  Future<void> _endLoan(Loan l) async {
-    final d = _data;
-    final done = await confirmTmEndLoan(context, l, today: d?.windowFrom);
-    if (done) await _load();
-  }
-
   // ─── Build ────────────────────────────────────────────────────────────
 
   @override
@@ -175,10 +107,8 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
 
     final actions = <Widget>[
       SecondaryButton('Team & skills', icon: Icons.people_alt_outlined, onPressed: () => context.go(Routes.team)),
-      if (session.isAdmin && d != null) ...[
-        SecondaryButton('Rename', icon: Icons.edit_outlined, onPressed: _rename),
-        PrimaryButton('Add team', icon: Icons.group_add_outlined, onPressed: _addTeam),
-      ],
+      SecondaryButton('Organisation', icon: Icons.account_tree_outlined, onPressed: () => context.go(Routes.org)),
+      if (session.isAdmin && d != null) SecondaryButton('Rename', icon: Icons.edit_outlined, onPressed: _rename),
     ];
 
     return PageBody(
@@ -187,13 +117,14 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
         _Breadcrumb(name: d?.name),
         const SizedBox(height: Sp.md),
         PageHeader(
-          title: d?.name ?? 'Portfolio',
+          title: d?.name ?? 'Role family',
           subtitle: d == null
-              ? 'Teams planned together'
+              ? 'One discipline, across the teams it sits in'
               : dotJoin([
                   d.description,
                   if (d.leadName != null) 'Lead ${d.leadName}',
-                  '${d.teams.length} ${d.teams.length == 1 ? 'team' : 'teams'}',
+                  '${d.totals.headcount} ${d.totals.headcount == 1 ? 'person' : 'people'}',
+                  'across ${d.teams.length} ${d.teams.length == 1 ? 'team' : 'teams'}',
                   if (d.windowFrom != null && d.windowTo != null) 'Next four weeks from ${fmtDayMonth(d.windowFrom)}',
                 ]),
           actions: actions,
@@ -202,17 +133,16 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
         if (_loading)
           const _Skeleton()
         else if (_error != null)
-          ErrorState(title: 'We could not load this portfolio', message: _error, onRetry: _load)
+          ErrorState(title: 'We could not load this role family', message: _error, onRetry: _load)
         else if (d == null)
-          const EmptyState(icon: Icons.account_tree_outlined, title: 'Portfolio not found', message: 'It may have been deleted.')
+          const EmptyState(icon: Icons.badge_outlined, title: 'Role family not found', message: 'It may have been deleted.')
         else ...[
           if (d.teams.isEmpty)
-            Panel(
+            const Panel(
               child: EmptyState(
                 icon: Icons.groups_outlined,
-                title: 'No teams yet',
-                message: 'Add a team to see its figures beside the others.',
-                action: session.isAdmin ? PrimaryButton('Add team', icon: Icons.group_add_outlined, onPressed: _addTeam) : null,
+                title: 'Nobody in this role family yet',
+                message: 'Set somebody\u2019s role family on the Team & skills page, and they will appear here beside everyone else who does the same job.',
                 compact: true,
               ),
             )
@@ -229,15 +159,15 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                       team: t,
                       overview: d,
                       policy: policy,
-                      onRemove: session.isAdmin ? () => _removeTeam(t) : null,
+                      onRemove: null,
                     ),
                   ),
               ]);
             }),
           const SizedBox(height: Sp.xl),
           TmMetricTitle(
-            title: 'The portfolio as one team',
-            subtitle: 'Computed the same way as a team, not summed',
+            title: 'The role family as one group',
+            subtitle: 'Computed the same way as a row, not summed',
             definition: '${d.definitionFor('load', PfMetrics.load(targetMin: d.targetLoadMin, targetMax: d.targetLoadMax))}\n\n'
                 '${d.definitionFor('single_skill_deps', PfMetrics.singleSkillDeps)}\n\n'
                 '${d.definitionFor('stability_index', PfMetrics.stabilityIndex)}\n\n'
@@ -254,10 +184,10 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                 ? const EmptyState(
                     icon: Icons.swap_horiz_rounded,
                     title: 'No loans',
-                    message: 'Nobody is lent into, out of or between these teams in the planned window.',
+                    message: 'Nobody in this role family is on loan in the planned window.',
                     compact: true,
                   )
-                : TmLoanList(loans: d.loans, today: d.windowFrom ?? DateTime.now(), canEnd: session.isTeamLead, onEnd: _endLoan),
+                : TmLoanList(loans: d.loans, today: d.windowFrom ?? DateTime.now()),
           ),
         ],
       ]),
@@ -279,7 +209,7 @@ class _Breadcrumb extends StatelessWidget {
         child: Padding(padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2), child: Text('Team & skills', style: muted?.copyWith(color: DispatchColors.typeBlue))),
       ),
       Text('  ›  ', style: muted),
-      Flexible(child: Text(name ?? 'Portfolio', style: muted, overflow: TextOverflow.ellipsis)),
+      Flexible(child: Text(name ?? 'Role family', style: muted, overflow: TextOverflow.ellipsis)),
     ]);
   }
 }
@@ -359,17 +289,10 @@ class _TeamCard extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Sp.lg, Sp.sm, Sp.lg, Sp.lg),
       title: t.name,
       subtitle: dotJoin([
-        if (t.leadName != null) 'Lead ${t.leadName}',
-        '${t.headcount} ${t.headcount == 1 ? 'person' : 'people'}',
+        if (t.path != null && t.path != t.name) t.path,
+        '${t.headcount} ${t.headcount == 1 ? 'person' : 'people'} in this family',
       ]),
-      trailing: onRemove == null
-          ? null
-          : IconButton(
-              onPressed: onRemove,
-              icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
-              tooltip: 'Remove ${t.name} from the portfolio',
-              visualDensity: VisualDensity.compact,
-            ),
+      trailing: null,
       child: LayoutBuilder(builder: (context, c) {
         final two = c.maxWidth >= 300;
         final w = two ? (c.maxWidth - Sp.md) / 2 : c.maxWidth;
@@ -505,7 +428,7 @@ class _RenameDialogState extends State<_RenameDialog> {
       _error = null;
     });
     try {
-      await Api.post('portfolios.php', 'save', {
+      await Api.post('role_families.php', 'save', {
         'id': widget.overview.id,
         'name': _name.text.trim(),
         'description': _description.text.trim(),
@@ -525,7 +448,7 @@ class _RenameDialogState extends State<_RenameDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Rename portfolio'),
+      title: const Text('Rename role family'),
       content: SizedBox(
         width: 420,
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -568,26 +491,12 @@ class _Skeleton extends StatelessWidget {
   }
 }
 
-// ─── Parsing (portfolios.php overview) ──────────────────────────────────
+// ─── Parsing (role_families.php overview) ───────────────────────────────
 
 String fmtHours(num? h) => h == null ? '—' : '${h % 1 == 0 ? h.toInt() : h.toStringAsFixed(1)}h';
 
 extension on String {
   String ifEmpty(String other) => isEmpty ? other : this;
-}
-
-class _TeamOption {
-  const _TeamOption({required this.id, required this.name, this.portfolioId, this.portfolioName});
-  final int id;
-  final String name;
-  final int? portfolioId;
-  final String? portfolioName;
-  factory _TeamOption.fromJson(Map<String, dynamic> j) => _TeamOption(
-        id: asIntOr(j['id'], 0),
-        name: asStrOr(j['name'], ''),
-        portfolioId: asInt(j['portfolio_id']),
-        portfolioName: asStr(j['portfolio_name']),
-      );
 }
 
 /// The six figures the API computes for a set of teams.
@@ -643,6 +552,7 @@ class _TeamFigures extends _Figures {
     required this.id,
     required this.name,
     this.leadName,
+    this.path,
     super.headcount,
     super.poolSize,
     super.loanedIn,
@@ -660,13 +570,16 @@ class _TeamFigures extends _Figures {
   final int id;
   final String name;
   final String? leadName;
+  /// Where the team sits in the tree, so a row reads 'Digital & Data > Data Platform'.
+  final String? path;
 
   factory _TeamFigures.fromJson(Map<String, dynamic> j) {
     final f = _Figures.fromJson(j);
     return _TeamFigures(
       id: asIntOr(j['id'], 0),
-      name: asStrOr(j['name'], ''),
+      name: asStrOr(j['name'], 'No team'),
       leadName: asStr(asMap(j['lead'])['name']),
+      path: asStr(j['path']),
       headcount: f.headcount,
       poolSize: f.poolSize,
       loanedIn: f.loanedIn,
@@ -721,11 +634,11 @@ class _Overview {
   }
 
   factory _Overview.fromJson(Map<String, dynamic> j) {
-    final p = asMap(j['portfolio']);
+    final p = asMap(j['role_family']);
     final w = asMap(j['window']);
     return _Overview(
       id: asIntOr(p['id'], 0),
-      name: asStrOr(p['name'], 'Portfolio'),
+      name: asStrOr(p['name'], 'Role family'),
       description: asStr(p['description']),
       leadName: asStr(p['lead_name']),
       leadPersonId: asInt(p['lead_person_id']),

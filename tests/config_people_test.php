@@ -6,6 +6,7 @@ $BASE = getenv('DISPATCH_BASE') ?: 'http://localhost:8090/api';
 $PHP = 'C:\\xampp\\php\\php.exe';
 $ROOT = realpath(__DIR__ . '/..');
 $pass = 0; $fail = 0; $skipped = 0; $server = null;
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
 
 function api($file, array $body, $token = null) {
     global $BASE;
@@ -25,24 +26,23 @@ function skip($label, $why) { global $skipped; $skipped++; echo "  skip $label -
 function short($v) { $s = json_encode($v, JSON_UNESCAPED_UNICODE); return strlen($s) > 300 ? substr($s, 0, 300) . '…' : $s; }
 
 // ---- server -------------------------------------------------------------------------------
-[$code] = api('auth.php', ['action' => 'list_dev_users']);
+[$code] = api('auth.php', ['action' => 'providers']);
 if ($code === 0) {
     echo "Starting php -S localhost:8090 ...\n";
     $server = proc_open("\"$PHP\" -S localhost:8090 -t \"$ROOT\" \"$ROOT\\router.php\"", [['pipe','r'], ['file', sys_get_temp_dir() . '/dispatch_test_server.log', 'a'], ['file', sys_get_temp_dir() . '/dispatch_test_server.log', 'a']], $pipes);
-    for ($i = 0; $i < 30; $i++) { usleep(300000); [$code] = api('auth.php', ['action' => 'list_dev_users']); if ($code) break; }
+    for ($i = 0; $i < 30; $i++) { usleep(300000); [$code] = api('auth.php', ['action' => 'providers']); if ($code) break; }
     if (!$code) { echo "Could not start the API server\n"; exit(2); }
 }
 
 // ---- sign in ------------------------------------------------------------------------------
 echo "auth\n";
-[$code, $r] = api('auth.php', ['action' => 'list_dev_users']);
-check('list_dev_users 200', $code === 200 && isset($r['users']), short($r));
-$users = $r['users'] ?? [];
+[$code, $r] = api('auth.php', ['action' => 'providers']);
+check('providers 200 without a token', $code === 200 && isset($r['google'], $r['microsoft']), short($r));
+check('the removed development sign-in is gone', api('auth.php', ['action' => 'dev_login', 'user_id' => 1])[0] === 401);   // unknown actions sit behind the token gate
+$users = test_users();
 if (!$users) { echo "No seeded users - run seed_demo.php first\n"; exit(2); }
-$pick = function ($role, $withPerson = null) use ($users) { foreach ($users as $u) if ($u['role'] === $role && ($withPerson === null || ($u['person_id'] !== null) === $withPerson)) return $u; return null; };
-$adminU = $pick('admin') ?: $pick('delivery_lead'); $leadU = $pick('delivery_lead') ?: $adminU; $memberU = $pick('team_member', true);
-$login = function ($u) { [$c, $r] = api('auth.php', ['action' => 'dev_login', 'user_id' => $u['id']]); return $c === 200 ? $r['token'] : null; };
-$admin = $login($adminU); $lead = $login($leadU); $member = $memberU ? $login($memberU) : null;
+$adminU = user_for('admin') ?: user_for('delivery_lead'); $leadU = user_for('delivery_lead') ?: $adminU; $memberU = user_for('team_member', true);
+$admin = token_for_email($adminU['email']); $lead = token_for_email($leadU['email']); $member = $memberU ? token_for_email($memberU['email']) : null;
 check('admin token', (bool)$admin); check('delivery lead token', (bool)$lead); check('team member token', (bool)$member, 'no team_member user linked to a person');
 
 // ---- workspace_config ---------------------------------------------------------------------
@@ -103,10 +103,21 @@ check('export in Appendix A shape', $code === 200 && isset($r['config']['workspa
 echo "people\n";
 [$code, $pl] = api('people.php', ['action' => 'list'], $lead);
 check('list 200 with 12 people across both teams', $code === 200 && count($pl['people'] ?? []) === 12, short(count($pl['people'] ?? [])));
-[$code, $plTeam] = api('people.php', ['action' => 'list', 'team_id' => $pl['teams'][0]['name'] === 'Data Platform' ? $pl['teams'][0]['id'] : $pl['teams'][1]['id']], $lead);
-check('list team_id → the 8 Data Platform members plus 1 loaned in (TEAM-09)', $code === 200 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] === null)) === 8 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] !== null)) === 1, short(count($plTeam['people'] ?? [])));
+$teamByName = [];
+foreach ($pl['teams'] ?? [] as $t) $teamByName[$t['name']] = $t;
+check('teams come back as a tree (ORG-01)', isset($teamByName['Digital & Data'], $teamByName['Data Platform'], $teamByName['Platform engineering'])
+    && $teamByName['Digital & Data']['parent_team_id'] === null
+    && $teamByName['Data Platform']['parent_team_id'] === $teamByName['Digital & Data']['id']
+    && $teamByName['Platform engineering']['depth'] === 2, short($pl['teams'] ?? []));
+$dpId = $teamByName['Data Platform']['id'];
+[$code, $plTeam] = api('people.php', ['action' => 'list', 'team_id' => $dpId], $lead);
+check('list team_id → Data Platform and its sub-teams: 8 members plus 1 loaned in (TEAM-09, ORG-01)', $code === 200 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] === null)) === 8 && count(array_filter($plTeam['people'] ?? [], fn($p) => $p['loaned_from'] !== null)) === 1, short(count($plTeam['people'] ?? [])));
+[$code, $plRoot] = api('people.php', ['action' => 'list', 'team_id' => $teamByName['Digital & Data']['id']], $lead);
+check('list team_id at the root → everybody, the loan now inside the scope', $code === 200 && count($plRoot['people'] ?? []) === 12, short(count($plRoot['people'] ?? [])));
 check('every person carries loans / on_loan_to / loaned_from', array_key_exists('loans', $pl['people'][0]) && array_key_exists('on_loan_to', $pl['people'][0]) && array_key_exists('loaned_from', $pl['people'][0]));
-$pl['people'] = array_values(array_filter($pl['people'], fn($p) => $p['team_name'] === 'Data Platform'));   // the checks below are about the Data Platform team
+check('every person carries a manager and a role family (ORG-02)', array_key_exists('manager_person_id', $pl['people'][0]) && array_key_exists('role_family_name', $pl['people'][0]));
+$dpTeamIds = [$dpId, $teamByName['Platform engineering']['id'], $teamByName['Analytics engineering']['id']];
+$pl['people'] = array_values(array_filter($pl['people'], fn($p) => in_array($p['team_id'], $dpTeamIds, true)));   // the checks below are about the Data Platform branch
 $allLoad = true; foreach ($pl['people'] ?? [] as $p) if (!is_int($p['load_pct'] ?? null)) $allLoad = false;
 check('every person has a numeric load_pct', $allLoad, short(array_map(fn($p) => [$p['name'], $p['load_pct'] ?? null], $pl['people'] ?? [])));
 check('person shape (working_pattern decoded, skills, on_rota_weeks, team_name)', is_array($pl['people'][0]['working_pattern'] ?? null) && isset($pl['people'][0]['skills'], $pl['people'][0]['on_rota_weeks']) && array_key_exists('team_name', $pl['people'][0]));

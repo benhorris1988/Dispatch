@@ -345,6 +345,10 @@ class _PipelineScreenState extends State<PipelineScreen> {
           value: _teamId,
           hint: 'All teams',
           icon: Icons.people_alt_outlined,
+          // Teams nest now (ORG-01), so their names are longer and there are more
+          // of them. Cap the control and ellipsise, rather than letting the
+          // longest team name decide how wide the toolbar is.
+          maxWidth: 190,
           items: [
             const DropdownMenuItem<int?>(value: null, child: Text('All teams')),
             for (final t in _teams) DropdownMenuItem<int?>(value: t.id, child: Text(t.name)),
@@ -397,8 +401,9 @@ class _PipelineScreenState extends State<PipelineScreen> {
     required List<DropdownMenuItem<T>> items,
     required ValueChanged<T?> onChanged,
     IconData? icon,
+    double? maxWidth,
   }) =>
-      WcFilterDropdown<T>(value: value, hint: hint, items: items, onChanged: onChanged, icon: icon);
+      WcFilterDropdown<T>(value: value, hint: hint, items: items, onChanged: onChanged, icon: icon, maxWidth: maxWidth);
 
   Widget _queueStrip() {
     final parts = <String>[];

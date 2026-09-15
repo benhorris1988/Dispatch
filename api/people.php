@@ -51,8 +51,15 @@ function require_own_or_lead($targetPersonId) {
     if (has_role('team_member') && $personId !== null && (int)$targetPersonId === (int)$personId) return;
     fail('Forbidden: you can only edit your own profile', 403);
 }
+/** The joins every Person shape needs: home team, manager (ORG-02) and role family. */
+const PERSON_SELECT = "SELECT p.*, t.name AS team_name, t.parent_team_id, m.name AS manager_name, rf.name AS role_family_name
+     FROM dbo.people p
+     LEFT JOIN dbo.teams t ON t.id = p.team_id
+     LEFT JOIN dbo.people m ON m.id = p.manager_person_id
+     LEFT JOIN dbo.role_families rf ON rf.id = p.role_family_id";
+
 function person_row($conn, $wsId, $id) {
-    $p = row($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.id = ? AND p.workspace_id = ?", [$id, $wsId]);
+    $p = row($conn, PERSON_SELECT . " WHERE p.id = ? AND p.workspace_id = ?", [$id, $wsId]);
     if (!$p) fail('Person not found', 404);
     return $p;
 }
@@ -105,16 +112,17 @@ function availability_shape(array $a) {
 if ($action === 'list') {
     [$from, $to] = four_week_window($today);
     $includeInactive = (bool)param('include_inactive', false);
-    // TEAM-09: team_id / portfolio_id narrow the list to that scope's planning pool — home members plus
-    // anyone loaned into it (flagged with loaned_from). Load is then the scope's share of each person.
-    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'portfolio_id' => param('portfolio_id')]);
-    if ($scope === null) fail('Team or portfolio not found', 404);
+    // TEAM-09 / ORG-01: team_id narrows the list to that team AND its sub-teams — home members plus
+    // anyone loaned in (flagged with loaned_from); role_family_id narrows it to one discipline across
+    // the tree. Load is then the scope's share of each person.
+    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'role_family_id' => param('role_family_id')]);
+    if ($scope === null) fail('Team or role family not found', 404);
     $horizonEnd = loan_horizon_end($conn, $wsId, $today);
-    $people = rows($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ?" . ($includeInactive ? '' : ' AND p.active = 1') . " ORDER BY p.name", [$wsId]);
-    if ($scope['team_ids'] !== null) {
-        $pool = team_pool($conn, $wsId, $scope['team_ids'], $today, $horizonEnd);
+    $people = rows($conn, PERSON_SELECT . " WHERE p.workspace_id = ?" . ($includeInactive ? '' : ' AND p.active = 1') . " ORDER BY p.name", [$wsId]);
+    if (scope_is_partial($scope)) {
+        $pool = scope_pool($conn, $wsId, $scope, $today, $horizonEnd);
         $people = array_values(array_filter($people, fn($p) => isset($pool[(int)$p['id']])));
-        $tl = team_load($conn, $wsId, $scope['team_ids'], $from, $to);
+        $tl = scope_load($conn, $wsId, $scope, $from, $to);
         $load = array_map(fn($x) => $x['load_pct'], $tl['people']);
     } else {
         $load = load_pct_map($conn, $wsId, $from, $to);
@@ -135,10 +143,22 @@ if ($action === 'list') {
         $s += loan_fields($s, $loans, $today, $scope['team_ids']);
         $out[] = $s;
     }
-    $teams = rows($conn, "SELECT t.id, t.name, t.lead_person_id, t.portfolio_id, pf.name AS portfolio_name FROM dbo.teams t LEFT JOIN dbo.portfolios pf ON pf.id = t.portfolio_id WHERE t.workspace_id = ? ORDER BY t.name", [$wsId]);
-    foreach ($teams as &$t) { $t['id'] = (int)$t['id']; $t['lead_person_id'] = $t['lead_person_id'] !== null ? (int)$t['lead_person_id'] : null; $t['portfolio_id'] = $t['portfolio_id'] !== null ? (int)$t['portfolio_id'] : null; }
-    unset($t);
-    ok(['people' => $out, 'teams' => $teams, 'window' => ['from' => $from, 'to' => $to], 'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids']))]);
+    // ORG-01: teams come back in tree order with their parent and depth, so a picker can indent them
+    // without a second call. The whole tree is returned whatever the scope — a person has to be
+    // movable to a team they are not currently in.
+    $c = team_closure($conn, $wsId);
+    $teams = [];
+    foreach ($c['teams'] as $id => $t) {
+        $teams[] = ['id' => $id, 'name' => $t['name'], 'parent_team_id' => $t['parent_team_id'],
+            'parent_team_name' => $t['parent_team_id'] !== null ? ($c['teams'][$t['parent_team_id']]['name'] ?? null) : null,
+            'sort_order' => $t['sort_order'], 'depth' => team_depth($conn, $wsId, $id), 'path' => team_path($conn, $wsId, $id),
+            'lead_person_id' => $t['lead_person_id'], 'visibility' => $t['visibility']];
+    }
+    usort($teams, fn($a, $b) => [$a['path']] <=> [$b['path']]);
+    $families = rows($conn, "SELECT id, name FROM dbo.role_families WHERE workspace_id = ? ORDER BY name", [$wsId]);
+    foreach ($families as &$f) $f['id'] = (int)$f['id'];
+    unset($f);
+    ok(['people' => $out, 'teams' => $teams, 'role_families' => $families, 'window' => ['from' => $from, 'to' => $to], 'scope' => scope_public($scope)]);
 }
 
 if ($action === 'get') {
@@ -245,11 +265,29 @@ if ($action === 'save') {
     if ($id !== null) require_own_or_lead($id); else require_role('team_lead');
     $before = $id !== null ? person_row($conn, $wsId, $id) : null;
     $b = body(); $data = [];
-    foreach (['name','role_title','tagline','pattern_label','prefers','avoid','line_manager','email','colour'] as $f) if (array_key_exists($f, $b)) $data[$f] = $b[$f] !== null ? trim((string)$b[$f]) : null;
+    // line_manager is deliberately absent: ORG-02 made the reporting line a real person
+    // (manager_person_id) and the old free-text column is never written again.
+    foreach (['name','role_title','tagline','pattern_label','prefers','avoid','email','colour'] as $f) if (array_key_exists($f, $b)) $data[$f] = $b[$f] !== null ? trim((string)$b[$f]) : null;
     if (array_key_exists('initials', $b)) $data['initials'] = $b['initials'] !== null && $b['initials'] !== '' ? strtoupper(substr(trim($b['initials']), 0, 2)) : null;
+    // The home team moves through move_person_home_team() below, after the row exists, so that an
+    // edit here and a drag on the organisation chart obey the same loan rules and write the same audit.
+    $moveTo = null; $moveWanted = false;
     if (array_key_exists('team_id', $b)) {
-        if (!has_role('team_lead') && (int)($b['team_id'] ?? 0) !== (int)($before['team_id'] ?? 0)) fail('Forbidden: only a team lead can move someone between teams', 403);
-        $data['team_id'] = $b['team_id'] !== null && $b['team_id'] !== '' ? (int)$b['team_id'] : null;
+        $moveTo = $b['team_id'] !== null && $b['team_id'] !== '' ? (int)$b['team_id'] : null;
+        $moveWanted = $id === null || $moveTo !== ($before['team_id'] !== null ? (int)$before['team_id'] : null);
+        if ($id === null) $data['team_id'] = $moveTo;      // a new person starts where they are put
+    }
+    if (array_key_exists('manager_person_id', $b)) {
+        require_role('team_lead');
+        $data['manager_person_id'] = validate_manager($conn, $wsId, $id, $b['manager_person_id']);
+    }
+    if (array_key_exists('role_family_id', $b)) {
+        require_role('admin');
+        $rf = $b['role_family_id'];
+        if ($rf !== null && $rf !== '') {
+            if (!row($conn, "SELECT id FROM dbo.role_families WHERE id = ? AND workspace_id = ?", [(int)$rf, $wsId])) fail('Role family not found', 404);
+            $data['role_family_id'] = (int)$rf;
+        } else $data['role_family_id'] = null;
     }
     if (array_key_exists('days_per_week', $b)) $data['days_per_week'] = (float)$b['days_per_week'];
     if (array_key_exists('working_pattern', $b)) {
@@ -272,6 +310,13 @@ if ($action === 'save') {
     }
     $after = person_row($conn, $wsId, $id);
     audit($conn, $wsId, $before ? 'update' : 'create', 'person', $id, $before ? person_shape($before) : null, person_shape($after), $after['name']);
+    if ($moveWanted && $before !== null) {
+        // ORG-03/05: only a lead of the team being left or the team being joined may move somebody.
+        require_team_authority($conn, $wsId, $before['team_id'] !== null ? (int)$before['team_id'] : null);
+        require_team_authority($conn, $wsId, $moveTo);
+        move_person_home_team($conn, $wsId, $after, $moveTo, param('reason'), (bool)param('force', false));
+        $after = person_row($conn, $wsId, $id);
+    }
     if (isset($data['working_pattern']) || isset($data['active'])) derive_capacity($conn, $wsId, $today, date('Y-m-d', strtotime("$today +12 weeks")), [$id]);
     ok(['person' => person_shape($after)]);
 }

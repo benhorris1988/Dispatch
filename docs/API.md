@@ -25,7 +25,10 @@ Roles rank: viewer < requester < team_member < benefit_owner < team_lead < deliv
 
 ```
 Person       {id, name, initials, colour, role_title, tagline, team_id, team_name, days_per_week, working_pattern{Mon..Fri hours},
-              pattern_label, max_concurrent, min_focus_days, prefers, avoid, line_manager, active, email}
+              pattern_label, max_concurrent, min_focus_days, prefers, avoid, active, email,
+              manager_person_id, manager_name, role_family_id, role_family_name, line_manager}
+             ORG-02: `line_manager` was a free-text column and is now the manager's name derived from
+             `manager_person_id`. It is still returned so nothing that reads it breaks; it is never written.
 WorkTypeRef  {id, name, plural, prefix, colour, policy}
 WorkItemRow  {id, ref, title, work_type_id, type_name, type_colour, type_policy, size_stamp, size_name, is_custom,
               custom_effort_days, status, health, priority_score, benefit_value, rom_low, rom_high, rom_unit,
@@ -43,8 +46,28 @@ Change       {id, proposal_id, person:{id,name,initials,colour}, work_item:{id,r
 (CHG-06); `awaiting_ack` is `ack_required && !acknowledged_at` on an accepted or edited change.
 Both are added by `changes.php`; other endpoints' Change shapes omit them.
 
-## auth.php  (exists)
-`list_dev_users`, `dev_login{user_id}`, `oidc_login{id_token}`, `me`.
+## auth.php — sign-in and account roles (ADM-01, ADM-02, ADM-03)
+There are no local passwords and no development sign-in. An account exists because somebody signed in
+with an identity this deployment accepts, and it is created on that first sign-in. Google is the
+provider in use; the Entra path is verified and waiting for a tenant.
+- `providers` (**no token**) → `{google:{enabled, web_client_id, hosted_domain}, microsoft:{enabled}}` — what the client
+  may offer. The web client id is the first entry of `google.client_ids` in `config.php`: the browser starts the flow
+  with it, and the mobile apps send it as their *server* client id so every platform's token carries an audience this
+  API accepts. This is also the endpoint to probe for "is the server up".
+- `google_login{id_token}` → `{token, user}`. Verifies RS256 against Google's JWKS, requires `email_verified`, and enforces
+  `google.hosted_domain` when set. Then: an account with that email signs in; a deactivated one is refused (401) and never
+  re-created; an unknown one is created as `admin` if the address is in `bootstrap_admins`, otherwise `team_member`, linked
+  to the `people` row with the same work address if there is one. 501 when no `google.client_ids` are configured.
+- `oidc_login{id_token}` → the same for Entra ID, plus `group_roles` mapping, which may only *raise* a role. 501 until
+  `entra.tenant_id` and `entra.client_id` are set.
+- `me` → `{user}` including `auth_provider`.
+- `list_users` (team_lead) → `{users:[{id, email, display_name, short_name, role, active, auth_provider, person_id, person_name, initials, colour, role_title, team_name, created_at}], roles:[the seven, in rank order]}`. Seeing who is in the workspace and what role they hold is not restricted; changing a role is.
+- `set_role{user_id, role, reason?}` (admin) → `{user}`. 400 for an unknown role, 409 when the only administrator would
+  demote themselves out of the workspace. Audited. `auth_middleware.php` re-reads the role on every request, so it applies
+  to a token the person already holds.
+
+Tests cannot perform a Google sign-in, so they mint a token directly with `tests/mint_token.php` (CLI only, admin
+database connection) and `tests/_auth.php` wraps it as `token_for($role)` / `token_for_email($email)`.
 
 ## workspace_config.php — workspace vocabulary and policy (CFG-*)
 (Named `workspace_config.php` because `api/config.php` is the gitignored secrets file.)
@@ -62,10 +85,12 @@ Both are added by `changes.php`; other endpoints' Change shapes omit them.
 - `save_day_rate{id?, name, rate, currency, effective_from, is_blended}` (admin)
 
 ## people.php — team, skills, availability, loans (TEAM-*)
-- `list{team_id?, portfolio_id?, include_inactive?}` → `{people:[Person + {load_pct (next 4 weeks, from committed plan), skills:[{skill_id, proficiency}], on_rota_weeks:[...], loans:[Loan], on_loan_to: Loan|null, loaned_from: Loan|null}], teams:[{id,name,lead_person_id,portfolio_id,portfolio_name}], scope:{kind:'workspace'|'team'|'portfolio', team_id, portfolio_id, name, team_ids}}`
-  With `team_id` or `portfolio_id` (TEAM-09) the list is that scope's **planning pool**: its home members plus anyone loaned into it up to the end of the modelled horizon. A borrowed person carries `loaned_from` (the loan that brings them in); `on_loan_to` is the loan that moves a person elsewhere *today*, or null; `loans` is every loan touching today..horizon. `load_pct` in a scoped list weights each person by the scope's share of them (a 50% loan counts half for each team). 404 for an unknown team or portfolio.
+- `list{team_id?, role_family_id?, include_inactive?}` → `{people:[Person + {load_pct (next 4 weeks, from committed plan), skills:[{skill_id, proficiency}], on_rota_weeks:[...], loans:[Loan], on_loan_to: Loan|null, loaned_from: Loan|null}], teams:[{id, name, parent_team_id, parent_team_name, sort_order, depth, path, lead_person_id, visibility}], role_families:[{id,name}], scope:{kind:'workspace'|'team'|'role_family', team_id, role_family_id, name, team_ids, person_ids}}`
+  With `team_id` (TEAM-09, ORG-01) the list is that team **and every team beneath it**, as a planning pool: home members plus anyone loaned in up to the end of the modelled horizon. With `role_family_id` (ORG-02) it is the people in that discipline wherever they sit — a set of people, so no loan moves anyone in or out of it. A borrowed person carries `loaned_from` (the loan that brings them in); `on_loan_to` is the loan that moves a person elsewhere *today*, or null; `loans` is every loan touching today..horizon. `load_pct` in a team-scoped list weights each person by the scope's share of them (a 50% loan counts half for each team). 404 for an unknown team or role family.
+  `teams` is always the whole tree in path order whatever the scope, because somebody has to be movable to a team they are not currently in.
 - `get{id}` → `{person + {loans:[Loan] (90 days back to the horizon), on_loan_to}, skills:[{skill_id,name,category,proficiency,endorsed_by:[names],certified,development_target,pairing_enabled,single_point (bool: this person is the only one ≥3)}], assignments:[Assignment (committed plan, from today)], availability:[...], rota:[week_start...], stats:{load_pct_4w, concurrent_now, concurrent_max, changes_8w, team_median_changes_8w, next_rota_week}, change_history:[{week_start, changes, inside_freeze}] (8 weeks), stability_note}`
-- `save{id?, ...Person fields, team_id}` (team_lead; a team_member may save only their own person) → `{person}`
+- `save{id?, ...Person fields, team_id?, manager_person_id?, role_family_id?, reason?, force?}` (team_lead; a team_member may save only their own person) → `{person}`
+  `manager_person_id` needs team_lead and is validated against loops (409); `role_family_id` needs admin. Changing `team_id` goes through the same path as `org.php move_person`: a lead of both the old and the new team, the loan rules, and the same audit entry. `line_manager` is no longer writable.
 - `deactivate{id}` (admin): sets active=0; flags future assignments → returns `{flagged_assignments}` and, when there were any, `urgent_replan` (STAB-05; scoped to everyone still active plus the leaver, so their work can be offered to somebody else).
 - `set_skill{person_id, skill_id, proficiency, certified?, development_target?, pairing_enabled?}` (own or team_lead)
 - `endorse_skill{person_id, skill_id}` (team_lead) appends endorser.
@@ -84,34 +109,74 @@ A loan lends a person to another team for a dated period at a share of their tim
 `capacity_days`: the person still has the same hours, and which team those hours belong to is resolved at read
 time (`engine/capacity.php team_pool()` / `team_share_for()`). For the loan's dates and share the person's
 capacity belongs to the borrowing team and they are eligible for its work (see `build_model` `team_id` /
-`portfolio_id` in ENGINE_MODEL.md). `reason` is a business reason — never personal data (ADM-05).
+`role_family_id` in ENGINE_MODEL.md). `reason` is a business reason — never personal data (ADM-05).
+A loan and a home-team change are different things: a loan is dated and reversible, moving somebody on the
+organisation chart is not, and an outstanding loan blocks such a move until somebody says to end it (ORG-03).
 - `add_loan{person_id, to_team_id, from_date, to_date, allocation_pct?=100, reason?}` (delivery_lead+, or a team_lead whose own person sits in or leads either team) → `{loan, trigger:{id, class}, freeze_horizon_end, urgent_replan?}`. The person's current team is the lending team. 400 when `to_date < from_date`, the share is outside 1..100, or the target is the person's own team; 409 with `{overlaps: Loan}` when it overlaps another loan of the same person (a person is lent to one place at a time). Audited; raises a `leave`-class trigger for the person — batched, or **urgent when from_date is inside the freeze horizon** (the same rule as `add_availability`), in which case a scoped cycle starts and `urgent_replan` reports it (a whole-workspace cycle moves nothing for a loan and reports `skipped`).
 - `end_loan{id, to_date?}` (same authority) → `{loan, trigger}`. Ends a loan early: `to_date` must satisfy `from_date ≤ to_date ≤ current to_date` (400 otherwise — extending is a new loan); omitted, the loan ends yesterday. A loan that happened is history and is never deleted; a loan that has **not started yet** is cancelled outright (`{loan:null, cancelled:true}`). Audited; `leave` trigger, urgent when the days handed back fall inside the freeze horizon.
 - `loans{person_id? | team_id?, from?, to?}` → `{loans:[Loan], window}` — loans touching the window (default today to the end of the modelled horizon); `team_id` matches the lending or the borrowing side.
 
 ## skills.php — catalogue + matrix (TEAM-01, TEAM-04)
-- `list{team_id?, portfolio_id?, include_retired?}` → `{skills:[{id,name,category,description,retired,people_at_3_plus,demand_days_6w,supply_days_6w,single_point}], scope}`
-- `matrix{team_id?, portfolio_id?}` → `{skills:[...as list], people:[Person-lite + load_pct + loaned_in], cells:{ "<person_id>:<skill_id>": {proficiency, certified, development_target, pairing_enabled} }, summary:{single_point_skills:[names], two_person_skills:[names], well_covered:int, team_name}, scope, availability_4w:[{person, label, from, to, type, days, kind:'leave'|'training'|'pattern'|'rota'}], development:[{person, skill, from_level, to_level, pairing_enabled, note}], demand_vs_supply:[{skill, demand_days, supply_days, exceeds}]}`
+- `list{team_id?, role_family_id?, include_retired?}` → `{skills:[{id,name,category,description,retired,people_at_3_plus,demand_days_6w,supply_days_6w,single_point}], scope}`
+- `matrix{team_id?, role_family_id?}` → `{skills:[...as list], people:[Person-lite + load_pct + loaned_in], cells:{ "<person_id>:<skill_id>": {proficiency, certified, development_target, pairing_enabled} }, summary:{single_point_skills:[names], two_person_skills:[names], well_covered:int, team_name}, scope, availability_4w:[{person, label, from, to, type, days, kind:'leave'|'training'|'pattern'|'rota'}], development:[{person, skill, from_level, to_level, pairing_enabled, note}], demand_vs_supply:[{skill, demand_days, supply_days, exceeds}]}`
   demand = sum over open items requiring the skill of remaining effort share in the next 6 weeks (planned assignment days on items requiring the skill); supply = qualified people's capacity days in 6 weeks.
-  With `team_id` / `portfolio_id` (TEAM-09) people, cells, coverage counts and supply are the scope's planning pool (home members plus anyone loaned in, `loaned_in: true`), with supply weighted by the scope's share of each person-day. Demand for **unscheduled** work stays workspace-wide, because an unscheduled item belongs to no team yet.
+  With `team_id` / `role_family_id` (TEAM-09, ORG-01/02) people, cells, coverage counts and supply are the scope's planning pool (home members of the team and its sub-teams plus anyone loaned in, `loaned_in: true`; or the people of one discipline), with supply weighted by the scope's share of each person-day. Demand for **unscheduled** work stays workspace-wide, because an unscheduled item belongs to no team yet.
 - `save{id?, name, category, description}` (admin), `merge{from_id, into_id}` (admin), `retire{id}` (admin).
 
-## portfolios.php — groups of teams for cross-team views and planning (TEAM-09, SCH-13)
-A portfolio is a named grouping of teams within a workspace; a team belongs to at most one (`teams.portfolio_id`).
-Reads are open to every signed-in role; edits are admin.
-- `list` → `{portfolios:[{id, name, description, lead_person_id, lead_name, teams:[{id, name, lead, headcount, loaned_in, loaned_out, load_pct, available_hours, assigned_hours}], team_count, headcount, load_pct, available_hours, assigned_hours}], unassigned_teams:[...], window}` — load over the next four weeks from the committed plan, each person weighted by the team's share of them.
-- `overview{portfolio_id}` → `{portfolio, teams:[team + Figures + {people:[{person_id, available_hours, assigned_hours, load_pct, home, share_days}]}], totals: Figures, loans:[Loan] (touching the portfolio's teams in the planned window), window:{from, to, planned_end}, target_load_min, target_load_max, definitions}` — the cross-team view: every team side by side, and the portfolio computed **the same way as a team** (not summed), so `totals.headcount = Σ teams`, `totals.available_hours = Σ teams`, `totals.assigned_hours = Σ teams` hold by arithmetic while `single_skill_deps` can be *smaller* than any team's (the other team covers the skill) and a loan between two of its teams is neither in nor out.
+## role_families.php — disciplines people belong to, across teams (ORG-02, TEAM-09, SCH-13)
+A role family is what somebody *does* — Data engineering, Analytics — as opposed to where they sit. It spans the team
+tree: one team can hold three disciplines and one discipline can reach into six teams. It replaces portfolios, which
+grouped whole teams and so could never say that two people in different teams do the same job. Reads are open to every
+signed-in role; edits are admin.
+- `list` → `{role_families:[{id, name, description, lead_person_id, lead_name, headcount, load_pct, available_hours, assigned_hours, teams_spanned:[{id, name, count}], people:[PersonLite]}], unassigned_people:[PersonLite], window}` — load over the next four weeks from the committed plan.
+- `overview{role_family_id}` → `{role_family, teams:[{id, name, path, parent_team_id, lead_person_id, in_family, people_lite} + Figures + {people:[{person_id, available_hours, assigned_hours, load_pct, home, share_days}]}], totals: Figures, loans:[Loan] (of the family's people in the planned window), people:[PersonLite], window:{from, to, planned_end}, target_load_min, target_load_max, definitions}`
+  The family's people grouped by the team they sit in, then the family as a whole computed **the same way as a row** rather than summed, so `totals.headcount = Σ rows` and the hours agree by arithmetic — the test that they do is a real check on it. A loan moves somebody between teams, never between disciplines, so `loaned_in` and `loaned_out` are always 0 for a family and nobody is counted twice.
   ```
-  Figures {headcount (home members), pool_size, loaned_in, loaned_out (people lent into / out of this set of teams within the window),
+  Figures {headcount (home members), pool_size, loaned_in, loaned_out,
            available_hours, assigned_hours, load_pct (next 4 weeks, share-weighted),
            single_skill_deps, single_skill_names (skills the set's committed work needs in the planned window that exactly one pooled person holds at the level),
            stability_index, moved_days_4w, total_days_4w (STAB-08 restricted to the set's own people),
-           open_proposals (pending changes in the open proposal naming one of the set's own people)}
+           open_proposals (pending changes in the open proposal naming one of them)}
   ```
-- `save{id?, name, description?, lead_person_id?}` (admin) → `{portfolio + teams}`; 409 on a duplicate name.
-- `delete{id}` (admin): 409 with `{teams}` while any team still references it.
-- `add_team{portfolio_id, team_id}` (admin) → `{team, portfolio}` — moves the team if it was in another portfolio; `remove_team{team_id}` (admin) → `{team}` (409 when it is in none).
-- Every mutation is audited (`portfolio`, `team`).
+  `PersonLite {id, name, initials, colour, role_title, team_id, team_name, manager_person_id, manager_name, role_family_id}`
+- `save{id?, name, description?, lead_person_id?}` (admin) → `{role_family + people}`; 409 on a duplicate name.
+- `delete{id}` (admin): 409 with `{people}` while anybody still belongs to it (including leavers — the foreign key does not care).
+- `set_person{person_id, role_family_id|null}` (admin) → `{person}`.
+- Every mutation is audited (`role_family`, `person`).
+
+## org.php — the organisation chart (ORG-01..05)
+Teams nest under teams. A team's planning scope is the team **and every team beneath it**, so planning "Data Platform"
+plans its sub-teams too; the tree is read once per request by `engine/org_lib.php team_closure()` rather than with a
+recursive query per question.
+
+**Authority (ORG-05)** runs down the tree, not across it: a delivery lead or administrator may change anything, a team
+lead may change the team they lead and everything beneath it. Moving a team or a person touches two places, so both ends
+are checked — you cannot push your own sub-team into somebody else's branch, nor pull one out of it.
+
+**Visibility (ORG-04)**: everything is visible to everyone unless a team is explicitly restricted with a stated reason
+(about the work — a reorganisation not yet announced — never about a person, ADM-05). Outsiders then get a stub carrying
+only the team's name and where it sits: a closed door rather than a hole in the chart. Administrators, the restricting
+team's lead chain and anybody inside the subtree see it in full. **A delivery lead does not bypass it** — being able to
+hold something back from the delivery lead is most of the point.
+- `tree` (everyone) → `{teams:[TeamNode], unassigned_people:[PersonNode], role_families:[{id,name,description}], can_edit_team_ids:[ids] | '*', window, definitions}`
+  ```
+  TeamNode   {id, name, parent_team_id, sort_order, description, visibility, visibility_reason, directory_object_id,
+              restricted:false, lead_person_id, lead:{id,name,initials,colour,role_title}|null,
+              headcount (its own), headcount_all (including every team beneath it),
+              load_pct, available_hours, assigned_hours (the whole sub-tree, next 4 weeks, share-weighted),
+              can_edit, people:[PersonNode], children:[TeamNode]}
+  Stub       {id, name, parent_team_id, sort_order, restricted:true, visibility:'restricted', can_edit:false, children:[], people:[]}
+  PersonNode {id, name, initials, colour, role_title, team_id, manager_person_id, manager_name,
+              role_family_id, role_family_name, load_pct, is_lead, active, on_loan_to:{to_team_id,to_team_name,to_date,allocation_pct}|null}
+  ```
+  `can_edit_team_ids` is `'*'` for a delivery lead or administrator, otherwise the team-lead's own sub-tree, so the client hides controls instead of relying on 403s.
+- `save_team{id?, name, parent_team_id?, lead_person_id?, description?, directory_object_id?}` → `{team}`. 409 on a duplicate name **under the same parent** (the same name elsewhere in the tree is fine and often right), 409 on a parent that is the team itself or one of its descendants. `directory_object_id` is where an Entra group id will go.
+- `move_team{team_id, parent_team_id|null, sort_order?, reason?}` → `{team, siblings:[{id, sort_order}]}`. 409 for a cycle; siblings are renumbered from zero at both ends, and `parent_team_id: null` moves the team to the top.
+- `move_person{person_id, team_id|null, manager_person_id?, reason?, force?}` → `{person, loans_ended:[Loan]}`. A loan is a statement about a home team, so an outstanding loan out of the old team or into the new one blocks the move with **409 and the loans named**; `force: true` ends a running loan yesterday and deletes one that has not started, both audited. Changing a home team changes which team's capacity the person counts towards, so it also raises a batched replan trigger.
+- `set_manager{person_id, manager_person_id|null}` → `{person}`. 409 for self-management or a loop — a reporting line that loops has no top.
+- `set_visibility{team_id, visibility:'everyone'|'restricted', reason?}` → `{team}`. 422 when restricting without a reason; lifting a restriction clears the reason with it.
+- `delete_team{team_id}` → `{deleted}`. 409 with `{children, people, loans}` while anything references it, including a loan in its history.
+- Every mutation is audited (`team`, `person`, `loan`), with the reason where one was given.
 
 ## work_items.php — pipeline (PIP-*, REQ-*, VIEW-08)
 - `list{status?, type_id?, size_stamp?, skill_id?, team_id?, q?, sort?, dir?, scheduled?:'yes'|'no', limit?, offset?}` → `{items:[WorkItemRow], total, counts:{all, unscheduled, scheduled, in_progress, delivered, needs_estimate, needs_benefit, skills_gap}, queue_health:{needs_estimate:{count, oldest_days}, needs_benefit:{...}, skills_gap:{...}}}`
@@ -186,9 +251,9 @@ Reads are open to every signed-in role; edits are admin.
 
 ## replan.php — the engine entry points (SCH-*, STAB-*)
 - `propose{kind:'manual'|'nightly'|'urgent', scope_person_ids?:[...], engine?:'heuristic'|'cpsat'}` (delivery_lead) → builds model from DB, runs planner (engine/planner.php, or the Python CP-SAT service if configured and requested), diffs against the committed plan, costs stability, applies guardrails, stores plan_version (proposed) + proposal + change_proposals + summary; expires/supersedes the previous open proposal noting carry-over (CHG-08). → `{proposal_id, changes, held, improvement_pct, below_threshold, summary_before, summary_after, solver_stats}`
-  **Planning scope (SCH-13, engine side done; endpoint wiring pending):** `build_model()` accepts `team_id` or `portfolio_id` (see ENGINE_MODEL.md). `propose` and `preview` should pass them through so a cycle can be run for one team, for a portfolio's teams together, or for the whole workspace as now. A scoped model still yields a **complete** workspace candidate (rows of people outside the scope pass through unchanged), so it stores and commits like any other.
-- `preview{changes:[...hypothetical: add_item{work_item_id}, remove_item, person_away{person_id,from,to}]}` → heuristic what-if within 2 s → `{summary_before, summary_after, changes:[Change-lite]}` (SCH-08, SCH-11 lite)
-- `scenario_save{name, changes, team_id?|portfolio_id?}` → plan_versions status scenario, the planning scope stored in `solver_stats.scope` and echoed as `scope` on each scenario; `scenarios` list; `scenario_adopt{id}` → becomes a proposal, re-run under the saved scope.
+  **Planning scope (SCH-13, ORG-01):** `propose`, `preview` and `scenario_save` all accept `team_id` (that team and every team beneath it, so cross-team items inside a branch can be planned together) or `role_family_id` (one discipline's people, wherever they sit); neither means the whole workspace, as before. A scoped model still yields a **complete** workspace candidate (rows of people outside the scope pass through unchanged), so it stores and commits like any other.
+- `preview{changes:[...hypothetical: add_item{work_item_id}, remove_item, person_away{person_id,from,to}], team_id?|role_family_id?}` → heuristic what-if within 2 s → `{scope, summary_before, summary_after, changes:[Change-lite]}` (SCH-08, SCH-11 lite)
+- `scenario_save{name, changes, team_id?|role_family_id?}` → plan_versions status scenario, the planning scope stored in `solver_stats.scope` and echoed as `scope` on each scenario; `scenarios` list; `scenario_adopt{id}` → becomes a proposal, re-run under the saved scope.
 - `run_nightly` (CLI or cron_key) — same as propose kind nightly, plus priority recompute + capacity derivation + stability_weeks roll-up. Also `cron.php` CLI wrapper.
   `steps` additionally carries:
   `auto_apply:{enabled, applied, leftover, plan_version_id?, skipped?, blocked?}` (CHG-07 — when `auto_apply_outside_horizon`
@@ -286,7 +351,9 @@ Routed by `router.php` from `/v1/*`; same bearer token as the app; `GET` only (a
 Errors are RFC 9457 problem details (`application/problem+json`). Lists page with `?limit=` (1–200)
 and an opaque `cursor` returned as `page.next_cursor`.
 - `/v1` → index of resources and the webhook event names; `/v1/openapi.yaml` → the OpenAPI 3.1 document (`docs/openapi.yaml`).
-- `/v1/work-items{?status,type,updated_since}`, `/v1/work-items/{ref}`, `/v1/people`, `/v1/skills`, `/v1/plan` (newest committed version),
+- `/v1/work-items{?status,type,updated_since}`, `/v1/work-items/{ref}`, `/v1/people` (with `team_id`, `manager`, `role_family`),
+  `/v1/teams` (the tree, flat with `parent_team_id`; a restricted team carries `restricted: true` and nothing else), `/v1/role-families`,
+  `/v1/skills`, `/v1/plan` (newest committed version),
   `/v1/assignments{?plan_version_id,person_id,from,to}` — the version must belong to the workspace and be committed or superseded (proposals and scenarios are 404),
   `/v1/proposals`, `/v1/benefits` (carries `is_financial`, `qualitative_scale`, `proxy_value`), `/v1/estimates`, `/v1/reports/stability`.
 
@@ -314,7 +381,8 @@ and an opaque `cursor` returned as `page.next_cursor`.
 - `list{entity?, q?, from?, to?, limit?, offset?}` (admin) → `{events, total}`; `export_csv`.
 
 ## Engine library (api/engine/) — pure PHP, no HTTP
-- `capacity.php`: `derive_capacity($conn,$wsId,$from,$to,$personIds=null)` writes capacity_days. TEAM-09: `scope_team_ids($conn,$wsId,['team_id'|'portfolio_id'])`, `loans_in_window(...)`, `team_pool($conn,$wsId,$teamIds,$from,$to)` (home members + loaned-in people, with their loans), `team_share_for($poolEntry,$day)` (0..1 share of that person-day belonging to the team set), `team_load($conn,$wsId,$teamIds,$from,$to)` (share-weighted capacity, assigned hours and load per person and in total).
+- `org_lib.php` (required by capacity.php, so every endpoint that includes that has it): `team_closure($conn,$wsId,$fresh=false)` reads the whole tree once per request — anything that writes `parent_team_id`, `sort_order`, `lead_person_id` or `visibility` must call it again with `$fresh=true`, the rule `current_policy()` follows. Then `team_descendants`, `team_ancestors`, `team_is_within` (the cycle guard), `team_lead_chain`, `team_path`, `team_restricted_by`, `team_visible_to($conn,$wsId,$teamId,$role,$personId)` (ORG-04), `can_edit_team` / `require_team_authority` / `editable_team_ids` (ORG-05), `validate_manager` (no loops), and `move_person_home_team(...)` — shared by `org.php move_person` and `people.php save`, so a drag on the chart and an edit in the person dialog obey the same loan rules and write the same audit entry. Every walk is cycle-safe: the API prevents cycles, the schema cannot, and a walk that looped would hang a request rather than return a wrong answer.
+- `capacity.php`: `derive_capacity($conn,$wsId,$from,$to,$personIds=null)` writes capacity_days. TEAM-09 / ORG-01: `scope_team_ids($conn,$wsId,['team_id'|'role_family_id'])` → `{kind, team_id, role_family_id, name, team_ids, person_ids}` (a team scope carries the team and its descendants; a role family carries people and leaves `team_ids` null), with `scope_public`, `scope_is_partial`, `scope_pool` and `scope_load` wrapping it; `loans_in_window(...)`, `team_pool($conn,$wsId,$teamIds,$from,$to,$personIds=null)` (home members + loaned-in people, with their loans — or a named set of people, all home), `team_share_for($poolEntry,$day)` (0..1 share of that person-day belonging to the set), `team_load(...)` (share-weighted capacity, assigned hours and load per person and in total).
 - `priority.php`: `compute_priority_scores($conn,$wsId)` implements section 8.4 (value 40 / urgency 25 / risk 15 / leverage 10 / age 10, confidence scale, P90 normalisation, severity for interrupt types, override, nightly rescale so top ≈ 100). Stores priority_score + priority_terms JSON `{value:{input,normalised,weight,contribution}, urgency:{...}, risk:{...}, leverage:{...}, age:{...}, override:{...}, raw_total, scaled}`.
   BEN-02: the Value term sums, per benefit and confidence-scaled, `annual_value` for a financial benefit and `proxy_value ?? qualitative_scale × qualitativeValuePerPoint` for a
   non-financial one (`items_lib.php benefit_priority_value()`; the per-point default is `priority_weights.qualitativeValuePerPoint`, 25000 when unset). The term records its
@@ -325,7 +393,7 @@ and an opaque `cursor` returned as `page.next_cursor`.
   contribution is republished as the `urgency` term with `alias_of:'severity'`, so a breakdown that renders only the
   five planned terms reproduces the score instead of drawing five empty bars; anything summing the terms must skip a
   term carrying `alias_of`.
-- `model.php`: `build_model($conn,$wsId,$opts)` → arrays: people (capacity per day incl. reserve and the scope's `share`, skills, maxConcurrent, minFocus, prefs, `home`, `loans`), items (remaining effort per policy planAt, granularity, required skills, deps, earliest start, needed_by, priority, interrupt flag, `external`), committed assignments, policy, windows, `scope`. `$opts.team_id` / `$opts.portfolio_id` build a team or portfolio model (SCH-13); neither = the whole workspace as one pool. Returns null for an unknown workspace, team or portfolio.
+- `model.php`: `build_model($conn,$wsId,$opts)` → arrays: people (capacity per day incl. reserve and the scope's `share`, skills, maxConcurrent, minFocus, prefs, `home`, `loans`), items (remaining effort per policy planAt, granularity, required skills, deps, earliest start, needed_by, priority, interrupt flag, `external`), committed assignments, policy, windows, `scope`. `$opts.team_id` builds a model of that team and every team beneath it, `$opts.role_family_id` one of a discipline's people (SCH-13, ORG-01/02); neither = the whole workspace as one pool. Returns null for an unknown workspace, team or role family.
 - `commit.php`: `commit_proposal($conn,$wsId,$proposal,$opts)` materialises accepted changes into a new committed version (CHG-05/06, EST-09, NOT-01); `auto_apply_outside_horizon($conn,$wsId,$proposalId)` is the nightly CHG-07 pass; `reestimate_blocked_changes(...)` is the EST-09 gate. Shared by changes.php and replan.php.
 - `planner.php`: `heuristic_plan($model, $opts)` list scheduling per 8.9 (respects all hard constraints in 8.5; incoming work the policy counts as small — `remaining_days <= small_fill_threshold_days` — is queued ahead of larger incoming work so it fills the gaps the kept committed work leaves (STAB-10); never moves committed/locked; extend-in-place for upward re-estimates (STAB-09); incidents consume reserve then displace lowest-priority planned work of that person (SCH-10); `scope_person_ids` for urgent cycles) → candidate assignments + unscheduled reasons + objective terms (8.6).
 - `diff.php`: `diff_plans($committed,$candidate,$model)` → list of changes with kind, before/after, stability_cost_days (assignment-days moved inside committed+planned windows; indicative = 0), inside_freeze, affected people; `objective_delta`.

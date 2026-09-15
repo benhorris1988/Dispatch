@@ -1453,7 +1453,8 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
 
   bool _loading = true;
   String? _error;
-  List<DevUser> _users = const [];
+  List<DirectoryUser> _users = const [];
+  int? _saving;
 
   @override
   void initState() {
@@ -1467,7 +1468,7 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
       _error = null;
     });
     try {
-      final users = await Api.listDevUsers();
+      final users = await Api.listUsers();
       if (!mounted) return;
       setState(() {
         _users = users;
@@ -1482,14 +1483,34 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
     }
   }
 
+  Future<void> _setRole(DirectoryUser u, String role) async {
+    setState(() => _saving = u.id);
+    try {
+      await Api.setRole(u.id, role);
+      if (!mounted) return;
+      tmToast(context, '${u.displayName} is now ${roleLabel(role).toLowerCase()}');
+      await _load();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      tmToast(context, e.message, bad: true);
+    } finally {
+      if (mounted) setState(() => _saving = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const SkeletonPanel(rows: 6);
     if (_error != null) return ErrorState(title: 'We could not load the users', message: _error, onRetry: _load);
+    final session = context.watch<Session>();
+    final isAdmin = session.isAdmin;
+    final mySelf = session.user?.id;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      const _SignInProvidersPanel(),
+      const SizedBox(height: Sp.lg),
       Panel(
         title: 'People and roles',
-        subtitle: 'Roles come from the identity provider’s group claims',
+        subtitle: 'An administrator sets these; the API enforces them on every request',
         padding: EdgeInsets.zero,
         dividerAfterHeader: true,
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -1497,30 +1518,45 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
             columns: const [
               TmCol('Person', flex: 3),
               TmCol('Email', flex: 3),
+              TmCol('Sign-in', width: 130),
               TmCol('Role', width: 200),
             ],
             rows: [
               for (final u in _users)
                 [
                   Row(children: [
-                    PersonAvatar(u.initials ?? initialsOf(u.displayName), colourHex: u.colour, seed: u.id, size: 28),
+                    PersonAvatar(u.initialsOrDerived, colourHex: u.colour, seed: u.id, size: 28),
                     const SizedBox(width: Sp.md),
-                    Flexible(child: Text(u.displayName, style: context.text.titleSmall, overflow: TextOverflow.ellipsis)),
+                    Flexible(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                        Text(u.displayName, style: context.text.titleSmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        if (u.teamName != null)
+                          Text(u.teamName!, style: context.text.bodySmall?.copyWith(color: context.mutedColor), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      ]),
+                    ),
                   ]),
-                  Text(u.email ?? '—', style: context.text.bodyMedium?.copyWith(color: context.mutedColor), overflow: TextOverflow.ellipsis),
-                  DropdownButtonFormField<String>(
-                    initialValue: u.role,
-                    isDense: true,
-                    items: [for (final r in kRoleOrder) DropdownMenuItem(value: r, child: Text(roleLabel(r)))],
-                    // No role-assignment endpoint exists yet; group sync owns this.
-                    onChanged: null,
-                  ),
+                  Text(u.email ?? '—', style: context.text.bodyMedium?.copyWith(color: context.mutedColor), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ToneChip(u.providerLabel, compact: true, tone: u.authProvider == null ? null : 'info'),
+                  // An administrator may change anybody's role but their own: the
+                  // API refuses the last administrator demoting themselves, and
+                  // offering a control that cannot work is worse than not offering it.
+                  if (!isAdmin || u.id == mySelf)
+                    Text(roleLabel(u.role), style: context.text.bodyMedium)
+                  else if (_saving == u.id)
+                    const Align(alignment: Alignment.centerLeft, child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)))
+                  else
+                    DropdownButtonFormField<String>(
+                      initialValue: u.role,
+                      isDense: true,
+                      items: [for (final r in kRoleOrder) DropdownMenuItem(value: r, child: Text(roleLabel(r)))],
+                      onChanged: (r) { if (r != null && r != u.role) _setRole(u, r); },
+                    ),
                 ],
             ],
           ),
           const Padding(
             padding: EdgeInsets.all(Sp.lg),
-            child: TmInfoBox('Role assignment is synchronised from Entra ID group claims. Changing a role here is not available in this build.'),
+            child: TmInfoBox('An account is created the first time somebody signs in, as a team member unless their address is listed in bootstrap_admins. A role change takes effect on that person\u2019s next request, without them signing in again.'),
           ),
         ]),
       ),
@@ -1545,6 +1581,99 @@ class _TeamsRolesSectionState extends State<_TeamsRolesSection> {
         ),
       ),
     ]);
+  }
+}
+
+/// Which identity providers this deployment offers (ADM-01). Read-only on
+/// purpose: client ids are configuration that lives in `api/config.php`, and a
+/// screen that pretended to change them would be lying about what it had done.
+class _SignInProvidersPanel extends StatefulWidget {
+  const _SignInProvidersPanel();
+
+  @override
+  State<_SignInProvidersPanel> createState() => _SignInProvidersPanelState();
+}
+
+class _SignInProvidersPanelState extends State<_SignInProvidersPanel> {
+  Future<AuthProviders> _future = Api.providers();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<AuthProviders>(
+      future: _future,
+      builder: (context, snap) {
+        final p = snap.data;
+        final google = p?.googleUsable ?? false;
+        final microsoft = p?.microsoftEnabled ?? false;
+        return Panel(
+          title: 'Sign-in',
+          subtitle: 'Configured in api/config.php',
+          trailing: IconButton(
+            tooltip: 'Check again',
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            onPressed: () => setState(() => _future = Api.providers()),
+          ),
+          child: snap.connectionState != ConnectionState.done
+              ? const SkeletonPanel(rows: 2)
+              : snap.hasError
+                  ? TmInlineError(snap.error is ApiException ? (snap.error as ApiException).message : 'Could not read the sign-in configuration')
+                  : LayoutBuilder(builder: (context, c) {
+                      final googleCard = _ProviderCard(
+                        name: 'Google',
+                        on: google,
+                        detail: google
+                            ? 'Web client ${_tail(p!.googleWebClientId!)}${p.googleHostedDomain == null ? '' : ' · ${p.googleHostedDomain} accounts only'}'
+                            : 'Add client ids to google.client_ids, web first.',
+                      );
+                      final microsoftCard = _ProviderCard(
+                        name: 'Microsoft Entra ID',
+                        on: microsoft,
+                        detail: microsoft
+                            ? 'The tenant is configured; the app does not offer the button yet.'
+                            : 'Set entra.tenant_id and entra.client_id to turn it on.',
+                      );
+                      if (c.maxWidth <= 560) {
+                        return Column(children: [googleCard, const SizedBox(height: Sp.md), microsoftCard]);
+                      }
+                      // Not CrossAxisAlignment.stretch: the panel has no bounded height
+                      // here, and stretching against infinity is an assertion, not a layout.
+                      return IntrinsicHeight(
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                          Expanded(child: googleCard),
+                          const SizedBox(width: Sp.md),
+                          Expanded(child: microsoftCard),
+                        ]),
+                      );
+                    }),
+        );
+      },
+    );
+  }
+
+  /// Client ids are long and it is the tail that tells two of them apart.
+  static String _tail(String id) => id.length <= 24 ? id : '…${id.substring(id.length - 24)}';
+}
+
+class _ProviderCard extends StatelessWidget {
+  const _ProviderCard({required this.name, required this.on, required this.detail});
+  final String name;
+  final bool on;
+  final String detail;
+
+  @override
+  Widget build(BuildContext context) {
+    return DispatchCard(
+      dashed: !on,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(name, style: context.text.titleMedium, maxLines: 1, overflow: TextOverflow.ellipsis)),
+          const SizedBox(width: Sp.sm),
+          ToneChip(on ? 'Configured' : 'Not configured', tone: on ? 'ok' : null, compact: true),
+        ]),
+        const SizedBox(height: Sp.xs),
+        Text(detail, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+      ]),
+    );
   }
 }
 

@@ -19,7 +19,7 @@ foreach (array_slice($argv, 1) as $arg) {
 // The suites need a live server; fail fast with a useful message rather than 200 red lines.
 $probe = @file_get_contents("$base/api/auth.php", false, stream_context_create([
     'http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n",
-               'content' => '{"action":"list_dev_users"}', 'timeout' => 5, 'ignore_errors' => true],
+               'content' => '{"action":"providers"}', 'timeout' => 5, 'ignore_errors' => true],
 ]));
 if ($probe === false || json_decode($probe, true) === null) {
     fwrite(STDERR, "No API at $base.\n  Start it with:  powershell -ExecutionPolicy Bypass -File run_local.ps1\n");
@@ -45,7 +45,9 @@ $suites = [
     'Workspace config, people, skills'              => 'config_people_test.php',
     'Work items, estimates, benefits'               => 'work_items_test.php',
     'Non-financial benefits (BEN-02)'               => 'benefits_qualitative_test.php',
-    'Portfolios and loans (TEAM-09, SCH-13)'        => 'portfolio_test.php',
+    'Role families and loans (TEAM-09, SCH-13)'     => 'role_family_test.php',
+    'Organisation chart (ORG-01..05)'              => 'org_test.php',
+    'Sign-in, provisioning and roles (ADM-01/02)'  => 'auth_test.php',
     'Overview, reports, watch list'                 => 'overview_reports_test.php',
     'Plan, proposals, changes (HTTP smoke)'         => 'http_smoke.php',
     'Public API, webhooks, calendar feed'          => 'public_api_test.php',

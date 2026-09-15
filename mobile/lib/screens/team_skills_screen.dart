@@ -20,7 +20,7 @@ import '../widgets/tm_scope_picker.dart';
 import '../widgets/widgets.dart';
 import 'parts/adm_rota_panel.dart';
 import 'parts/tm_loan_dialog.dart';
-import 'portfolio_screen.dart';
+import 'role_family_screen.dart';
 
 /// Team & skills (TEAM-01, TEAM-04, spec 9.4.6).
 ///
@@ -209,13 +209,9 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
     _load();
   }
 
-  /// The portfolio this view relates to: the one chosen, or the one the chosen
-  /// team sits in.
-  int? get _portfolioId {
-    if (_scope.isPortfolio) return _scope.id;
-    if (_scope.isTeam) return _scopeOptions.teams.where((t) => t.id == _scope.id).firstOrNull?.portfolioId;
-    return null;
-  }
+  /// The role family this view relates to, when one has been chosen. A team no
+  /// longer implies a discipline: that is the point of the rename.
+  int? get _roleFamilyId => _scope.isRoleFamily ? _scope.id : null;
 
   /// People who can be lent from here: active home members of the scope (in a
   /// scoped view), or anyone active in the workspace.
@@ -224,7 +220,7 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
   Future<void> _addLoan({int? personId}) async {
     final teams = _scopeOptions.teams.isNotEmpty
         ? _scopeOptions.teams
-        : [for (final t in _teams) ScopeTeam(id: t.id, name: t.name, portfolioId: t.portfolioId, portfolioName: t.portfolioName)];
+        : [for (final t in _teams) ScopeTeam(id: t.id, name: t.name, parentTeamId: t.parentTeamId, parentName: t.parentName, depth: t.depth)];
     final saved = await showTmAddLoan(context, people: _lendable, teams: teams, personId: personId, today: _today);
     if (saved) {
       if (mounted) tmToast(context, 'Loan added');
@@ -244,8 +240,6 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
         // Not lent today, but lent within the horizon: still worth a word on the row.
         p.loans.where((l) => l.fromTeamId == p.teamId && !l.endedBefore(_today)).firstOrNull;
     if (out == null) return null;
-    // In a portfolio view a loan between two of its own teams is neither in nor out.
-    if (_scope.isPortfolio && _scopeOptions.teams.any((t) => t.id == out.toTeamId && t.portfolioId == _scope.id)) return null;
     return (loan: out, side: LoanSide.lent);
   }
 
@@ -270,12 +264,13 @@ class _TeamSkillsScreenState extends State<TeamSkillsScreen> {
     final policy = context.watch<WorkspaceConfig>().policy;
     final m = _matrix;
 
-    final portfolioId = _portfolioId;
+    final roleFamilyId = _roleFamilyId;
     final actions = <Widget>[
       SegmentedTabs(labels: _tabs, selected: _tab, onChanged: (i) => setState(() => _tab = i)),
       if (_scopeOptions.hasChoices) TmScopePicker(options: _scopeOptions, value: _scope, onChanged: _setScope, enabled: !_loading),
-      if (portfolioId != null)
-        SecondaryButton('Portfolio view', icon: Icons.account_tree_outlined, onPressed: () => context.go(PortfolioScreen.route(portfolioId))),
+      if (roleFamilyId != null)
+        SecondaryButton('Role family view', icon: Icons.badge_outlined, onPressed: () => context.go(RoleFamilyScreen.route(roleFamilyId))),
+      SecondaryButton('Organisation', icon: Icons.account_tree_outlined, onPressed: () => context.go(Routes.org)),
       SecondaryButton('Export', icon: Icons.file_download_outlined, onPressed: m == null ? null : _exportMatrix),
       if (session.isTeamLead && _scopeOptions.teams.length > 1)
         SecondaryButton('Add loan', icon: Icons.swap_horiz_rounded, onPressed: _loading ? null : () => _addLoan()),
@@ -850,14 +845,14 @@ class _PeopleTab extends StatelessWidget {
         ]),
         definition: AdmMetrics.load(targetMin: policy.targetLoadMin, targetMax: policy.targetLoadMax),
       ),
-      if (teamsShown.length > 1 || teamsShown.any((t) => t.portfolioId != null)) ...[
+      if (teamsShown.length > 1 || teamsShown.any((t) => t.parentTeamId != null)) ...[
         const SizedBox(height: Sp.sm),
         Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [
           for (final t in teamsShown)
             InfoPill(
-              dotJoin([t.name, t.portfolioName]),
-              icon: t.portfolioId == null ? Icons.groups_outlined : Icons.account_tree_outlined,
-              onTap: t.portfolioId == null ? null : () => context.go(PortfolioScreen.route(t.portfolioId!)),
+              dotJoin([t.name, t.parentName]),
+              icon: Icons.groups_outlined,
+              onTap: () => context.go(Routes.org),
             ),
         ]),
       ],
@@ -1397,17 +1392,23 @@ class _MatrixSkeleton extends StatelessWidget {
 
 // ─── Parsing (skills.php matrix) ──────────────────────────────────────────
 
+/// A team as `people.php list` reports it: ORG-01 means it has a place in a
+/// tree now, so it carries its parent and how deep it sits.
 class _Team {
-  const _Team({required this.id, required this.name, this.portfolioId, this.portfolioName});
+  const _Team({required this.id, required this.name, this.parentTeamId, this.parentName, this.depth = 0, this.path = ''});
   final int id;
   final String name;
-  final int? portfolioId;
-  final String? portfolioName;
+  final int? parentTeamId;
+  final String? parentName;
+  final int depth;
+  final String path;
   factory _Team.fromJson(Map<String, dynamic> j) => _Team(
         id: asIntOr(j['id'], 0),
         name: asStrOr(j['name'], ''),
-        portfolioId: asInt(j['portfolio_id']),
-        portfolioName: asStr(j['portfolio_name']),
+        parentTeamId: asInt(j['parent_team_id']),
+        parentName: asStr(j['parent_team_name']),
+        depth: asIntOr(j['depth'], 0),
+        path: asStrOr(j['path'], ''),
       );
 }
 

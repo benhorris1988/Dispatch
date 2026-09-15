@@ -11,11 +11,12 @@ import 'screens/estimates_screen.dart';
 import 'screens/more_screen.dart';
 import 'screens/my_week_screen.dart';
 import 'screens/notifications_screen.dart';
+import 'screens/org_chart_screen.dart';
 import 'screens/overview_screen.dart';
 import 'screens/person_screen.dart';
 import 'screens/pipeline_screen.dart';
 import 'screens/plan_versions_screen.dart';
-import 'screens/portfolio_screen.dart';
+import 'screens/role_family_screen.dart';
 import 'screens/reports_screen.dart';
 import 'screens/scenarios_screen.dart';
 import 'screens/schedule_screen.dart';
@@ -75,9 +76,11 @@ GoRouter buildRouter(Session session) {
           _page(Routes.changes, (s) => const ChangesScreen()),
           _page('/changes/:id', (s) => ChangeDetailScreen(id: s.pathParameters['id']!)),
           _page(Routes.team, (s) => const TeamSkillsScreen()),
+          // ORG-01..05: the whole organisation, teams within teams.
+          _page(Routes.org, (s) => const OrgChartScreen()),
           _page('/people/:id', (s) => PersonScreen(id: s.pathParameters['id']!)),
-          // TEAM-09: a portfolio's teams side by side; hangs off Team & skills.
-          _page('/portfolios/:id', (s) => PortfolioScreen(id: s.pathParameters['id']!)),
+          // ORG-02: one discipline's people, grouped by the team each sits in.
+          _page('/role-families/:id', (s) => RoleFamilyScreen(id: s.pathParameters['id']!)),
           _page(Routes.estimates, (s) => const EstimatesScreen()),
           _page(Routes.benefits, (s) => const BenefitsScreen()),
           _page(Routes.reports, (s) => const ReportsScreen()),

@@ -4,6 +4,8 @@
 //   php tests/http_smoke.php [base=http://localhost:8090]
 // Needs the local server (run_local.ps1) and a seeded demo DB (php seed_demo.php).
 // Re-seed afterwards: this commits plan versions and decides the open proposal.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 $BASE = rtrim($argv[1] ?? 'http://localhost:8090', '/');
@@ -24,20 +26,14 @@ function check($cond, $label) { global $pass, $fail; if ($cond) { $pass++; echo 
 function section($t) { echo "\n== $t\n"; }
 function login($role) {
     global $token;
-    $token = null;
-    [, $users] = api('auth', ['action' => 'list_dev_users']);
-    foreach ($users['users'] ?? [] as $u) if ($u['role'] === $role) {
-        [, $r] = api('auth', ['action' => 'dev_login', 'user_id' => $u['id']]);
-        $token = $r['token'] ?? null;
-        return $u;
-    }
-    return null;
+    $token = token_for($role);
+    return $token ? user_for($role) : null;
 }
 
 section('Sign in as the delivery lead');
 $lead = login('delivery_lead');
-check($lead !== null, 'a delivery_lead dev user exists');
-check(!empty($token), 'dev_login returns a token');
+check($lead !== null, 'a delivery_lead account exists');
+check(!empty($token), 'mint_token.php issues a token for it');
 [, $me] = api('auth', ['action' => 'me']);
 check(($me['user']['role'] ?? '') === 'delivery_lead', 'me reports the delivery lead role');
 

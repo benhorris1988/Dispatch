@@ -6,6 +6,8 @@
 // admin connection, runs the purge over HTTP, and asserts both halves of the contract:
 // what goes, and — more importantly — what must not.
 // Re-seed afterwards: this rewrites timestamps and deletes plan history.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 require __DIR__ . '/../migration_connect.php';   // $conn (db_owner), CLI-only
@@ -37,16 +39,10 @@ if ($seedRc !== 0) { fwrite(STDERR, "seed failed:
 ", array_slice($seedOut, -5)) . "
 "); exit(2); }
 
-[, $users] = api('auth', ['action' => 'list_dev_users']);
-$admin = null; $lead = null;
-foreach ($users['users'] ?? [] as $u) {
-    if ($u['role'] === 'admin' && $admin === null) $admin = $u;
-    if ($u['role'] === 'delivery_lead' && $lead === null) $lead = $u;
-}
-[, $a] = api('auth', ['action' => 'dev_login', 'user_id' => $admin['id']]);
-$adminToken = $a['token'] ?? null;
-[, $l] = api('auth', ['action' => 'dev_login', 'user_id' => $lead['id']]);
-$leadToken = $l['token'] ?? null;
+$admin = user_for('admin');
+$lead = user_for('delivery_lead');
+$adminToken = token_for('admin');
+$leadToken = token_for('delivery_lead');
 check(!empty($adminToken) && !empty($leadToken), 'signed in as admin and delivery lead');
 
 $wsId = one($conn, "SELECT TOP 1 id FROM dbo.workspaces ORDER BY id");

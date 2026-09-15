@@ -381,36 +381,46 @@ check($capLen, 'each person sends one capacity pair per modelled day (docs/ENGIN
 check(($payload['scope']['kind'] ?? null) === 'workspace', 'the payload names its scope');
 
 // ---------------------------------------------------------------------------------
-section('Teams, portfolios and loans in the model (TEAM-09)');
+section('Teams, sub-teams and loans in the model (TEAM-09, ORG-01)');
 $dpId = (int)scalar($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND name = ?", [$wsId, 'Data Platform']);
 $ipId = (int)scalar($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND name = ?", [$wsId, 'Integration Platform']);
-$pfId = (int)scalar($conn, "SELECT id FROM dbo.portfolios WHERE workspace_id = ? AND name = ?", [$wsId, 'Data & Integration']);
+$rootId = (int)scalar($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND name = ?", [$wsId, 'Digital & Data']);
+$peId = (int)scalar($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND name = ?", [$wsId, 'Platform engineering']);
 $mei = (int)scalar($conn, "SELECT id FROM dbo.people WHERE workspace_id = ? AND name = ?", [$wsId, 'Mei Chen']);
 $loan = row($conn, "SELECT * FROM dbo.person_loans WHERE workspace_id = ? AND person_id = ?", [$wsId, $mei]);
-check($dpId >= 0 && $ipId >= 0 && $pfId >= 0, "both teams and the portfolio are seeded (teams $dpId, $ipId; portfolio $pfId)");
+check($dpId > 0 && $ipId > 0 && $rootId > 0 && $peId > 0, "the seeded tree is there (root $rootId; Data Platform $dpId with Platform engineering $peId; Integration Platform $ipId)");
 check($loan !== null && (int)$loan['to_team_id'] === $dpId && (int)$loan['allocation_pct'] === 50, 'Mei Chen is seeded on loan to Data Platform at 50%');
 $loanFrom = substr($loan['from_date'], 0, 10); $loanTo = substr($loan['to_date'], 0, 10);
 $before = add_working_days($loanFrom, -1); $after = add_working_days($loanTo, 1);
 
 $dp = build_model($conn, $wsId, ['team_id' => $dpId]);
 $ip = build_model($conn, $wsId, ['team_id' => $ipId]);
-$pf = build_model($conn, $wsId, ['portfolio_id' => $pfId]);
-check($dp !== null && $ip !== null && $pf !== null, 'team and portfolio models build');
+$pf = build_model($conn, $wsId, ['team_id' => $rootId]);      // the whole branch: ORG-01 replaced the portfolio
+$pe = build_model($conn, $wsId, ['team_id' => $peId]);
+check($dp !== null && $ip !== null && $pf !== null && $pe !== null, 'team models build at every level of the tree');
 check(build_model($conn, $wsId, ['team_id' => 999999]) === null, 'an unknown team gives no model rather than a workspace one');
 $dpHome = array_filter($dp['people'], fn($p) => $p['home']);
-check(count($dpHome) === 8, 'the Data Platform model has its 8 home members (' . count($dpHome) . ')');
+check(count($dpHome) === 8, 'a parent team\'s model has the 8 home members of its whole sub-tree (' . count($dpHome) . ')');
 check(count($dp['people']) === 9 && isset($dp['people'][$mei]) && $dp['people'][$mei]['home'] === false, 'plus Mei, who is in the pool only through the loan (' . count($dp['people']) . ')');
+check(count($pe['people']) === 3, 'a leaf team is just its own three (' . count($pe['people']) . ')');
 check(count($ip['people']) === 4 && ($ip['people'][$mei]['home'] ?? null) === true, 'the Integration Platform model has its 4 people, Mei at home (' . count($ip['people']) . ')');
-check(count($pf['people']) === 12 && count(array_filter($pf['people'], fn($p) => $p['home'])) === 12, 'the portfolio model has all 12, everyone at home');
+check(count($pf['people']) === 12 && count(array_filter($pf['people'], fn($p) => $p['home'])) === 12, 'the root model has all 12, everyone at home');
 check(!empty($dp['scope']['partial']) && $dp['scope']['kind'] === 'team' && $dp['scope']['team_id'] === $dpId, 'a team model is marked partial with its team id');
-check(!empty($pf['scope']['partial']) && $pf['scope']['kind'] === 'portfolio' && $pf['scope']['team_ids'] === [$dpId, $ipId], 'a portfolio model lists its teams');
+check(!empty($pf['scope']['partial']) && $pf['scope']['kind'] === 'team' && count($pf['scope']['team_ids']) === 5 && $pf['scope']['team_ids'][0] === $rootId,
+    'a parent team\'s model lists the whole sub-tree, itself first (' . implode(',', $pf['scope']['team_ids']) . ')');
+$rf = (int)scalar($conn, "SELECT id FROM dbo.role_families WHERE workspace_id = ? AND name = ?", [$wsId, 'Integration']);
+$rfm = build_model($conn, $wsId, ['role_family_id' => $rf]);
+check($rfm !== null && count($rfm['people']) === 4 && count(array_filter($rfm['people'], fn($p) => $p['home'])) === 4 && $rfm['scope']['kind'] === 'role_family' && $rfm['scope']['team_ids'] === null,
+    'a role family model is a set of PEOPLE, all home, with no team boundary (ORG-02)');
+check(build_model($conn, $wsId, ['role_family_id' => 999999]) === null, 'an unknown role family gives no model either');
 
 // The loan moves half of Mei for its dates — and nothing outside them.
 $s = fn($m, $d) => $m['people'][$mei]['capacity'][$d]['share'] ?? null;
 check($s($dp, $loanFrom) == 0.5 && $s($dp, $loanTo) == 0.5, "Data Platform holds 50% of Mei on the loan's days (" . $s($dp, $loanFrom) . ', ' . $s($dp, $loanTo) . ')');
 check($s($dp, $before) == 0 && $s($dp, $after) == 0, "and none of her the day before or after (" . $s($dp, $before) . ', ' . $s($dp, $after) . ')');
 check($s($ip, $loanFrom) == 0.5 && $s($ip, $before) == 1 && $s($ip, $after) == 1, 'Integration Platform keeps the other half, and all of her outside the loan (' . $s($ip, $loanFrom) . ', ' . $s($ip, $before) . ', ' . $s($ip, $after) . ')');
-check($s($pf, $loanFrom) == 1 && $s($model, $loanFrom) == 1, 'the portfolio and workspace models see the whole of her: a loan inside the scope moves nothing');
+check($s($pf, $loanFrom) == 1 && $s($model, $loanFrom) == 1, 'the root and workspace models see the whole of her: a loan inside the scope moves nothing');
+check($s($rfm, $loanFrom) == 1, 'and so does her role family: a loan moves a person between teams, never between disciplines');
 $shareSum = 0; foreach ([$dp, $ip] as $m) $shareSum += $s($m, $loanFrom);
 check(abs($shareSum - 1.0) < 1e-9, 'the two teams\' shares of a loan day add up to the person');
 $apiSkill = (int)scalar($conn, "SELECT id FROM dbo.skills WHERE workspace_id = ? AND name = ?", [$wsId, 'API integration']);
@@ -427,7 +437,7 @@ if ($diLoan !== null) {
     near(pl_free($stDp, $mei, $dp['day_index'][$before]), 0.0, 0.01, 'and nothing the day before');
 }
 $dpPlan = heuristic_plan($dp); $ipPlan = heuristic_plan($ip); $pfPlan = heuristic_plan($pf);
-foreach ([['Data Platform', $dp, $dpPlan], ['Integration Platform', $ip, $ipPlan], ['portfolio', $pf, $pfPlan]] as [$label, $m, $r]) {
+foreach ([['Data Platform', $dp, $dpPlan], ['Integration Platform', $ip, $ipPlan], ['whole organisation', $pf, $pfPlan]] as [$label, $m, $r]) {
     $v = plan_check_constraints($r['assignments'], $m);
     check(empty($v), "the $label candidate breaks no hard constraint" . ($v ? ': ' . implode('; ', array_slice($v, 0, 3)) : ''));
 }
@@ -446,14 +456,22 @@ $externalReported = array_filter($ipPlan['unscheduled'], fn($u) => in_array($u['
 check(empty($externalReported), 'external items are never reported as unscheduled by a team that does not own them');
 
 // ---------------------------------------------------------------------------------
-section('Multi-team scheduling within a portfolio (SCH-13)');
+section('Multi-team scheduling within a branch of the tree (SCH-13, ORG-01)');
 // An item needing Terraform L3 (only Priya, Data Platform) AND API integration L4 (only Tariq,
-// Integration Platform), with the effort split by skill. Neither team can place it alone; the
-// portfolio can, across the two teams.
+// Integration Platform), with the effort split by skill. Neither team can place it alone; their
+// common parent can, across both.
 $tfSkill = (int)scalar($conn, "SELECT id FROM dbo.skills WHERE workspace_id = ? AND name = ?", [$wsId, 'Terraform']);
 $tfHolders = array_map(fn($r) => (int)$r['team_id'], rows($conn, "SELECT DISTINCT p.team_id FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id WHERE p.workspace_id = ? AND p.active = 1 AND ps.skill_id = ? AND ps.proficiency >= 3", [$wsId, $tfSkill]));
 $apiHolders = array_map(fn($r) => (int)$r['team_id'], rows($conn, "SELECT DISTINCT p.team_id FROM dbo.person_skills ps JOIN dbo.people p ON p.id = ps.person_id WHERE p.workspace_id = ? AND p.active = 1 AND ps.skill_id = ? AND ps.proficiency >= 4", [$wsId, $apiSkill]));
-check($tfHolders === [$dpId] && $apiHolders === [$ipId], 'the two skills live in different teams (Terraform L3 in Data Platform, API integration L4 in Integration Platform)');
+// Skill holders sit in leaf teams now, so compare the branch each one belongs to rather than the
+// team id itself: what matters is that the two skills are in different branches of the tree.
+$branchOf = function ($teamId) use ($conn, $wsId, $rootId) {
+    foreach (array_merge([$teamId], team_ancestors($conn, $wsId, $teamId)) as $t) if (in_array($rootId, team_ancestors($conn, $wsId, $t), true)) return $t;
+    return $teamId;
+};
+$tfBranches = array_values(array_unique(array_map($branchOf, $tfHolders)));
+$apiBranches = array_values(array_unique(array_map($branchOf, $apiHolders)));
+check($tfBranches === [$dpId] && $apiBranches === [$ipId], 'the two skills live in different branches (Terraform L3 under Data Platform, API integration L4 in Integration Platform): ' . implode(',', $tfBranches) . ' vs ' . implode(',', $apiBranches));
 $wtId = (int)scalar($conn, "SELECT id FROM dbo.work_types WHERE workspace_id = ? AND name = ?", [$wsId, 'Project']);
 $szId = (int)scalar($conn, "SELECT id FROM dbo.size_classes WHERE workspace_id = ? AND work_type_id IS NULL AND stamp = 'M'", [$wsId]);
 $xId = insert($conn, 'work_items', ['workspace_id' => $wsId, 'ref' => 'WI-TEST-X', 'work_type_id' => $wtId, 'size_class_id' => $szId, 'title' => 'Cross-team test item (engine_test)', 'status' => 'ready',
@@ -461,7 +479,7 @@ $xId = insert($conn, 'work_items', ['workspace_id' => $wsId, 'ref' => 'WI-TEST-X
 q($conn, "INSERT INTO dbo.skill_requirements (work_item_id, skill_id, min_proficiency, effort_days) VALUES (?,?,?,?)", [$xId, $tfSkill, 3, 4]);
 q($conn, "INSERT INTO dbo.skill_requirements (work_item_id, skill_id, min_proficiency, effort_days) VALUES (?,?,?,?)", [$xId, $apiSkill, 4, 5]);
 try {
-    $dpX = build_model($conn, $wsId, ['team_id' => $dpId]); $ipX = build_model($conn, $wsId, ['team_id' => $ipId]); $pfX = build_model($conn, $wsId, ['portfolio_id' => $pfId]);
+    $dpX = build_model($conn, $wsId, ['team_id' => $dpId]); $ipX = build_model($conn, $wsId, ['team_id' => $ipId]); $pfX = build_model($conn, $wsId, ['team_id' => $rootId]);
     check(isset($pfX['items'][$xId]) && is_array($pfX['items'][$xId]['skill_effort']) && count($pfX['items'][$xId]['skill_effort']) === 2, 'the test item is modelled with its effort split by skill');
     $placedBy = function (array $plan) use ($xId) { $rows = array_values(array_filter($plan['assignments'], fn($a) => $a['work_item_id'] === $xId)); return $rows; };
     $unschedReason = function (array $plan) use ($xId) { foreach ($plan['unscheduled'] as $u) if ($u['work_item_id'] === $xId) return $u['reason']; return null; };
@@ -470,11 +488,11 @@ try {
     check(!$placedBy($ipR) && $unschedReason($ipR) === 'skills_gap', 'Integration Platform alone cannot place it: skills gap (' . ($unschedReason($ipR) ?? 'placed') . ')');
     $rows = $placedBy($pfR);
     $teamsUsed = array_unique(array_map(fn($a) => $pfX['people'][$a['person_id']]['team_id'], $rows));
-    check(count($rows) === 2 && count($teamsUsed) === 2, 'the portfolio places it across both teams (' . count($rows) . ' rows, ' . count($teamsUsed) . ' teams: ' . implode(', ', array_map(fn($a) => $pfX['people'][$a['person_id']]['name'] . ' · ' . ($a['role_label'] ?? '?'), $rows)) . ')');
+    check(count($rows) === 2 && count($teamsUsed) === 2, 'the parent team places it across both branches (' . count($rows) . ' rows, ' . count($teamsUsed) . ' teams: ' . implode(', ', array_map(fn($a) => $pfX['people'][$a['person_id']]['name'] . ' · ' . ($a['role_label'] ?? '?'), $rows)) . ')');
     $skillOk = true;
     foreach ($rows as $a) { $p = $pfX['people'][$a['person_id']]; $need = $a['role_label'] === 'Terraform' ? [$tfSkill, 3] : [$apiSkill, 4]; if (($p['skills'][$need[0]] ?? 0) < $need[1]) $skillOk = false; }
     check($skillOk, 'each portion goes to someone qualified for that skill');
-    check(empty(plan_check_constraints($pfR['assignments'], $pfX)), 'and the portfolio candidate still breaks no hard constraint');
+    check(empty(plan_check_constraints($pfR['assignments'], $pfX)), 'and the whole-organisation candidate still breaks no hard constraint');
     // The same item in the whole-workspace model is also placeable (one pool): SCH-13 adds team boundaries, it does not remove capability.
     $wsR = heuristic_plan(build_model($conn, $wsId));
     check(count($placedBy($wsR)) === 2, 'the workspace model places it too');

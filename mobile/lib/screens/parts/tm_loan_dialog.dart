@@ -193,7 +193,7 @@ class _TmAddLoanDialogState extends State<_TmAddLoanDialog> {
                       initialValue: _toTeamId,
                       isExpanded: true,
                       items: [
-                        for (final t in targets) DropdownMenuItem(value: t.id, child: Text(dotJoin([t.name, t.portfolioName]), overflow: TextOverflow.ellipsis)),
+                        for (final t in targets) DropdownMenuItem(value: t.id, child: Text(dotJoin([t.name, t.parentName]), overflow: TextOverflow.ellipsis)),
                       ],
                       onChanged: (v) => setState(() => _toTeamId = v),
                     ),

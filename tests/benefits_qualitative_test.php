@@ -3,6 +3,8 @@
 // weigh on the priority score without inflating the financial totals.
 //   php tests/benefits_qualitative_test.php [base=http://localhost:8090]
 // Needs the local server (run_local.ps1) and a seeded demo DB. Mutates WI-1068's benefits: re-seed after.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $BASE = rtrim($argv[1] ?? 'http://localhost:8090', '/');
 $pass = 0; $fail = 0; $token = null;
@@ -20,7 +22,7 @@ function api($endpoint, array $body, $expectCode = 200) {
 }
 function check($cond, $label) { global $pass, $fail; if ($cond) { $pass++; echo "  ok   $label\n"; } else { $fail++; echo "  FAIL $label\n"; } }
 function section($t) { echo "\n== $t\n"; }
-function loginRole($role) { global $token; $token = null; [, $u] = api('auth', ['action' => 'list_dev_users']); foreach ($u['users'] ?? [] as $x) if ($x['role'] === $role) { [, $r] = api('auth', ['action' => 'dev_login', 'user_id' => $x['id']]); $token = $r['token'] ?? null; return $x; } return null; }
+function loginRole($role) { global $token; $token = token_for($role); return $token ? user_for($role) : null; }
 
 section('Sign in');
 $lead = loginRole('delivery_lead');

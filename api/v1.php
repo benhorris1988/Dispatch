@@ -63,7 +63,7 @@ if ($method !== 'GET') problem(405, 'Method not allowed', 'The v1 API is read-on
 if ($segments === [] || $segments === ['']) {
     v1_ok(['api' => 'Dispatch', 'version' => 'v1', 'workspace_id' => $wsId, 'read_only' => true,
         'openapi' => '/v1/openapi.yaml',
-        'resources' => ['/v1/work-items', '/v1/work-items/{ref}', '/v1/people', '/v1/skills', '/v1/plan', '/v1/assignments', '/v1/proposals', '/v1/benefits', '/v1/estimates', '/v1/reports/stability'],
+        'resources' => ['/v1/work-items', '/v1/work-items/{ref}', '/v1/people', '/v1/teams', '/v1/role-families', '/v1/skills', '/v1/plan', '/v1/assignments', '/v1/proposals', '/v1/benefits', '/v1/estimates', '/v1/reports/stability'],
         'auth' => 'Authorization: Bearer <token>, the same token the app uses.',
         'webhooks' => array_keys(DP_V1_WEBHOOK_EVENTS)]);
 }
@@ -96,10 +96,39 @@ if ($segments[0] === 'work-items') {
 
 if ($segments[0] === 'people') {
     $limit = v1_page(); $after = v1_cursor();
-    $people = rows($conn, "SELECT TOP ($limit) p.id, p.name, p.initials, p.email, p.role_title, p.days_per_week, p.active, t.name AS team
+    $people = rows($conn, "SELECT TOP ($limit) p.id, p.name, p.initials, p.email, p.role_title, p.days_per_week, p.active,
+               p.team_id, t.name AS team, p.manager_person_id, m.name AS manager, p.role_family_id, rf.name AS role_family
         FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id
+        LEFT JOIN dbo.people m ON m.id = p.manager_person_id
+        LEFT JOIN dbo.role_families rf ON rf.id = p.role_family_id
         WHERE p.workspace_id = ? AND p.id > ? ORDER BY p.id", [$wsId, $after]);
     v1_ok(['people' => $people], ['limit' => $limit, 'next_cursor' => v1_next($people, $limit)]);
+}
+
+// ORG-01: the team tree, flat with parent_team_id so a reporting tool can rebuild it. A restricted
+// team (ORG-04) is listed by name and position only, exactly as org.php tree does it.
+if ($segments[0] === 'teams') {
+    require_once __DIR__ . '/engine/capacity.php';
+    $c = team_closure($conn, $wsId);
+    $counts = [];
+    foreach (rows($conn, "SELECT team_id, COUNT(*) AS n FROM dbo.people WHERE workspace_id = ? AND active = 1 AND team_id IS NOT NULL GROUP BY team_id", [$wsId]) as $r) $counts[(int)$r['team_id']] = (int)$r['n'];
+    $out = [];
+    foreach ($c['teams'] as $id => $t) {
+        $visible = team_visible_to($conn, $wsId, $id, $role, $personId);
+        $row = ['id' => $id, 'name' => $t['name'], 'parent_team_id' => $t['parent_team_id'], 'sort_order' => $t['sort_order'], 'restricted' => !$visible];
+        if ($visible) $row += ['description' => $t['description'], 'lead_person_id' => $t['lead_person_id'],
+            'headcount' => $counts[$id] ?? 0, 'headcount_all' => array_sum(array_map(fn($d) => $counts[$d] ?? 0, team_descendants($conn, $wsId, $id)))];
+        $out[] = $row;
+    }
+    v1_ok(['teams' => $out]);
+}
+
+// ORG-02: the disciplines people belong to, across teams.
+if ($segments[0] === 'role-families') {
+    $out = rows($conn, "SELECT rf.id, rf.name, rf.description, rf.lead_person_id, COUNT(p.id) AS headcount
+        FROM dbo.role_families rf LEFT JOIN dbo.people p ON p.role_family_id = rf.id AND p.active = 1
+        WHERE rf.workspace_id = ? GROUP BY rf.id, rf.name, rf.description, rf.lead_person_id ORDER BY rf.name", [$wsId]);
+    v1_ok(['role_families' => $out]);
 }
 
 if ($segments[0] === 'skills') {

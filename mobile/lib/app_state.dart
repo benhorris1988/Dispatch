@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models/models.dart';
 import 'services/api.dart';
+import 'services/google_auth.dart';
 import 'theme/tokens.dart';
 
 /// Signed-in state: token + user. Restored on launch from shared_preferences
@@ -66,15 +67,24 @@ class Session extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> signInDev(int userId) async {
-    final (token, user) = await Api.devLogin(userId);
+  /// Exchange a verified Google ID token for a session (ADM-01). The Google
+  /// token is used once and never stored; what we keep is our own.
+  Future<void> signInWithGoogle(String idToken) async {
+    final (token, user) = await Api.googleLogin(idToken);
+    await adopt(token, user);
+  }
+
+  /// Adopt an already-issued Dispatch token. The sign-in flows end here, and so
+  /// does the smoke test, which is handed a token minted by tests/mint_token.php
+  /// because it cannot perform a Google sign-in.
+  Future<void> signInWithToken(String token) async {
     await Api.setToken(token);
-    _user = user;
+    _user = await Api.me();
     _interactive = true;
     notifyListeners();
   }
 
-  /// For an OIDC flow later: store an already-issued token + user.
+  /// Store an already-issued token and the user it belongs to.
   Future<void> adopt(String token, User user) async {
     await Api.setToken(token);
     _user = user;
@@ -98,6 +108,7 @@ class Session extends ChangeNotifier {
     _signingOut = true;
     try {
       final was = _user != null;
+      final wasGoogle = _user?.authProvider == 'google';
       if (was && !silent) {
         for (final hook in List.of(beforeSignOut)) {
           try {
@@ -106,6 +117,9 @@ class Session extends ChangeNotifier {
             debugPrint('[session] sign-out hook failed: $e');
           }
         }
+        // Sign out of Google too, so the next sign-in offers the account chooser
+        // rather than silently returning the person who just left.
+        if (wasGoogle) await GoogleAuth.instance.signOut();
       }
       _user = null;
       _interactive = false;

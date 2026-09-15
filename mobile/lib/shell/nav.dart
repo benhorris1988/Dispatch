@@ -9,6 +9,7 @@ class Routes {
   static const schedule = '/schedule';
   static const changes = '/changes';
   static const team = '/team';
+  static const org = '/org';
   static const estimates = '/estimates';
   static const benefits = '/benefits';
   static const reports = '/reports';
@@ -54,6 +55,7 @@ class Nav {
   static const schedule = NavItem(label: 'Schedule', icon: Icons.calendar_month_outlined, selectedIcon: Icons.calendar_month_rounded, path: Routes.schedule);
   static const changes = NavItem(label: 'Changes', icon: Icons.swap_calls_rounded, selectedIcon: Icons.swap_calls_rounded, path: Routes.changes, badge: true);
   static const team = NavItem(label: 'Team & skills', icon: Icons.people_alt_outlined, selectedIcon: Icons.people_alt_rounded, path: Routes.team);
+  static const org = NavItem(label: 'Organisation', icon: Icons.account_tree_outlined, selectedIcon: Icons.account_tree_rounded, path: Routes.org);
   static const estimates = NavItem(label: 'Estimates', icon: Icons.balance_rounded, selectedIcon: Icons.balance_rounded, path: Routes.estimates);
   static const benefits = NavItem(label: 'Benefits', icon: Icons.trending_up_rounded, selectedIcon: Icons.trending_up_rounded, path: Routes.benefits);
   static const reports = NavItem(label: 'Reports', icon: Icons.bar_chart_rounded, selectedIcon: Icons.bar_chart_rounded, path: Routes.reports);
@@ -64,7 +66,7 @@ class Nav {
 
   /// Desktop / tablet sidebar.
   static const List<NavGroup> sidebar = [
-    NavGroup(items: [overview, pipeline, schedule, changes, team]),
+    NavGroup(items: [overview, pipeline, schedule, changes, team, org]),
     NavGroup(label: 'Value', items: [estimates, benefits, reports]),
     NavGroup(label: 'Admin', items: [settings]),
   ];
@@ -73,7 +75,7 @@ class Nav {
   static const List<NavItem> phoneTabs = [myWeek, pipeline, changes, more];
 
   /// Entries listed on the phone 'More' page (Sign out is appended by the screen).
-  static const List<NavItem> moreItems = [schedule, team, benefits, estimates, reports, settings, notifications];
+  static const List<NavItem> moreItems = [schedule, team, org, benefits, estimates, reports, settings, notifications];
 
   /// Human title for a location, for the top bar / AppBar.
   static String titleFor(String location) {

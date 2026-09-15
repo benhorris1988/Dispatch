@@ -58,7 +58,7 @@ class UserPerson {
       );
 }
 
-/// Signed-in user, as returned by auth.php `me` / `dev_login`.
+/// Signed-in user, as returned by auth.php `me` / `google_login`.
 class User {
   User({
     required this.id,
@@ -69,6 +69,7 @@ class User {
     this.personId,
     this.person,
     this.workspace,
+    this.authProvider,
   });
 
   final int id;
@@ -80,6 +81,10 @@ class User {
   final UserPerson? person;
   final Workspace? workspace;
 
+  /// Which identity provider this account signs in with: 'google', 'entra',
+  /// 'seed' for demo data, 'test' for a minted token.
+  final String? authProvider;
+
   factory User.fromJson(Map<String, dynamic> j) => User(
         id: asIntOr(j['id'], 0),
         email: asStrOr(j['email'], ''),
@@ -89,6 +94,7 @@ class User {
         personId: asInt(j['person_id']),
         person: j['person'] is Map ? UserPerson.fromJson(asMap(j['person'])) : null,
         workspace: j['workspace'] is Map ? Workspace.fromJson(asMap(j['workspace'])) : null,
+        authProvider: asStr(j['auth_provider']),
       );
 
   String get initials => person?.initials ?? _initials(displayName);
@@ -107,19 +113,59 @@ class User {
   }
 }
 
-/// Entry from auth.php `list_dev_users`.
-class DevUser {
-  DevUser({
+/// Which identity providers this deployment offers, from auth.php `providers`.
+/// Asked for before sign-in and without a token, so the screen draws the buttons
+/// that actually work rather than a disabled one that never will.
+class AuthProviders {
+  const AuthProviders({this.googleEnabled = false, this.googleWebClientId, this.googleHostedDomain, this.microsoftEnabled = false});
+
+  final bool googleEnabled;
+
+  /// The web OAuth client id. The browser starts the flow with it; the Android
+  /// and iOS apps send it as their *server* client id so the token they get back
+  /// is addressed to the audience the API checks.
+  final String? googleWebClientId;
+
+  /// Set when the workspace accepts only one Google Workspace domain.
+  final String? googleHostedDomain;
+
+  final bool microsoftEnabled;
+
+  bool get any => googleEnabled || microsoftEnabled;
+
+  /// Google is on but no client id came back: the server would answer 501, so
+  /// there is nothing useful to draw.
+  bool get googleUsable => googleEnabled && (googleWebClientId?.isNotEmpty ?? false);
+
+  factory AuthProviders.fromJson(Map<String, dynamic> j) {
+    final g = asMap(j['google']);
+    final m = asMap(j['microsoft']);
+    return AuthProviders(
+      googleEnabled: asBool(g['enabled']),
+      googleWebClientId: asStr(g['web_client_id']),
+      googleHostedDomain: asStr(g['hosted_domain']),
+      microsoftEnabled: asBool(m['enabled']),
+    );
+  }
+}
+
+/// One account in the workspace, from auth.php `list_users` (admin). Settings
+/// shows these to assign roles (ADM-02).
+class DirectoryUser {
+  const DirectoryUser({
     required this.id,
     required this.displayName,
     this.shortName,
     this.email,
     required this.role,
     this.personId,
+    this.personName,
     this.roleTitle,
+    this.teamName,
     this.initials,
     this.colour,
-    this.workspace,
+    this.authProvider,
+    this.active = true,
   });
 
   final int id;
@@ -128,23 +174,38 @@ class DevUser {
   final String? email;
   final String role;
   final int? personId;
+  final String? personName;
   final String? roleTitle;
+  final String? teamName;
   final String? initials;
   final String? colour;
-  final String? workspace;
+  final String? authProvider;
+  final bool active;
 
-  factory DevUser.fromJson(Map<String, dynamic> j) => DevUser(
+  factory DirectoryUser.fromJson(Map<String, dynamic> j) => DirectoryUser(
         id: asIntOr(j['id'], 0),
         displayName: asStrOr(j['display_name'], ''),
         shortName: asStr(j['short_name']),
         email: asStr(j['email']),
         role: asStrOr(j['role'], 'viewer'),
         personId: asInt(j['person_id']),
+        personName: asStr(j['person_name']),
         roleTitle: asStr(j['role_title']),
+        teamName: asStr(j['team_name']),
         initials: asStr(j['initials']),
         colour: asStr(j['colour']),
-        workspace: asStr(j['workspace']),
+        authProvider: asStr(j['auth_provider']),
+        active: asBool(j['active'], fallback: true),
       );
 
   String get initialsOrDerived => initials ?? User._initials(displayName);
+
+  /// 'Google', 'Microsoft', 'Demo data', 'Test token'.
+  String get providerLabel => switch (authProvider) {
+        'google' => 'Google',
+        'entra' => 'Microsoft',
+        'seed' => 'Demo data',
+        'test' => 'Test token',
+        _ => 'Not signed in yet',
+      };
 }

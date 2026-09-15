@@ -19,30 +19,34 @@ shell/top_bar.dart        TopBar, ShellSearchField
 shell/app_shell.dart      AppShell (ShellRoute wrapper), PageBody
 services/api.dart         Api, ApiException, listOf()
 services/format.dart      fmt* helpers
-models/{json,user,config,person,work_item,plan,value,models}.dart
+models/{json,user,config,person,org,work_item,plan,value,models}.dart
+models/org.dart               OrgTree/OrgTeam/OrgPerson/RoleFamily (org.php tree), OrgTeamOption, orderTeamsByHierarchy
 widgets/{chips,person_avatar,panel,stat_tile,indicators,buttons,states,dispatch_logo,widgets}.dart
-widgets/tm_scope_picker.dart   PlanScope, PlanScopeOptions.load() (portfolios.php list), TmScopePicker (TEAM-09 / SCH-13)
+widgets/tm_scope_picker.dart   PlanScope, PlanScopeOptions.load() (people.php list + role_families.php list), TmScopePicker (TEAM-09 / SCH-13 / ORG-01)
+widgets/org_layout.dart        OrgLayout.layout() — the organisation chart's geometry, pure Dart, unit-tested without a server
 widgets/tm_loan_chip.dart      TmLoanChip, LoanSide, loanChipLabel; widgets/tm_loan_list.dart  TmLoanList, loanStateChip
-widgets/pf_metrics.dart        PfMetrics — definitions for the portfolio and loan figures
+widgets/pf_metrics.dart        PfMetrics — definitions for the role-family and loan figures
+services/google_auth.dart      GoogleAuth — Google sign-in (ADM-01); google_button_{stub,web}.dart is the web/native split
 screens/*_screen.dart     one file per route (placeholders use ComingSoon)
 screens/parts/tm_loan_dialog.dart  showTmAddLoan (people.php add_loan, 409 shown verbatim), confirmTmEndLoan (end_loan)
+screens/parts/org_{canvas,details_panel,tree_list,dialogs}.dart  the organisation chart's canvas, panel, list view and dialogs
 ```
 
 ## State (provider)
-- `context.watch<Session>()` — `user`, `signedIn`, `can(String minRole)`, `isAdmin/isDeliveryLead/isTeamLead`, `signInDev(id)`, `signOut()`.
+- `context.watch<Session>()` — `user`, `signedIn`, `can(String minRole)`, `isAdmin/isDeliveryLead/isTeamLead`, `signInWithGoogle(idToken)`, `signInWithToken(token)`, `signOut()`.
 - `context.read<WorkspaceConfig>()` — `workTypes`, `sizeClasses`, `policy`, `workspace`, `workType(id)`, `sizeClass(id)`, `typeColour({id,name,hex})`, `load()`.
 - `context.read<ShellState>()` — `setPlanStatus(text, {committed})`, `setPendingChanges(n)`, `setUnreadNotifications(n)`, `setPageTitle(title, {breadcrumb})`, `refreshCounts()` (calls changes.php current, notifications.php list, overview.php get).
 
 ## API
 `Api.post(endpoint, action, [body]) → Map<String,dynamic>`, `Api.get(endpoint, [query])`, `Api.base`, `Api.token`;
-throws `ApiException(message, code)` (`isAuth`, `isNotImplemented`). `listOf(raw, fromJson)`. Auth: `Api.listDevUsers()`, `Api.devLogin(id)`, `Api.me()`.
+throws `ApiException(message, code)` (`isAuth`, `isNotImplemented`). `listOf(raw, fromJson)`. Auth: `Api.providers()`, `Api.googleLogin(idToken)`, `Api.me()`, `Api.listUsers()`, `Api.setRole(userId, role)`.
 
 ## Format (`services/format.dart`)
 `fmtDate`, `fmtShortDate` ('Fri 18 Sep'), `fmtDayMonth`, `fmtDateRange`, `fmtWeekCommencing` ('w/c 7 Sep'), `fmtRelativeDay`, `fmtTime`,
 `fmtMoneyK` (£210k), `fmtMoney`, `fmtPct`, `fmtDays`, `fmtDelta`, `parseDate`, `dotJoin`, `initialsOf`, `humanise`.
 
 ## Models (`import 'models/models.dart'`; all `fromJson`, null-tolerant)
-`User` (+`UserPerson`, `Workspace`, `DevUser`, `roleRank`, `roleLabel`, `kRoleOrder`), `WorkType`, `SizeClass`, `Policy`, `Person` (+`Loan`: `loans`, `onLoanTo`, `loanedFrom`, `isBorrowed`), `Skill`,
+`User` (+`UserPerson`, `Workspace`, `AuthProviders`, `DirectoryUser`, `roleRank`, `roleLabel`, `kRoleOrder`), `WorkType`, `SizeClass`, `Policy`, `Person` (+`Loan`: `loans`, `onLoanTo`, `loanedFrom`, `isBorrowed`; `managerName`, `roleFamilyName`), `Skill`,
 `PersonSkill` (+`kProficiencyLabels`), `WorkItem` (+`SkillRequirement`, `WorkStatus`/`Health` constants, `displayStatus`), `Assignment`,
 `PlanVersion`, `Proposal`, `ChangeProposal` (+`ImpactChip`), `Benefit`, `Estimate` (+`SkillSplit`, `estimateClassLabel`), `AppNotification`.
 Raw readers in `models/json.dart`: `asInt/asIntOr/asDouble/asBool/asStr/asDate/asIntList/asStrList/asMap/asList`.
@@ -75,12 +79,20 @@ If a model lacks a field you need, read the raw map (`asMap(r['x'])`) rather tha
 - Shell: `PageBody({child, onRefresh, maxWidth, padding})` — standard padded, width-clamped scroll container; `Breaks.of/isPhone/wide/cols/gutter`.
 
 ## Screens and routes
-`Routes` constants: `/overview /pipeline /items/:ref /items/:ref/estimate /schedule /changes /changes/:id /team /people/:id /estimates /benefits /reports /settings /my-week /add-work /notifications /more /sign-in`; helpers `Routes.item(ref)`, `Routes.change(id)`, `Routes.person(id)`.
-Off the shell's own constants: `/portfolios/:id` (`PortfolioScreen.route(id)`, TEAM-09 — reached from the Team & skills scope picker and its team pills, no sidebar entry).
-Constructors: `PipelineScreen({query})`, `WorkItemScreen({required ref})`, `EstimateScreen({required ref})`, `ChangeDetailScreen({required id})`, `PersonScreen({required id})`, `PortfolioScreen({required id})`; others no-arg.
+`Routes` constants: `/overview /pipeline /items/:ref /items/:ref/estimate /schedule /changes /changes/:id /team /people/:id /estimates /benefits /reports /settings /my-week /add-work /notifications /more /org /sign-in`; helpers `Routes.item(ref)`, `Routes.change(id)`, `Routes.person(id)`.
+Off the shell's own constants: `/role-families/:id` (`RoleFamilyScreen.route(id)`, ORG-02 / TEAM-09 — reached from Team & skills when a role family is the chosen scope, no sidebar entry).
+`/org` (`OrgChartScreen`, ORG-01..05) has a sidebar entry of its own, after Team & skills, and sits on the phone More list.
+Constructors: `PipelineScreen({query})`, `WorkItemScreen({required ref})`, `EstimateScreen({required ref})`, `ChangeDetailScreen({required id})`, `PersonScreen({required id})`, `RoleFamilyScreen({required id})`; others no-arg.
 
-### Scope (TEAM-09, SCH-13)
-`PlanScope` is *Whole workspace* / a portfolio / a team; `scope.params` is the `{portfolio_id}` or `{team_id}` to spread into a request body, `scope.phrase` reads after "planned for". `TmScopePicker` is a popup behind a pill (it sits in a `Wrap` of header actions at any width). Team & skills sends the scope to `skills.php matrix` and `people.php list`; Scenarios sends it to `replan.php preview`; the Changes empty state sends it to `replan.php propose`; the Schedule's propose sends `team_id` when its team filter is on. The result copy always names the scope it was planned for.
+### Scope (TEAM-09, SCH-13, ORG-01/02)
+`PlanScope` is *Whole workspace* / a role family / a team; `scope.params` is the `{role_family_id}` or `{team_id}` to spread into a request body, `scope.phrase` reads after "planned for". A team scope means that team **and every team beneath it**; a role family is a discipline's people wherever they sit. `TmScopePicker` is a popup behind a pill (it sits in a `Wrap` of header actions at any width) and indents teams by their depth in the tree. Team & skills sends the scope to `skills.php matrix` and `people.php list`; Scenarios sends it to `replan.php preview`; the Changes empty state sends it to `replan.php propose`; the Schedule's propose sends `team_id` when its team filter is on. The result copy always names the scope it was planned for.
+
+### Sign-in (ADM-01)
+There is no development sign-in. `Api.providers()` says which identity providers this deployment offers and hands over the Google web client id, so the sign-in screen draws only buttons that work and nothing is compiled in. `GoogleAuth` wraps the plugin: on Android and iOS `signInNative()` returns an ID token, on the web Google renders its own button (`google_button_web.dart`) and the token arrives on `GoogleAuth.idTokens`. Either way it goes to `Session.signInWithGoogle()`. `Session.signInWithToken()` adopts an already-issued token and is how the smoke test gets in, because a test cannot perform a Google sign-in:
+
+```
+flutter test test/screens_smoke_test.dart --dart-define=TEST_TOKEN=<token from tests/mint_token.php>
+```
 
 ## Decisions
 - Screens own their own scroll view (`PageBody`); the shell supplies chrome only. Route transitions are `NoTransitionPage`.

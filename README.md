@@ -62,7 +62,8 @@ app with `--base-href=/dispatch/mobile/build/web/`.
 
 ```
 api/            PHP endpoints (auth, workspace_config, work_items, estimates, benefits, people, skills,
-                plan, replan, changes, overview, reports, notifications, audit) + engine/ library
+                org, role_families, plan, replan, changes, overview, reports, notifications, audit)
+                + engine/ library
 db/             00_create_database.sql, 01_schema.sql (schema of record)
 docs/           API.md (contract), ENGINE_MODEL.md (solver model), requirements extract
 engine/         Python FastAPI + OR-Tools CP-SAT service (optional)
@@ -96,9 +97,44 @@ before-and-after summary all reproduce the mockups exactly.
 
 ## Sign-in
 
-Locally, `dev_login_enabled` lets you pick any seeded user (delivery lead, admin, each team member, a
-requester, a benefit owner) so every role can be exercised. Production sign-in is Entra ID (OIDC):
-set `entra.tenant_id`, `entra.client_id` and `entra.group_roles` in `api/config.php`; `auth.php`
-verifies the ID token against the tenant JWKS and maps group claims to roles.
+Sign-in is Google, on the web and on both mobile apps. There are no local passwords and no development
+sign-in: an account exists because somebody signed in with an identity this deployment accepts, and it
+is created on that first sign-in.
+
+To turn it on, create the OAuth clients in the Google Cloud console — a **Web application** client for
+the browser, an **Android** client (package name `uk.co.dispatch.app` plus the signing SHA-1), an **iOS**
+client (the bundle id) — and put them in `api/config.php`, **web client id first**:
+
+```php
+'google' => [
+    'client_ids'    => ['<web>.apps.googleusercontent.com', '<android>...', '<ios>...'],
+    'hosted_domain' => '',      // 'example.org' to accept only that Google Workspace domain
+    'workspace_id'  => 1,
+],
+'bootstrap_admins' => ['you@example.org'],
+```
+
+The web client id is also what the mobile apps send as their *server* client id, so a token from any
+platform carries an audience the API accepts; the client fetches it at runtime from `auth.php providers`,
+so nothing is baked into a build. The iOS client id is the one value that cannot come from the server:
+it goes in `ios/Runner/Info.plist` as `GIDClientID`, with its reversed form as a URL scheme. Add the
+origins you serve from to the web client's authorised JavaScript origins.
+
+The first address listed in `bootstrap_admins` to sign in becomes an administrator; everybody else
+joins as a team member and an administrator sets their role in **Settings → People and roles**. An
+account linked to a `people` row by work email inherits that person, so the seeded demo data is
+reachable straight away. A deactivated account is refused rather than re-created.
+
+Entra ID is built and verified but switched off: set `entra.tenant_id` and `entra.client_id` and the
+"Sign in with Microsoft" button appears, with `entra.group_roles` mapping group claims to roles.
+
+Tests cannot perform a Google sign-in, so they mint a token directly:
+
+```
+C:\xampp\php\php.exe tests\mint_token.php delivery_lead        # a token for the first delivery lead
+C:\xampp\php\php.exe tests\mint_token.php priya.kaur@example.org
+```
+
+It is CLI-only and uses the admin database connection, the same one seeding uses.
 
 See `docs/API.md` for every endpoint and `CLAUDE.md` for the things that are easy to get wrong.

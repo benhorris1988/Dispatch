@@ -26,11 +26,15 @@ $wipe = ['webhook_deliveries','webhook_subscriptions','webhook_cursor','calendar
   'skill_requirements','dependencies','tasks','work_items','ref_sequences','capacity_days','incident_rota','availability',
   'person_skills','skills','day_rates','stability_weeks','audit_events','integrations','scheduling_policies','size_classes','work_types',
   'person_loans'];
-// users <-> people <-> teams <-> portfolios are circular: null the links first
-x($conn, "UPDATE dbo.users SET person_id = NULL"); x($conn, "UPDATE dbo.teams SET lead_person_id = NULL, portfolio_id = NULL");
+// users <-> people <-> teams <-> role_families are circular, and both teams and people now point at
+// themselves (parent team, manager): null every such link before deleting anything.
+x($conn, "UPDATE dbo.users SET person_id = NULL");
+x($conn, "UPDATE dbo.teams SET lead_person_id = NULL, parent_team_id = NULL");
+x($conn, "UPDATE dbo.people SET manager_person_id = NULL, role_family_id = NULL");
+x($conn, "UPDATE dbo.role_families SET lead_person_id = NULL");
 foreach ($wipe as $t) x($conn, "DELETE FROM dbo.$t");
-foreach (['portfolios','people','users','teams','workspaces'] as $t) x($conn, "DELETE FROM dbo.$t");   // portfolios before people: lead_person_id
-$identityTables = ['workspaces','users','work_types','size_classes','scheduling_policies','teams','portfolios','person_loans','people','skills','availability','incident_rota',
+foreach (['people','users','role_families','teams','workspaces'] as $t) x($conn, "DELETE FROM dbo.$t");   // people before teams and role_families
+$identityTables = ['workspaces','users','work_types','size_classes','scheduling_policies','teams','role_families','person_loans','people','skills','availability','incident_rota',
   'work_items','tasks','dependencies','skill_requirements','estimates','day_rates','benefits','benefit_realisations','plan_versions','assignments',
   'proposals','change_proposals','replan_triggers','audit_events','notifications','item_comments','person_change_log','progress_logs','integrations',
   'webhook_subscriptions','webhook_deliveries','calendar_feeds','device_tokens','push_deliveries'];
@@ -120,36 +124,68 @@ $SZI = []; // incident overrides (hours)
 foreach ([['S', 'Small', 0, 4, 2], ['M', 'Medium', 4, 15, 8], ['L', 'Large', 15, null, 30]] as $i => $r) $SZI[$r[0]] = xid($conn, 'size_classes', ['workspace_id' => $W, 'work_type_id' => $WT['Incident'], 'name' => $r[1], 'stamp' => $r[0],
   'min_days' => $r[2], 'max_days' => $r[3], 'planning_days' => $r[4], 'default_estimate_class' => 4, 'granularity' => 'halfDay', 'counts_for_wip' => 0, 'is_custom' => 0, 'sort_order' => $i + 1]);
 
-// ---------------------------------------------------------------- team, people, users
-$TEAM = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Data Platform']);
+// ---------------------------------------------------------------- teams, people, users
+// ORG-01: the demo organisation is three levels deep, so the chart, the subtree scopes and the
+// team-lead authority rules all have something real to work against:
+//
+//   Digital & Data
+//     Data Platform            (Priya leads; Priya and Ravi sit here directly)
+//       Platform engineering   (Lena leads; Hana, Jon)
+//       Analytics engineering  (Sam leads; Amira, Ewan)
+//     Integration Platform     (Tariq leads; Mei, Oliver, Nadia)
+//
+// Everything the suites count for "Data Platform" still holds: a team scope is the team plus its
+// sub-teams, so Data Platform is the same eight people it always was.
+$ROOT  = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Digital & Data', 'parent_team_id' => null, 'sort_order' => 0,
+  'description' => 'Everything data, integration and platform for the division.']);
+$TEAM  = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Data Platform', 'parent_team_id' => $ROOT, 'sort_order' => 0,
+  'description' => 'Pipelines, models and reporting for the data estate.']);
+$PE    = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Platform engineering', 'parent_team_id' => $TEAM, 'sort_order' => 0,
+  'description' => 'Infrastructure, security and the Databricks platform itself.']);
+$AE    = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Analytics engineering', 'parent_team_id' => $TEAM, 'sort_order' => 1,
+  'description' => 'Modelling, data quality and the reporting layer.']);
 $full = '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5,"Fri":7.5}';
-$peopleRows = [ // name, initials, colour, role, days, pattern, pattern_label, tagline, prefers, avoid, max_conc
-  ['Priya Kaur', 'PK', '#3B6BD6', 'Senior engineer', 4.5, '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5,"Fri":3.75}', 'Mon–Thu full, Fri half day', 'Terraform and Databricks lead', 'Platform and infrastructure work', 'Power BI report building', null],
-  ['Jon Okafor', 'JO', '#178F8A', 'Engineer', 5, $full, 'Mon–Fri full time', 'Streaming and integration engineer', 'Event streaming and API work', null, null],
-  ['Amira Mansour', 'AM', '#6D5BD0', 'Analyst engineer', 5, $full, 'Mon–Fri full time', 'SQL and reporting specialist', 'Data quality and reporting', null, null],
-  ['Ravi Shah', 'RS', '#C8102E', 'Support engineer', 5, $full, 'Mon–Fri full time', 'Incident lead and SQL expert', 'Operational support', 'Long design phases', 3],
-  ['Lena Torres', 'LT', '#D99A00', 'Security & platform', 4.0, '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5}', 'Mon–Thu, no Fridays', 'Security and Azure platform', 'Security and access work', null, null],
-  ['Sam Doyle', 'SD', '#1F9D6B', 'Data modeller', 5, $full, 'Mon–Fri full time', 'Data modelling and SQL lead', 'Modelling and design', 'Infrastructure work', null],
-  ['Hana Novak', 'HN', '#16284D', 'Engineer', 5, $full, 'Mon–Fri full time', 'Databricks and Python engineer', 'Pipeline engineering', null, null],
-  ['Ewan Wright', 'EW', '#F28C28', 'BI developer', 5, $full, 'Mon–Fri full time', 'Power BI and reporting', 'Report and dashboard build', 'Infrastructure work', null],
+$peopleRows = [ // name, initials, colour, role, days, pattern, pattern_label, tagline, prefers, avoid, max_conc, sub-team
+  ['Priya Kaur', 'PK', '#3B6BD6', 'Senior engineer', 4.5, '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5,"Fri":3.75}', 'Mon–Thu full, Fri half day', 'Terraform and Databricks lead', 'Platform and infrastructure work', 'Power BI report building', null, 'DP'],
+  ['Jon Okafor', 'JO', '#178F8A', 'Engineer', 5, $full, 'Mon–Fri full time', 'Streaming and integration engineer', 'Event streaming and API work', null, null, 'PE'],
+  ['Amira Mansour', 'AM', '#6D5BD0', 'Analyst engineer', 5, $full, 'Mon–Fri full time', 'SQL and reporting specialist', 'Data quality and reporting', null, null, 'AE'],
+  ['Ravi Shah', 'RS', '#C8102E', 'Support engineer', 5, $full, 'Mon–Fri full time', 'Incident lead and SQL expert', 'Operational support', 'Long design phases', 3, 'DP'],
+  ['Lena Torres', 'LT', '#D99A00', 'Security & platform', 4.0, '{"Mon":7.5,"Tue":7.5,"Wed":7.5,"Thu":7.5}', 'Mon–Thu, no Fridays', 'Security and Azure platform', 'Security and access work', null, null, 'PE'],
+  ['Sam Doyle', 'SD', '#1F9D6B', 'Data modeller', 5, $full, 'Mon–Fri full time', 'Data modelling and SQL lead', 'Modelling and design', 'Infrastructure work', null, 'AE'],
+  ['Hana Novak', 'HN', '#16284D', 'Engineer', 5, $full, 'Mon–Fri full time', 'Databricks and Python engineer', 'Pipeline engineering', null, null, 'PE'],
+  ['Ewan Wright', 'EW', '#F28C28', 'BI developer', 5, $full, 'Mon–Fri full time', 'Power BI and reporting', 'Report and dashboard build', 'Infrastructure work', null, 'AE'],
 ];
+$SUBTEAM = ['DP' => $TEAM, 'PE' => $PE, 'AE' => $AE];
 $P = []; $PN = []; // full name => id ; first name => id
 foreach ($peopleRows as $r) {
   [$first, $last] = explode(' ', $r[0]);
-  $id = xid($conn, 'people', ['workspace_id' => $W, 'team_id' => $TEAM, 'name' => $r[0], 'initials' => $r[1], 'email' => strtolower("$first.$last@example.org"), 'role_title' => $r[3], 'tagline' => $r[7],
+  $id = xid($conn, 'people', ['workspace_id' => $W, 'team_id' => $SUBTEAM[$r[11]], 'name' => $r[0], 'initials' => $r[1], 'email' => strtolower("$first.$last@example.org"), 'role_title' => $r[3], 'tagline' => $r[7],
     'days_per_week' => $r[4], 'working_pattern' => $r[5], 'pattern_label' => $r[6], 'max_concurrent' => $r[10], 'min_focus_days' => null, 'prefers' => $r[8], 'avoid' => $r[9],
-    'line_manager' => 'Ben A.', 'colour' => $r[2], 'active' => 1, 'created_at' => '2026-03-30 09:30:00']);
+    'colour' => $r[2], 'active' => 1, 'created_at' => '2026-03-30 09:30:00']);
   $P[$r[0]] = $id; $PN[$first] = $id;
 }
 x($conn, "UPDATE dbo.teams SET lead_person_id = ? WHERE id = ?", [$PN['Priya'], $TEAM]);
+x($conn, "UPDATE dbo.teams SET lead_person_id = ? WHERE id = ?", [$PN['Lena'], $PE]);
+x($conn, "UPDATE dbo.teams SET lead_person_id = ? WHERE id = ?", [$PN['Sam'], $AE]);
+// ORG-02: reporting lines. Members report to the lead of the team they sit in; the two sub-team
+// leads and Ravi report to Priya; Priya has no manager inside the workspace (Ben is a user, not a
+// person, so there is nobody above her to point at).
+foreach (['Ravi' => 'Priya', 'Lena' => 'Priya', 'Sam' => 'Priya', 'Hana' => 'Lena', 'Jon' => 'Lena', 'Amira' => 'Sam', 'Ewan' => 'Sam'] as $who => $boss)
+  x($conn, "UPDATE dbo.people SET manager_person_id = ? WHERE id = ?", [$PN[$boss], $PN[$who]]);
 
 $U = [];
-$U['ben'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'ben.a@example.org', 'display_name' => 'Ben Stevenson', 'short_name' => 'Ben A.', 'role' => 'delivery_lead', 'person_id' => null, 'active' => 1, 'created_at' => '2026-03-30 09:00:00']);
-$U['admin'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'admin@example.org', 'display_name' => 'Dispatch Admin', 'short_name' => 'Admin', 'role' => 'admin', 'person_id' => null, 'active' => 1, 'created_at' => '2026-03-30 09:00:00']);
+// ADM-01: these accounts are marked 'seed'. Sign-in is Google only — a person signing in with a
+// Google account whose email matches one of these rows lands on that account and inherits its role
+// and its linked person, so the demo data is reachable without a second provisioning step.
+$U['ben'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'ben.a@example.org', 'display_name' => 'Ben Stevenson', 'short_name' => 'Ben A.', 'role' => 'delivery_lead', 'person_id' => null, 'active' => 1, 'auth_provider' => 'seed', 'created_at' => '2026-03-30 09:00:00']);
+$U['admin'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'admin@example.org', 'display_name' => 'Dispatch Admin', 'short_name' => 'Admin', 'role' => 'admin', 'person_id' => null, 'active' => 1, 'auth_provider' => 'seed', 'created_at' => '2026-03-30 09:00:00']);
 foreach ($peopleRows as $r) { [$first, $last] = explode(' ', $r[0]);
-  $U[$first] = xid($conn, 'users', ['workspace_id' => $W, 'email' => strtolower("$first.$last@example.org"), 'display_name' => $r[0], 'short_name' => $first . ' ' . $last[0] . '.', 'role' => 'team_member', 'person_id' => $P[$r[0]], 'active' => 1, 'created_at' => '2026-03-30 09:30:00']); }
-$U['requester'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'procurement.requests@example.org', 'display_name' => 'Procurement Requester', 'short_name' => 'Procurement', 'role' => 'requester', 'active' => 1]);
-$U['finance'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'finance.benefits@example.org', 'display_name' => 'Finance Benefit Owner', 'short_name' => 'Finance', 'role' => 'benefit_owner', 'active' => 1]);
+  $U[$first] = xid($conn, 'users', ['workspace_id' => $W, 'email' => strtolower("$first.$last@example.org"), 'display_name' => $r[0], 'short_name' => $first . ' ' . $last[0] . '.', 'role' => 'team_member', 'person_id' => $P[$r[0]], 'active' => 1, 'auth_provider' => 'seed', 'created_at' => '2026-03-30 09:30:00']); }
+// Priya, Lena and Sam lead a team each, so they are the people the ORG-05 authority rules are
+// tested against: a lead may reorganise their own branch and nothing else.
+foreach (['Priya', 'Lena', 'Sam', 'Tariq'] as $leadFirst) if (isset($U[$leadFirst])) x($conn, "UPDATE dbo.users SET role = 'team_lead' WHERE id = ?", [$U[$leadFirst]]);
+$U['requester'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'procurement.requests@example.org', 'display_name' => 'Procurement Requester', 'short_name' => 'Procurement', 'role' => 'requester', 'active' => 1, 'auth_provider' => 'seed']);
+$U['finance'] = xid($conn, 'users', ['workspace_id' => $W, 'email' => 'finance.benefits@example.org', 'display_name' => 'Finance Benefit Owner', 'short_name' => 'Finance', 'role' => 'benefit_owner', 'active' => 1, 'auth_provider' => 'seed']);
 
 $POLICY = xid($conn, 'scheduling_policies', ['workspace_id' => $W, 'version' => 1, 'is_current' => 1, 'created_at' => '2026-04-01 09:00:00', 'created_by' => $U['ben']]);
 xid($conn, 'day_rates', ['workspace_id' => $W, 'name' => 'Blended engineer', 'rate' => 700, 'currency' => 'GBP', 'effective_from' => '2026-04-01', 'is_blended' => 1]);
@@ -184,7 +220,8 @@ foreach ($matrix as $first => $levels) foreach ($levels as $i => $lvl) { if ($lv
 // L3+, where Data Platform has one person each. Everything the suites count for Data Platform (8 people, the
 // committed plan, the benefits) is untouched: these people hold no assignments and own no items. Nobody here
 // reaches Terraform L3, so it stays the workspace's single point of failure (asserted by the suites).
-$TEAM2 = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Integration Platform']);
+$TEAM2 = xid($conn, 'teams', ['workspace_id' => $W, 'name' => 'Integration Platform', 'parent_team_id' => $ROOT, 'sort_order' => 1,
+  'description' => 'APIs, event streaming and the integration platform.']);
 $peopleRows2 = [ // name, initials, colour, role, days, pattern, pattern_label, tagline, prefers, avoid, max_conc
   ['Tariq Hussain', 'TH', '#0F766E', 'Integration lead', 5, $full, 'Mon–Fri full time', 'API platform and integration patterns', 'API and integration work', 'Report building', null],
   ['Mei Chen', 'MC', '#7C3AED', 'Integration engineer', 5, $full, 'Mon–Fri full time', 'Event streaming and API build', 'Event streaming and API work', null, null],
@@ -195,11 +232,13 @@ foreach ($peopleRows2 as $r) {
   [$first, $last] = explode(' ', $r[0]);
   $id = xid($conn, 'people', ['workspace_id' => $W, 'team_id' => $TEAM2, 'name' => $r[0], 'initials' => $r[1], 'email' => strtolower("$first.$last@example.org"), 'role_title' => $r[3], 'tagline' => $r[7],
     'days_per_week' => $r[4], 'working_pattern' => $r[5], 'pattern_label' => $r[6], 'max_concurrent' => $r[10], 'min_focus_days' => null, 'prefers' => $r[8], 'avoid' => $r[9],
-    'line_manager' => 'Dana K.', 'colour' => $r[2], 'active' => 1, 'created_at' => '2026-06-01 09:30:00']);
+    'colour' => $r[2], 'active' => 1, 'created_at' => '2026-06-01 09:30:00']);
   $P[$r[0]] = $id; $PN[$first] = $id;
-  $U[$first] = xid($conn, 'users', ['workspace_id' => $W, 'email' => strtolower("$first.$last@example.org"), 'display_name' => $r[0], 'short_name' => $first . ' ' . $last[0] . '.', 'role' => 'team_member', 'person_id' => $id, 'active' => 1, 'created_at' => '2026-06-01 09:30:00']);
+  $U[$first] = xid($conn, 'users', ['workspace_id' => $W, 'email' => strtolower("$first.$last@example.org"), 'display_name' => $r[0], 'short_name' => $first . ' ' . $last[0] . '.', 'role' => 'team_member', 'person_id' => $id, 'active' => 1, 'auth_provider' => 'seed', 'created_at' => '2026-06-01 09:30:00']);
 }
 x($conn, "UPDATE dbo.teams SET lead_person_id = ? WHERE id = ?", [$PN['Tariq'], $TEAM2]);
+x($conn, "UPDATE dbo.users SET role = 'team_lead' WHERE id = ?", [$U['Tariq']]);
+foreach (['Mei', 'Oliver', 'Nadia'] as $who) x($conn, "UPDATE dbo.people SET manager_person_id = ? WHERE id = ?", [$PN['Tariq'], $PN[$who]]);
 // Same column order as $matrix: Azure, Databricks, Terraform, Python, SQL, Data modelling, Event streaming, Power BI, API integration, Security, ADF, Procurement domain
 $matrix2 = [
   'Tariq'  => [3, 1, 2, 3, 2, 1, 3, 0, 4, 3, 1, 0],
@@ -240,16 +279,26 @@ foreach (array_merge($peopleRows, $peopleRows2) as $r) {
     x($conn, "INSERT INTO dbo.capacity_days (workspace_id, person_id, day, available_hours, reserve_hours, derived_at) VALUES (?,?,?,?,?,?)", [$W, $pid, $d, $availH, $reserve, '2026-09-08 02:00:00']);
   }
 }
-// ---------------------------------------------------------------------------------- portfolio and loan (TEAM-09)
-// "Data & Integration" holds both teams. Mei Chen is lent to Data Platform for the two weeks after the
-// committed window opens (14–25 Sep) at 50%: for those days half of her time belongs to Data Platform and she
-// is eligible for its work in a Data Platform or portfolio model. A seeded fact, so no replan trigger row —
-// the trigger ids in seed_demo_plan.php are hand-numbered.
-$PORTFOLIO = xid($conn, 'portfolios', ['workspace_id' => $W, 'name' => 'Data & Integration', 'description' => 'Data Platform and Integration Platform: one pipeline, two teams, planned together where an item needs both.',
-  'lead_person_id' => $PN['Priya'], 'created_at' => '2026-06-01 09:00:00']);
-x($conn, "UPDATE dbo.teams SET portfolio_id = ? WHERE id IN (?, ?)", [$PORTFOLIO, $TEAM, $TEAM2]);
+// ------------------------------------------------------------------- role families and loan (ORG-02, TEAM-09)
+// A role family is the discipline somebody practises, and it cuts across the tree: Data engineering
+// reaches into three teams, Integration into one. That is the difference from the portfolios this
+// replaced — those grouped whole teams, and so could never say that Lena and Nadia do the same job in
+// different places.
+$RF = [];
+foreach ([
+  ['Data engineering', 'Pipelines, platform and the data estate itself.', 'Priya', ['Priya', 'Jon', 'Lena', 'Sam', 'Hana', 'Ravi']],
+  ['Analytics', 'Modelling, reporting and data quality.', 'Amira', ['Amira', 'Ewan']],
+  ['Integration', 'APIs, event streaming and system-to-system work.', 'Tariq', ['Tariq', 'Mei', 'Oliver', 'Nadia']],
+] as [$name, $desc, $lead, $members]) {
+  $RF[$name] = xid($conn, 'role_families', ['workspace_id' => $W, 'name' => $name, 'description' => $desc, 'lead_person_id' => $PN[$lead], 'created_at' => '2026-06-01 09:00:00']);
+  foreach ($members as $who) x($conn, "UPDATE dbo.people SET role_family_id = ? WHERE id = ?", [$RF[$name], $PN[$who]]);
+}
+// Mei Chen is lent to Data Platform for the two weeks after the committed window opens (14–25 Sep) at
+// 50%: for those days half of her time belongs to Data Platform and she is eligible for its work in a
+// Data Platform model. A seeded fact, so no replan trigger row — the trigger ids in seed_demo_plan.php
+// are hand-numbered.
 $LOAN = xid($conn, 'person_loans', ['workspace_id' => $W, 'person_id' => $PN['Mei'], 'from_team_id' => $TEAM2, 'to_team_id' => $TEAM, 'from_date' => '2026-09-14', 'to_date' => '2026-09-25',
   'allocation_pct' => 50, 'reason' => 'Reference data service API work (WI-1039)', 'created_by' => $U['ben'], 'created_at' => '2026-09-04 11:00:00']);
-echo "Config, teams, portfolio, skills, capacity done.\n";
+echo "Config, teams, role families, skills, capacity done.\n";
 
 require __DIR__ . '/seed_demo_items.php';   // work items, estimates, benefits, plans, proposals, reporting rows

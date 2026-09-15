@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/json.dart';
 import '../models/user.dart';
 
 /// Thrown for any non-ok response: transport failure, non-JSON body, HTTP
@@ -126,20 +127,34 @@ class Api {
 
   // ─── Auth convenience ──────────────────────────────────────────────────
 
-  static Future<List<DevUser>> listDevUsers() async {
-    final r = await post('auth.php', 'list_dev_users');
-    return listOf(r['users'], DevUser.fromJson);
+  /// Which identity providers this deployment offers. Needs no token — it is
+  /// the first thing the sign-in screen asks, and doubles as "is the API there".
+  static Future<AuthProviders> providers() async {
+    final r = await post('auth.php', 'providers');
+    return AuthProviders.fromJson(r);
   }
 
-  /// Returns (token, user). Caller stores the token via [Session].
-  static Future<(String, User)> devLogin(int userId) async {
-    final r = await post('auth.php', 'dev_login', {'user_id': userId});
-    return (r['token'] as String, User.fromJson(r['user'] as Map<String, dynamic>));
+  /// Exchange a verified Google ID token for a Dispatch token and user.
+  /// Returns (token, user); the caller stores the token via [Session].
+  static Future<(String, User)> googleLogin(String idToken) async {
+    final r = await post('auth.php', 'google_login', {'id_token': idToken});
+    return (r['token'] as String, User.fromJson(asMap(r['user'])));
   }
 
   static Future<User> me() async {
     final r = await post('auth.php', 'me');
     return User.fromJson(r['user'] as Map<String, dynamic>);
+  }
+
+  /// The workspace's accounts, for Settings (admin only).
+  static Future<List<DirectoryUser>> listUsers() async {
+    final r = await post('auth.php', 'list_users');
+    return listOf(r['users'], DirectoryUser.fromJson);
+  }
+
+  static Future<User> setRole(int userId, String role, {String? reason}) async {
+    final r = await post('auth.php', 'set_role', {'user_id': userId, 'role': role, 'reason': ?reason});
+    return User.fromJson(asMap(r['user']));
   }
 }
 

@@ -2,6 +2,8 @@
 // CLI test for api/overview.php + api/reports.php over HTTP.
 // Usage: php tests/overview_reports_test.php [base_url]   (default http://localhost:8090)
 // Needs seed_demo.php applied and fake_today = 2026-09-08.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 $base = rtrim($argv[1] ?? 'http://localhost:8090', '/');
 $pass = 0; $failN = 0;
 function call($base, $path, array $body, $token = null) {
@@ -19,18 +21,17 @@ function check($label, $cond, $detail = '') {
 }
 
 // ---- sign in -------------------------------------------------------------------------
-[$c, $users] = call($base, 'auth.php', ['action' => 'list_dev_users']);
-if ($c !== 200) { echo "Cannot reach $base ($c): " . json_encode($users) . "\n"; exit(1); }
-$lead = null; $priya = null;
-foreach ($users['users'] as $u) {
-    if (!$lead && $u['role'] === 'delivery_lead') $lead = $u;
-    if (!$priya && stripos($u['display_name'], 'Priya') !== false && $u['person_id']) $priya = $u;
-}
-if (!$lead) { echo "No delivery_lead dev user\n"; exit(1); }
-if (!$priya) { echo "No Priya dev user (team member)\n"; exit(1); }
-[, $r] = call($base, 'auth.php', ['action' => 'dev_login', 'user_id' => $lead['id']]);   $leadTok = $r['token'] ?? null;
-[, $r] = call($base, 'auth.php', ['action' => 'dev_login', 'user_id' => $priya['id']]);  $priyaTok = $r['token'] ?? null;
-check('dev_login lead + Priya', $leadTok && $priyaTok);
+[$c, $probe] = call($base, 'auth.php', ['action' => 'providers']);
+if ($c !== 200) { echo "Cannot reach $base ($c): " . json_encode($probe) . "\n"; exit(1); }
+$users = ['users' => test_users()];
+$lead = user_for('delivery_lead');
+$priya = null;
+foreach ($users['users'] as $u) if (!$priya && stripos($u['display_name'], 'Priya') !== false && $u['person_id']) $priya = $u;
+if (!$lead) { echo "No delivery_lead account\n"; exit(1); }
+if (!$priya) { echo "No Priya account\n"; exit(1); }
+$leadTok = token_for('delivery_lead');
+$priyaTok = token_for_email($priya['email']);
+check('tokens for the lead and for Priya', $leadTok && $priyaTok);
 
 // ---- overview get --------------------------------------------------------------------
 echo "overview.get\n";
@@ -108,12 +109,14 @@ check('load_pct numeric', is_int($mw['load_pct'] ?? null));
 check('my_week next week ok', $c === 200 && ($mw2['week']['week_start'] ?? '') === '2026-09-14');
 [$c, $mw3] = call($base, 'overview.php', ['action' => 'my_week', 'person_id' => $priya['person_id']], $leadTok);
 check('lead can view Priya\'s week via person_id', $c === 200 && stripos($mw3['person']['name'] ?? '', 'Priya') !== false);
-// a team member may not view someone else's week
-$otherPid = null; foreach ($users['users'] as $u) if ($u['person_id'] && $u['person_id'] !== $priya['person_id']) { $otherPid = $u['person_id']; break; }
-if ($otherPid) { [$c] = call($base, 'overview.php', ['action' => 'my_week', 'person_id' => $otherPid], $priyaTok); check('team member gets 403 for another person', $c === 403, (string)$c); }
+// A team member may not view someone else's week. Priya leads a team now (ORG-05), so this needs
+// somebody who leads nothing: a lead looking at their own people is allowed, and would pass wrongly.
+$plain = user_for('team_member', true);
+$otherPid = null; foreach ($users['users'] as $u) if ($u['person_id'] && $plain && $u['person_id'] !== $plain['person_id']) { $otherPid = $u['person_id']; break; }
+if ($otherPid && $plain) { [$c] = call($base, 'overview.php', ['action' => 'my_week', 'person_id' => $otherPid], token_for_email($plain['email'])); check('team member gets 403 for another person', $c === 403, (string)$c); }
 // user without a person -> 403 (if such a user exists)
 $noPerson = null; foreach ($users['users'] as $u) if (!$u['person_id']) { $noPerson = $u; break; }
-if ($noPerson) { [, $r] = call($base, 'auth.php', ['action' => 'dev_login', 'user_id' => $noPerson['id']]); [$c] = call($base, 'overview.php', ['action' => 'my_week'], $r['token'] ?? ''); check('user without person gets 403', $c === 403, (string)$c); }
+if ($noPerson) { [$c] = call($base, 'overview.php', ['action' => 'my_week'], token_for_email($noPerson['email']) ?? ''); check('user without person gets 403', $c === 403, (string)$c); }
 
 // ---- reports -------------------------------------------------------------------------
 echo "reports.get\n";

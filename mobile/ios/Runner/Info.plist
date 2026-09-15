@@ -24,6 +24,15 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!-- ADM-01: Google sign-in. GIDClientID is the iOS OAuth client id from the Google Cloud
+	     console; GIDServerClientID is the WEB one, which is what makes the ID token this app
+	     receives carry an audience api/auth.php accepts. These two are the only client ids that
+	     cannot come from the server at runtime, because the SDK reads them at launch.
+	     Replace the placeholders, and the reversed id in the URL scheme below, with the real ones. -->
+	<key>GIDClientID</key>
+	<string>REPLACE_WITH_IOS_CLIENT_ID.apps.googleusercontent.com</string>
+	<key>GIDServerClientID</key>
+	<string>REPLACE_WITH_WEB_CLIENT_ID.apps.googleusercontent.com</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -34,6 +43,17 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>dispatch</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- The iOS client id reversed: com.googleusercontent.apps.<id>. Google returns to it. -->
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>google-sign-in</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.REPLACE_WITH_IOS_CLIENT_ID</string>
 			</array>
 		</dict>
 	</array>

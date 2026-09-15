@@ -10,14 +10,14 @@ const MIN_QUALIFIED_LEVEL = 3;
 const LEVEL_NAMES = ['None', 'Aware', 'Practitioner', 'Independent', 'Expert'];
 
 /**
- * The people a skills view is about (TEAM-09): the whole workspace, or with team_id / portfolio_id the
- * scope's planning pool — home members plus anyone loaned in — with the share of each day that belongs
- * to the scope. Returns [pool (team_pool shape) | null, scope].
+ * The people a skills view is about (TEAM-09, ORG-01/02): the whole workspace, or with team_id the
+ * scope's planning pool — the team and its sub-teams, home members plus anyone loaned in — or with
+ * role_family_id the people in that discipline wherever they sit. Returns [pool | null, scope].
  */
 function skills_scope($conn, $wsId, $today, $to) {
-    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'portfolio_id' => param('portfolio_id')]);
-    if ($scope === null) fail('Team or portfolio not found', 404);
-    return [$scope['team_ids'] === null ? null : team_pool($conn, $wsId, $scope['team_ids'], $today, $to), $scope];
+    $scope = scope_team_ids($conn, $wsId, ['team_id' => param('team_id'), 'role_family_id' => param('role_family_id')]);
+    if ($scope === null) fail('Team or role family not found', 404);
+    return [scope_is_partial($scope) ? scope_pool($conn, $wsId, $scope, $today, $to) : null, $scope];
 }
 
 /** Skills with coverage + 6-week demand/supply. $pool (team_pool) restricts people and weights supply by the scope's share. */
@@ -97,7 +97,7 @@ function skills_with_stats($conn, $wsId, $today, $includeRetired = false, $pool 
 if ($action === 'list') {
     [$pool, $scope] = skills_scope($conn, $wsId, $today, date('Y-m-d', strtotime("$today +41 days")));
     [$skills, $window] = skills_with_stats($conn, $wsId, $today, (bool)param('include_retired', false), $pool);
-    ok(['skills' => $skills, 'window_6w' => $window, 'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids']))]);
+    ok(['skills' => $skills, 'window_6w' => $window, 'scope' => scope_public($scope)]);
 }
 
 if ($action === 'matrix') {
@@ -111,7 +111,7 @@ if ($action === 'matrix') {
     $people = rows($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ? AND p.active = 1 ORDER BY p.name", [$wsId]);
     if ($pool !== null) {
         $people = array_values(array_filter($people, fn($p) => isset($pool[(int)$p['id']])));
-        $load = array_map(fn($x) => $x['load_pct'], team_load($conn, $wsId, $scope['team_ids'], $from4, $to4)['people']);
+        $load = array_map(fn($x) => $x['load_pct'], scope_load($conn, $wsId, $scope, $from4, $to4)['people']);
     } else $load = load_pct_map($conn, $wsId, $from4, $to4);
     $peopleOut = []; $firstName = [];
     foreach ($people as $p) {
@@ -175,7 +175,7 @@ if ($action === 'matrix') {
     ok(['skills' => $skills, 'people' => $peopleOut, 'cells' => $cells,
         'summary' => ['single_point_skills' => $single, 'two_person_skills' => $two, 'well_covered' => $well, 'people_count' => count($peopleOut), 'skills_count' => count($skills),
             'team_name' => $scope['name'] ?? ($peopleOut ? ($peopleOut[0]['team_name'] ?? null) : null), 'levels' => LEVEL_NAMES],
-        'scope' => array_intersect_key($scope, array_flip(['kind', 'team_id', 'portfolio_id', 'name', 'team_ids'])),
+        'scope' => scope_public($scope),
         'availability_4w' => $avail, 'development' => $development, 'demand_vs_supply' => $dvs,
         'windows' => ['availability' => ['from' => $from4, 'to' => $to4], 'demand' => $window6]]);
 }

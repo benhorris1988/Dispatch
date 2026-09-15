@@ -9,12 +9,13 @@ require_once __DIR__ . '/capacity.php';
 /**
  * @param array $opts  scope_person_ids?:[int], include_item_ids?:[int] (force-include e.g. drafts for what-ifs),
  *                     exclude_item_ids?:[int], today?:'Y-m-d',
- *                     team_id?:int | portfolio_id?:int  (TEAM-09 / SCH-13 planning scope; neither = whole workspace)
+ *                     team_id?:int | role_family_id?:int  (TEAM-09 / SCH-13 / ORG-01 planning scope; neither = whole workspace)
  *
  * Scope (SCH-13). With neither option the model is what it always was: every active person as one
- * pool, team_id a label. With team_id the pool is that team's home members plus anyone loaned INTO
- * it; with portfolio_id it is the home members of every team in the portfolio plus anyone loaned
- * into one of them. In a scoped model:
+ * pool, team_id a label. With team_id the pool is the home members of that team AND every team
+ * beneath it (ORG-01), plus anyone loaned INTO one of them — so planning a parent team plans its
+ * sub-teams. With role_family_id the pool is the people in that discipline wherever they sit, all
+ * home, share 1. In a scoped model:
  *   - every capacity entry carries `share` (0..1): the part of that person-day that belongs to the
  *     scope. A home member lent out at 50% has share 0.5 on the loan's days; a person loaned in at
  *     50% has share 0.5 on those days and 0 outside them. The planner books against
@@ -26,7 +27,7 @@ require_once __DIR__ . '/capacity.php';
  *     are passed through untouched so the candidate is still a complete workspace plan.
  *   - `scope` describes what was asked for; `scope.partial` is true whenever the pool is not the
  *     whole workspace.
- * Returns null for an unknown workspace, team or portfolio.
+ * Returns null for an unknown workspace, team or role family.
  */
 function build_model($conn, $wsId, array $opts = []) {
     $ws = row($conn, "SELECT * FROM dbo.workspaces WHERE id = ?", [$wsId]);
@@ -52,7 +53,7 @@ function build_model($conn, $wsId, array $opts = []) {
 
     // People: the planning pool for the scope (see the docblock). $activeIds is everyone active in
     // the workspace, pool or not — needed to tell "another team's person" from "a leaver".
-    $pool = team_pool($conn, $wsId, $scope['team_ids'], $today, $windows['indicative_end']);
+    $pool = scope_pool($conn, $wsId, $scope, $today, $windows['indicative_end']);
     $people = []; $activeIds = [];
     foreach (rows($conn, "SELECT p.*, t.name AS team_name FROM dbo.people p LEFT JOIN dbo.teams t ON t.id = p.team_id WHERE p.workspace_id = ? AND p.active = 1 ORDER BY p.id", [$wsId]) as $p) {
         $pid = (int)$p['id']; $activeIds[$pid] = true;
@@ -108,7 +109,7 @@ function build_model($conn, $wsId, array $opts = []) {
                 $pp['capacity'][$day] = ['available' => round($hours, 2), 'reserve' => round($hours * $reservePct / 100, 2)];
             }
             // TEAM-09: the share of each day that belongs to the scope (1 everywhere for a workspace model).
-            foreach ($pp['capacity'] as $day => &$c) $c['share'] = $scope['team_ids'] === null ? 1.0 : team_share_for($pool[$pid], $day);
+            foreach ($pp['capacity'] as $day => &$c) $c['share'] = $scope['team_ids'] === null ? 1.0 : team_share_for($pool[$pid], $day);   // a role-family pool is share 1 by construction
             unset($c);
         }
         unset($pp);
@@ -202,7 +203,7 @@ function build_model($conn, $wsId, array $opts = []) {
     // them exactly and never re-plans the item. Rows on leavers (inactive) are not external — the
     // whole point of a leaver's row is that the work must be offered to someone else.
     $externalItems = [];
-    if ($scope['team_ids'] !== null) {
+    if (scope_is_partial($scope)) {
         foreach ($committed as $a) {
             if (!isset($items[$a['work_item_id']]) || $a['to_date'] < $today) continue;
             $pid = $a['person_id'];
@@ -227,7 +228,7 @@ function build_model($conn, $wsId, array $opts = []) {
         'committed_version_id' => $committedVersion ? (int)$committedVersion['id'] : null,
         'committed_version_no' => $committedVersion ? (int)$committedVersion['version_no'] : 0,
         'scope_person_ids' => array_values(array_map('intval', $opts['scope_person_ids'] ?? [])),
-        'scope' => $scope + ['partial' => $scope['team_ids'] !== null, 'external_item_ids' => array_keys($externalItems)],
+        'scope' => $scope + ['partial' => scope_is_partial($scope), 'external_item_ids' => array_keys($externalItems)],
     ];
 }
 
@@ -331,7 +332,7 @@ function model_days_in(array $model, $from, $to) {
 /** Stable hash of the inputs that matter for the plan (SCH-14). */
 function model_inputs_hash(array $model) {
     $sig = ['today' => $model['today'], 'policy' => $model['policy'], 'people' => [], 'items' => [], 'committed' => $model['committed'],
-        'scope' => array_intersect_key($model['scope'] ?? [], array_flip(['kind', 'team_id', 'portfolio_id', 'team_ids']))];
+        'scope' => array_intersect_key($model['scope'] ?? [], array_flip(['kind', 'team_id', 'role_family_id', 'team_ids', 'person_ids']))];
     foreach ($model['people'] as $p) { $c = $p; unset($c['capacity']); $c['cap_sum'] = array_sum(array_map(fn($x) => $x['available'] * ($x['share'] ?? 1), $p['capacity'])); $sig['people'][] = $c; }
     foreach ($model['items'] as $i) $sig['items'][] = $i;
     return hash('sha256', json_encode($sig));

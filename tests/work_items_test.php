@@ -3,6 +3,8 @@
 //   php tests/work_items_test.php [base=http://localhost:8090]
 // Needs the local server (run_local.ps1) and a seeded demo DB (php seed_demo.php). Re-seed after running:
 // the tests create WI-1072 and mutate WI-1042's estimate/benefits.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $BASE = rtrim($argv[1] ?? 'http://localhost:8090', '/');
 $pass = 0; $fail = 0; $token = null;
@@ -22,11 +24,9 @@ function check($cond, $label) { global $pass, $fail; if ($cond) { $pass++; echo 
 function near($a, $b, $tol, $label) { check(abs((float)$a - (float)$b) <= $tol, "$label (got " . var_export($a, true) . ", want ≈$b ±$tol)"); }
 
 echo "== sign in as delivery lead\n";
-[, $users] = api('auth', ['action' => 'list_dev_users']);
-$lead = null; foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'delivery_lead') { $lead = $u; break; }
-check($lead !== null, 'a delivery_lead dev user exists');
-[, $login] = api('auth', ['action' => 'dev_login', 'user_id' => $lead['id']]);
-$token = $login['token'] ?? null; check(!empty($token), 'dev_login returns a token');
+$lead = user_for('delivery_lead');
+check($lead !== null, 'a delivery_lead account exists');
+$token = token_for('delivery_lead'); check(!empty($token), 'mint_token.php issues a token for it');
 
 echo "== list\n";
 [, $L] = api('work_items', ['action' => 'list']);
@@ -207,15 +207,15 @@ check(count(array_filter($H2['events'], fn($e) => $e['field'] === 'external_link
 [, $X] = api('work_items', ['action' => 'clear_external_link', 'id' => $G3['item']['id']]);
 check($X['external_link'] === null && $X['item']['external_url'] === null && $X['item']['external_ref'] === null, 'clear_external_link removes both');
 // Role gate: a team member cannot set one.
-$member = null; foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'team_member') { $member = $u; break; }
-if ($member) { $leadToken = $token; [, $ml] = api('auth', ['action' => 'dev_login', 'user_id' => $member['id']]); $token = $ml['token'];
+$member = user_for('team_member');
+if ($member) { $leadToken = $token; $token = token_for_email($member['email']);
     [$code] = api('work_items', ['action' => 'set_external_link', 'id' => $G3['item']['id'], 'url' => 'https://acme.atlassian.net/browse/DP-1'], 403);
     check($code === 403, 'a team member is refused (team_lead+)'); $token = $leadToken; }
 
 echo "== the badge is live only for an intake-raised item (REQ-05 + INT-02)\n";
-$admin = null; foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'admin') { $admin = $u; break; }
-check($admin !== null, 'an admin dev user exists');
-$leadToken = $token; [, $al] = api('auth', ['action' => 'dev_login', 'user_id' => $admin['id']]); $adminToken = $al['token'] ?? null;
+$admin = user_for('admin');
+check($admin !== null, 'an admin account exists');
+$leadToken = $token; $adminToken = token_for('admin');
 $token = $adminToken;
 [, $src] = api('intake', ['action' => 'save', 'name' => 'ServiceNow (badge test)', 'system' => 'servicenow']);
 $srcId = $src['source']['id'] ?? null; $secret = $src['secret'] ?? '';

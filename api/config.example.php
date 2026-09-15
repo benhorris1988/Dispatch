@@ -22,17 +22,38 @@ return [
         'pwd'      => 'CHANGE_ME',
     ],
 
-    // Dev sign-in. Production uses Entra ID (OIDC); locally any seeded user can be
-    // picked from the sign-in screen while this is true. Set false to disable.
-    'dev_login_enabled' => true,
+    // Sign-in (ADM-01). There are no local passwords and no development sign-in: an account exists
+    // because somebody signed in with an identity listed here. Accounts are created on first sign-in.
+    //
+    // Google: create an OAuth client per platform in the Google Cloud console and list every client
+    // id here. THE WEB CLIENT ID MUST COME FIRST — the browser needs it to start the flow, and the
+    // Android and iOS apps send it as their server client id so the token they obtain is addressed to
+    // the same audience this API verifies. Any of the ids is accepted as the audience of a token.
+    'google' => [
+        'client_ids'    => [
+            // '000000000000-web.apps.googleusercontent.com',       // Web application  (first: also the apps' server client id)
+            // '000000000000-android.apps.googleusercontent.com',   // Android (package name + signing SHA-1)
+            // '000000000000-ios.apps.googleusercontent.com',       // iOS (bundle id; also goes in Info.plist as GIDClientID)
+        ],
+        'hosted_domain' => '',   // e.g. 'example.org' to accept only that Workspace domain; '' = any Google account
+        'workspace_id'  => 1,    // the workspace new accounts join
+    ],
 
-    // Entra ID (OIDC) — optional. When tenant_id/client_id are set, auth.php action
-    // 'oidc_login' accepts an ID token, verifies it against the tenant JWKS and maps
-    // group claims to roles via 'group_roles'.
+    // Lower-case emails that become administrators the first time they sign in (and are promoted on
+    // their next sign-in if the account already exists). Without at least one of these, the first
+    // person through the door arrives as a team member and nobody can grant anybody a role.
+    'bootstrap_admins' => [
+        // 'you@example.org',
+    ],
+
+    // Entra ID (OIDC) — not in use yet. The verifier and the group-to-role mapping are built and
+    // tested; setting tenant_id and client_id turns on the 'Sign in with Microsoft' button and the
+    // auth.php action 'oidc_login'.
     'entra' => [
-        'tenant_id'   => '',
-        'client_id'   => '',
-        'group_roles' => [], // ['<group-object-id>' => 'delivery_lead', ...]
+        'tenant_id'    => '',
+        'client_id'    => '',
+        'workspace_id' => 1,
+        'group_roles'  => [], // ['<group-object-id>' => 'delivery_lead', ...]
     ],
 
     // Optional CP-SAT scheduling engine (engine/ — Python + OR-Tools). Empty = the

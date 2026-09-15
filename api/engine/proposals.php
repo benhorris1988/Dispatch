@@ -192,10 +192,11 @@ function run_propose($conn, $wsId, array $opts = []) {
     $scope = array_values(array_map('intval', (array)($opts['scope_person_ids'] ?? [])));
     if ($kind === 'urgent' && !$scope) { foreach ($triggers as $t) if (($t['class'] ?? '') === 'urgent') $scope = array_merge($scope, csv_ids($t['person_ids'])); $scope = array_values(array_unique($scope)); }
     if ($kind !== 'urgent') $scope = [];
-    // SCH-13: a proposal may be scoped to one team or to a portfolio of teams. The keys pass
-    // straight through to build_model(), which decides what pool of people and items that means.
+    // SCH-13 / ORG-01: a proposal may be scoped to one branch of the tree or to one role family.
+    // The keys pass straight through to build_model(), which decides what pool of people and items
+    // that means.
     $modelOpts = ['scope_person_ids' => $scope];
-    foreach (['team_id', 'portfolio_id'] as $k) if (isset($opts[$k]) && $opts[$k] !== null && $opts[$k] !== '') $modelOpts[$k] = (int)$opts[$k];
+    foreach (['team_id', 'role_family_id'] as $k) if (isset($opts[$k]) && $opts[$k] !== null && $opts[$k] !== '') $modelOpts[$k] = (int)$opts[$k];
     $model = build_model($conn, $wsId, $modelOpts);
     if (!$model) fail('Workspace not found', 404);
     if (isset($opts['model_overrides'])) $model = $opts['model_overrides']($model);

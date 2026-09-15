@@ -7,6 +7,8 @@
 // It mutates the demo hard — it commits plan versions, edits the scheduling policy, runs the
 // nightly cycle twice and books sickness — so it runs LAST in tests/run_all.php, which re-seeds
 // after it. Run seed_demo.php yourself if you interrupt it.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 $BASE = rtrim($argv[1] ?? 'http://localhost:8090', '/');
@@ -28,12 +30,14 @@ function section($t) { echo "\n== $t\n"; }
 function note($t) { echo "  ..   $t\n"; }
 function login($role) {
     global $token;
-    $token = null;
-    [, $users] = api('auth', ['action' => 'list_dev_users']);
-    foreach ($users['users'] ?? [] as $u) if ($u['role'] === $role) { [, $r] = api('auth', ['action' => 'dev_login', 'user_id' => $u['id']]); $token = $r['token'] ?? null; return $u; }
-    return null;
+    $token = token_for($role);
+    return $token ? user_for($role) : null;
 }
-function loginUser($userId) { global $token; $token = null; [, $r] = api('auth', ['action' => 'dev_login', 'user_id' => $userId]); $token = $r['token'] ?? null; }
+function loginUser($userId) {
+    global $token;
+    $token = null;
+    foreach (test_users() as $u) if ((int)$u['id'] === (int)$userId) { $token = token_for_email($u['email']); return; }
+}
 function myNotifications($kind = null) {
     [, $n] = api('notifications', ['action' => 'list', 'limit' => 200]);
     $rows = $n['notifications'] ?? [];
@@ -53,11 +57,11 @@ function savePolicy(array $fields) {
 section('Sign in');
 $lead = login('delivery_lead');
 check($lead !== null && !empty($token), 'signed in as the delivery lead');
-[, $allUsers] = api('auth', ['action' => 'list_dev_users']);
+$allUsers = ['users' => test_users()];
 $usersByPerson = [];
-foreach ($allUsers['users'] ?? [] as $u) if ($u['person_id'] !== null) $usersByPerson[(int)$u['person_id']] = $u;
-$admin = null; foreach ($allUsers['users'] ?? [] as $u) if ($u['role'] === 'admin') $admin = $u;
-check($admin !== null, 'an admin dev user exists');
+foreach ($allUsers['users'] as $u) if ($u['person_id'] !== null) $usersByPerson[(int)$u['person_id']] = $u;
+$admin = user_for('admin');
+check($admin !== null, 'an admin account exists');
 $adminId = $admin ? (int)$admin['id'] : null;
 
 [, $sched] = api('plan', ['action' => 'schedule']);

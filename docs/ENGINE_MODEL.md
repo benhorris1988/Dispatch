@@ -25,10 +25,11 @@ solver is an optimisation, never a dependency.
       "planned_end": "2026-10-09",        // end of the planned window
       "indicative_end": "2027-03-05"      // end of the modelled horizon
     },
-    "scope": {                            // SCH-13: what this model plans for (see "Planning scope" below)
-      "kind": "workspace",                // workspace | team | portfolio
-      "team_id": null, "portfolio_id": null,
-      "team_ids": null,                   // the teams in scope; null = every team
+    "scope": {                            // SCH-13 / ORG-01: what this model plans for (see "Planning scope" below)
+      "kind": "workspace",                // workspace | team | role_family
+      "team_id": null, "role_family_id": null,
+      "team_ids": null,                   // a team scope: that team AND every team beneath it; null = every team
+      "person_ids": null,                 // a role family: the people in it, wherever they sit
       "partial": false                    // true when people[] is not the whole workspace
     },
     "policy": {
@@ -95,10 +96,13 @@ from `assignments` are treated as unscheduled and reported on the watch list. `p
 in `cpsat_client.php` re-validates every returned plan against the hard constraints; a violation is
 treated as a solver failure and the heuristic result is used instead.
 
-## Planning scope: teams, portfolios and loans (TEAM-09, SCH-13)
+## Planning scope: the team tree, role families and loans (TEAM-09, SCH-13, ORG-01/02)
 
-`build_model($conn, $wsId, ['team_id' => n])` or `['portfolio_id' => n]` builds a model for one team,
-or for every team in a portfolio together. With neither option the model is the whole workspace as
+`build_model($conn, $wsId, ['team_id' => n])` builds a model for that team **and every team beneath
+it** — planning a parent plans its sub-teams, which is what makes a branch of the organisation a
+usable planning unit. `['role_family_id' => n]` builds one for a discipline's people, wherever in the
+tree they sit: a set of people rather than a set of teams, so everyone in it is `home` with share 1
+and a loan between two teams moves nothing. With neither option the model is the whole workspace as
 one pool, exactly as before. The PHP-side model (`docs/API.md` → `model.php`) carries three things
 the wire shape above only shows in reduced form:
 
@@ -108,8 +112,9 @@ the wire shape above only shows in reduced form:
   `from_date` and `to_date`, inclusive.
 - **`capacity[day].share`** (0..1): the part of that person-day that belongs to the scope. A home member
   lent out at 50% has 0.5 on the loan's days and 1 otherwise; a person loaned in at 50% has 0.5 on those
-  days and 0 outside them; when both the lending and the borrowing team are in scope (a portfolio) the
-  share is 1 — a loan inside the scope moves nothing. Shares of one day across teams add up to 1.
+  days and 0 outside them; when both the lending and the borrowing team are in scope (a parent team
+  above both, or a role family) the share is 1 — a loan inside the scope moves nothing. Shares of one
+  day across sibling teams add up to 1.
   `available` and `reserve` stay the WHOLE day in the PHP model; the planner books against
   `share × (available − reserve)` while `allocation_pct` keeps meaning "share of the whole day", so a
   stored assignment reads the same in every view and a 50% loan can hold at most a 50% allocation. The
@@ -123,9 +128,9 @@ the wire shape above only shows in reduced form:
   external — that work must be offered to someone else. `scope.external_item_ids` lists them.
 
 What this gives: under a team model only that team's people (plus anyone lent to it) are eligible, so
-an item needing a skill the team lacks is a skills gap; under a portfolio model the pool spans its teams,
-and an item whose effort is split by skill (`skill_effort`) is placed across them — one portion per
-qualified person, whichever team they sit in (SCH-13). Loans respect their dates: the borrowed person is
+an item needing a skill the team lacks is a skills gap; under a model of a team higher up the tree the
+pool spans every team beneath it, and an item whose effort is split by skill (`skill_effort`) is placed
+across them — one portion per qualified person, whichever team they sit in (SCH-13). Loans respect their dates: the borrowed person is
 eligible for the borrowing team's work only while, and only to the share that, the loan says.
 
 Two consequences worth knowing. A home member's committed work is booked in full against their scoped
@@ -135,8 +140,8 @@ against the part of the day that stays with their own team, and only the overflo
 share, so the borrowing team sees exactly what it was promised.
 
 The workspace (nightly) model ignores team boundaries as it always has; loans therefore change nothing
-there. They matter when a cycle is scoped to a team or portfolio, and in every per-team figure
-(`portfolios.php overview`, `people.php list{team_id}`, `skills.php matrix{team_id}`).
+there. They matter when a cycle is scoped to a branch of the tree, and in every per-team figure
+(`org.php tree`, `role_families.php overview`, `people.php list{team_id}`, `skills.php matrix{team_id}`).
 
 ## Hard constraints the solver must honour (spec 8.5)
 

@@ -28,12 +28,12 @@ function cpsat_model_payload(array $model) {
     // Rows on people outside the pool (a scoped model) are not sent: the solver cannot book them and
     // cpsat_solve() passes them through unchanged instead.
     foreach ($model['committed'] as $a) if (isset($model['items'][$a['work_item_id']]) && isset($model['people'][$a['person_id']])) $committed[] = ['id' => $a['id'], 'work_item_id' => $a['work_item_id'], 'person_id' => $a['person_id'], 'from_date' => $a['from_date'], 'to_date' => $a['to_date'], 'allocation_pct' => $a['allocation_pct'], 'locked' => $a['locked'], 'is_reserve' => $a['is_reserve']];
-    $scope = $model['scope'] ?? ['kind' => 'workspace', 'team_id' => null, 'portfolio_id' => null, 'team_ids' => null, 'partial' => false];
+    $scope = $model['scope'] ?? ['kind' => 'workspace', 'team_id' => null, 'role_family_id' => null, 'team_ids' => null, 'person_ids' => null, 'partial' => false];
     return [
         'schema_version' => 1,
         'workspace_id' => $model['workspace_id'], 'today' => $model['today'], 'hours_per_day' => $model['hours_per_day'],
         'working_days' => $model['working_days'], 'days' => $model['days'], 'windows' => $model['windows'],
-        'scope' => ['kind' => $scope['kind'], 'team_id' => $scope['team_id'], 'portfolio_id' => $scope['portfolio_id'], 'team_ids' => $scope['team_ids'], 'partial' => (bool)($scope['partial'] ?? false)],
+        'scope' => ['kind' => $scope['kind'], 'team_id' => $scope['team_id'], 'role_family_id' => $scope['role_family_id'] ?? null, 'team_ids' => $scope['team_ids'], 'person_ids' => $scope['person_ids'] ?? null, 'partial' => (bool)($scope['partial'] ?? false)],
         'policy' => [
             'objective_weights' => $model['policy']['objective_weights'], 'change_budget_days' => $model['policy']['change_budget_days'],
             'min_improvement_pct' => $model['policy']['min_improvement_pct'], 'target_load_min' => $model['policy']['target_load_min'], 'target_load_max' => $model['policy']['target_load_max'],

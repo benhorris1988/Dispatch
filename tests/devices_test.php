@@ -10,6 +10,8 @@
 //
 // Cleans up its own device rows: seed_demo.php does not wipe device_tokens or push_deliveries,
 // and a token left behind would make the next re-seed fail on the users foreign key.
+require_once __DIR__ . '/_auth.php';   // sign-in helpers: there is no development login any more
+
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 require __DIR__ . '/../migration_connect.php';   // $conn (db_owner), CLI-only
@@ -33,17 +35,10 @@ function api($endpoint, array $body, $bearer = null) {
 function one($conn, $sql, $params = []) { $r = xrows($conn, $sql, $params); return $r ? (int)reset($r[0]) : 0; }
 function ids(array $devices) { return array_map(fn($d) => (int)$d['id'], $devices); }
 
-[, $users] = api('auth', ['action' => 'list_dev_users']);
-$admin = null; $member = null;
-foreach ($users['users'] ?? [] as $u) {
-    if ($u['role'] === 'admin' && $admin === null) $admin = $u;
-    if ($u['role'] === 'team_member' && $member === null) $member = $u;
-}
-if ($member === null) foreach ($users['users'] ?? [] as $u) if ($u['role'] === 'delivery_lead') { $member = $u; break; }
-[, $a] = api('auth', ['action' => 'dev_login', 'user_id' => $admin['id']]);
-$adminToken = $a['token'] ?? null;
-[, $m] = api('auth', ['action' => 'dev_login', 'user_id' => $member['id']]);
-$memberToken = $m['token'] ?? null;
+$admin = user_for('admin');
+$member = user_for('team_member', true) ?: user_for('delivery_lead');
+$adminToken = token_for('admin');
+$memberToken = token_for_email($member['email']);
 check(!empty($adminToken) && !empty($memberToken), "signed in as admin and as {$member['display_name']} ({$member['role']})");
 $memberId = (int)$member['id'];
 $wsId = one($conn, "SELECT workspace_id FROM dbo.users WHERE id = ?", [$memberId]);
@@ -159,8 +154,7 @@ $ws2 = xid($conn, 'workspaces', ['name' => 'Tenancy test', 'time_zone' => 'Europ
 $created['workspaces'][] = $ws2;
 $u2 = xid($conn, 'users', ['workspace_id' => $ws2, 'email' => 'tenant-test@example.org', 'display_name' => 'Tenant Tester', 'role' => 'admin', 'active' => 1]);
 $created['users'][] = $u2;
-[, $l2] = api('auth', ['action' => 'dev_login', 'user_id' => $u2]);
-$t2 = $l2['token'] ?? null;
+$t2 = token_for_email('tenant-test@example.org');
 check(!empty($t2), 'signed in as an admin of a second workspace');
 [$code, $r] = api('devices', ['action' => 'register', 'platform' => 'android', 'token' => $T3, 'device_label' => 'Other tenant'], $t2);
 $d3 = $r['device']['id'] ?? null;

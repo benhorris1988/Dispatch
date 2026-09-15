@@ -163,8 +163,6 @@ class _UserMenu extends StatelessWidget {
             if (user.personId != null) context.go(Routes.person(user.personId!));
           case 'notifications':
             context.go(Routes.notifications);
-          case 'switch':
-            await session.signOut();
           case 'signout':
             await session.signOut();
         }
@@ -174,7 +172,6 @@ class _UserMenu extends StatelessWidget {
         const PopupMenuDivider(),
         if (user.personId != null) const PopupMenuItem(value: 'profile', child: ListTile(dense: true, leading: Icon(Icons.person_outline_rounded), title: Text('My profile'))),
         const PopupMenuItem(value: 'notifications', child: ListTile(dense: true, leading: Icon(Icons.notifications_none_rounded), title: Text('Notifications'))),
-        const PopupMenuItem(value: 'switch', child: ListTile(dense: true, leading: Icon(Icons.swap_horiz_rounded), title: Text('Switch user'))),
         const PopupMenuItem(value: 'signout', child: ListTile(dense: true, leading: Icon(Icons.logout_rounded), title: Text('Sign out'))),
       ],
       child: Padding(

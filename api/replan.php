@@ -1,6 +1,6 @@
 <?php
 // Engine entry points (SCH-*, STAB-*). Actions:
-//   propose{kind, scope_person_ids?, engine?, team_id?|portfolio_id?} (delivery_lead)   preview{changes:[...], team_id?|portfolio_id?}       scenario_save{name, changes, team_id?|portfolio_id?}
+//   propose{kind, scope_person_ids?, engine?, team_id?|role_family_id?} (delivery_lead)   preview{changes:[...], team_id?|role_family_id?}       scenario_save{name, changes, team_id?|role_family_id?}
 //   scenarios   scenario_adopt{id} (delivery_lead)                 watch_list                   run_nightly (CLI or cron_key)
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/engine/proposals.php';
@@ -38,8 +38,11 @@ if ($action === 'propose') {
 if ($action === 'preview') {
     // What-if within 2 s: hypothetical edits applied in memory, nothing persisted (SCH-08, SCH-11 lite).
     $edits = (array)param('changes', []);
-    $r = preview_with_edits($conn, $wsId, $edits, plan_scope_opts($conn, $wsId));
-    ok(['summary_before' => $r['summary_before'], 'summary_after' => $r['summary_after'], 'changes' => array_map('change_lite', $r['changes']), 'held' => array_map('change_lite', $r['held']),
+    $scopeOpts = plan_scope_opts($conn, $wsId);
+    $r = preview_with_edits($conn, $wsId, $edits, $scopeOpts);
+    // Echo the scope back: the client shows which pool this what-if was run against, and a preview of
+    // one branch or one discipline is a different answer from a preview of the whole workspace.
+    ok(['scope' => scope_public(scope_team_ids($conn, $wsId, $scopeOpts) ?: []), 'summary_before' => $r['summary_before'], 'summary_after' => $r['summary_after'], 'changes' => array_map('change_lite', $r['changes']), 'held' => array_map('change_lite', $r['held']),
         'improvement_pct' => $r['improvement_pct'], 'below_threshold' => $r['below_threshold'], 'unscheduled' => $r['unscheduled'], 'solver_stats' => $r['solver_stats'], 'edits_applied' => $r['edits_applied']]);
 }
 
@@ -256,9 +259,10 @@ function apply_edits_to_model(array $model, array $edits) {
 }
 
 /**
- * SCH-13: optional planning scope from the request — `team_id` (one team's people and work) or
- * `portfolio_id` (every team in the portfolio, so cross-team items can be planned across them).
- * Both must belong to this workspace; neither given means the whole workspace, as before.
+ * SCH-13 / ORG-01: optional planning scope from the request — `team_id` (that team and every team
+ * beneath it, so cross-team items inside a branch can be planned together) or `role_family_id` (the
+ * people in one discipline, wherever they sit). Both must belong to this workspace; neither given
+ * means the whole workspace, as before.
  */
 function plan_scope_opts($conn, $wsId) {
     $opts = [];
@@ -267,11 +271,11 @@ function plan_scope_opts($conn, $wsId) {
         if (scalar($conn, "SELECT COUNT(*) FROM dbo.teams WHERE id = ? AND workspace_id = ?", [$tid, $wsId]) == 0) fail('Team not found', 404);
         $opts['team_id'] = $tid;
     }
-    if (param('portfolio_id') !== null && param('portfolio_id') !== '') {
-        if (isset($opts['team_id'])) fail('Give team_id or portfolio_id, not both', 400);
-        $pfid = (int)param('portfolio_id');
-        if (scalar($conn, "SELECT COUNT(*) FROM dbo.portfolios WHERE id = ? AND workspace_id = ?", [$pfid, $wsId]) == 0) fail('Portfolio not found', 404);
-        $opts['portfolio_id'] = $pfid;
+    if (param('role_family_id') !== null && param('role_family_id') !== '') {
+        if (isset($opts['team_id'])) fail('Give team_id or role_family_id, not both', 400);
+        $rfid = (int)param('role_family_id');
+        if (scalar($conn, "SELECT COUNT(*) FROM dbo.role_families WHERE id = ? AND workspace_id = ?", [$rfid, $wsId]) == 0) fail('Role family not found', 404);
+        $opts['role_family_id'] = $rfid;
     }
     return $opts;
 }

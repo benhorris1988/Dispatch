@@ -31,7 +31,8 @@ if ($action === 'schedule') {
     $loanFlags = [];
     if (param('team_id')) {
         $teamId = (int)param('team_id');
-        $pool = function_exists('team_pool') ? team_pool($conn, $wsId, [$teamId], $from, $to) : [];
+        // ORG-01: a team lane view covers the team and every team beneath it.
+        $pool = function_exists('team_pool') ? team_pool($conn, $wsId, team_descendants($conn, $wsId, $teamId), $from, $to) : [];
         $poolIds = array_keys($pool) ?: [-1];
         $pSql .= " AND p.id IN (" . implode(',', array_map('intval', $poolIds)) . ")";
         foreach ($pool as $pid => $e) foreach ($e['loans'] as $l) {

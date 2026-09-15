@@ -369,13 +369,33 @@ An incident rota assigns a person or people per week; the incident reserve for t
 Must
 R1
 TEAM-09
-Teams can be grouped into a portfolio for cross-team views; a person belongs to one team but can be loaned to another for a dated period.
+People can be grouped into role families (the discipline they practise) for cross-team views; a person belongs to one team but can be loaned to another for a dated period.
 Should
 R3
 TEAM-10
 Capacity per person per day is derived nightly (available hours minus reserve) and visible on the profile and in the schedule lane header as a load percentage.
 Must
 R1
+ORG-01
+Teams are arranged as a tree: a team may sit under another team, to any depth. The planning scope of a team is that team and every team beneath it, so planning a parent plans its sub-teams.
+Should
+R3
+ORG-02
+Each person has a reporting line (the person they report to) and a role family (the discipline they practise, which spans teams). Neither is free text.
+Should
+R3
+ORG-03
+An organisation chart shows the tree with each team's lead, headcount including sub-teams and load. Authorised users reorganise it directly by dragging a team to a new parent or a person to a new team; moving a person changes which team's capacity they count towards, is confirmed before it happens, and is audited with a reason. An outstanding loan blocks such a move until it is explicitly ended.
+Should
+R3
+ORG-04
+The organisation is visible to everyone signed in. A team can be restricted, which requires a stated business reason: outsiders still see that the team exists and where it sits, but not who is in it. Administrators, the restricting team's lead chain and the people inside it see it in full.
+Should
+R3
+ORG-05
+Authority over the organisation follows the tree: an administrator or delivery lead may change anything; a team lead may change the team they lead and every team beneath it, and nothing else. Moving a team or a person is checked at both ends.
+Must
+R3
 ## 6.5	Estimation (rough order of magnitude)
 Estimates are ranges, not points. The system records how the estimate was made, how confident it is and how it later compared with reality, so that the team's calibration improves.
 ID
@@ -515,7 +535,7 @@ The scheduler can prefer pairing a person with a development target on matching 
 Should
 R2
 SCH-13
-Multi-team scheduling: items requiring skills from more than one team can be planned across teams within a portfolio.
+Multi-team scheduling: items requiring skills from more than one team can be planned across every team beneath a common parent in the organisation tree (ORG-01).
 Could
 R3
 SCH-14
@@ -1170,6 +1190,9 @@ Work types are a reorderable list with colour, prefix, count and policy. Renamin
 ### 9.4.11	Reports
 Figure 13: Reports: plan stability trend, load and utilisation against the target band, estimate accuracy by size, delivered items by type.
 Reports are deliberately few and each has an in-app definition. The stability trend annotates when the freeze horizon was introduced. Utilisation compares planned with actual where timesheets are integrated. Estimate accuracy plots estimated against actual days with the parity line; Large and Custom items are coloured separately because they behave differently.
+### 9.4.12	Organisation
+Figure 13a: Organisation: the team tree as cards on a pannable canvas, each with its lead, headcount including sub-teams, four-week load and the people in it; a restricted team drawn as a closed door rather than a hole.
+The chart is the structure, not a picture of it: teams are reorganised by dragging them, and people by dragging them between teams. A drag is a long press, so an ordinary drag still pans the canvas. Dropping a team onto one of its own sub-teams is refused as it happens rather than after the fact. Moving a person is a planning decision and says so before it is made — their committed work stays with them, but their capacity now counts towards the new team — and it is refused outright while a loan says their time already belongs somewhere else, until somebody chooses to end that loan. A role family can be picked out to see one discipline across the whole tree. A team's lead, its description, who reports to whom and whether the team is restricted are all set from the panel beside the chart. Below tablet width the canvas gives way to the same tree as an indented list with a menu per row, because dragging cards around a phone is a poor way to reorganise anything. Everything the chart can do, the API refuses to anyone whose authority does not reach that part of the tree, and the chart hides the control rather than letting them find out the hard way.
 ## 9.5	Mobile screens
 The mobile apps are built for four moments: seeing your week, reading an item, deciding on a change and capturing a request. A bottom tab bar (My week, Pipeline, Changes, More) keeps them one tap away. Cards, stamps and chips are the same as the web; type sizes and touch targets follow iOS Human Interface Guidelines and Material 3 respectively, with dynamic type and dark mode supported.
 Figure 14: My week: day strip, a change that affects you, today's assignments with progress, the incident reserve, what is coming up and your load.
@@ -1405,7 +1428,7 @@ CP-SAT solver with tuned weights, scenarios, calibration and P80 planning, benef
 8 / 10 / 14 weeks
 Proposal acceptance rate above 70%; stability index above 90%; apps in use by all team members
 3 · Integrations and portfolio (R3)
-Jira or Azure DevOps and ServiceNow connectors, Teams actions, timesheets, Power BI dataset, multi-team and portfolio views, multiple workspaces.
+Jira or Azure DevOps and ServiceNow connectors, Teams actions, timesheets, Power BI dataset, the organisation chart and role families, multi-team planning, multiple workspaces.
 8 / 10 / 14 weeks
 Second team onboarded without engineering involvement
 4 · Continuous
@@ -1740,6 +1763,10 @@ Team & skills
 Web
 Team lead
 TEAM-01 to TEAM-06, TEAM-08, TEAM-10
+Organisation
+Web (list view on mobile)
+Delivery lead, team lead
+ORG-01 to ORG-05, TEAM-09
 Person
 Web, mobile (own profile)
 Team member, lead

@@ -1,6 +1,7 @@
 <?php
 // Capacity derivation (TEAM-06/08/10) + small plan/load helpers shared by people.php and skills.php.
 // Pure PHP, no HTTP. Requires lib.php helpers (rows/q/today/week_start...).
+require_once __DIR__ . '/org_lib.php';   // the team tree: descendants, authority, visibility (ORG-01..05)
 
 // current_policy() is canonical in lib.php (loaded by db_connect.php for every endpoint).
 
@@ -174,29 +175,68 @@ function person_shape(array $p) {
         'working_pattern' => json_col($p['working_pattern'], ['Mon'=>7.5,'Tue'=>7.5,'Wed'=>7.5,'Thu'=>7.5,'Fri'=>7.5]),
         'pattern_label' => $p['pattern_label'], 'max_concurrent' => $p['max_concurrent'] !== null ? (int)$p['max_concurrent'] : null,
         'min_focus_days' => $p['min_focus_days'] !== null ? (int)$p['min_focus_days'] : null, 'prefers' => $p['prefers'], 'avoid' => $p['avoid'],
-        'line_manager' => $p['line_manager'], 'active' => (bool)$p['active'], 'email' => $p['email'],
+        'manager_person_id' => isset($p['manager_person_id']) && $p['manager_person_id'] !== null ? (int)$p['manager_person_id'] : null,
+        'manager_name' => $p['manager_name'] ?? null,
+        'role_family_id' => isset($p['role_family_id']) && $p['role_family_id'] !== null ? (int)$p['role_family_id'] : null,
+        'role_family_name' => $p['role_family_name'] ?? null,
+        // ORG-02: the reporting line is a real person now. line_manager is the old free-text column,
+        // still returned so nothing that reads it breaks, but never written again.
+        'line_manager' => $p['manager_name'] ?? ($p['line_manager'] ?? null), 'active' => (bool)$p['active'], 'email' => $p['email'],
         'protected_until' => $p['protected_until'] ? substr($p['protected_until'], 0, 10) : null,
     ];
 }
 
-// ---- TEAM-09: teams, portfolios and loans ---------------------------------------------------------
+// ---- TEAM-09 / ORG-01: scopes, teams and loans -----------------------------------------------------
 // A loan moves a SHARE of a person's time to another team for a dated period. capacity_days stays
 // one row per person-day (how many hours exist); these helpers answer "whose hours are they" at read
 // time, so every reader of capacity_days keeps working and a loan is a fact about ownership, not size.
 
-/** Team ids for a planning scope: ['team_id' => n] | ['portfolio_id' => n] | [] (whole workspace → team_ids null). Unknown id → null. */
+/**
+ * A planning scope: the whole workspace, one team, or one role family.
+ *
+ * A team scope covers the team AND every team beneath it (ORG-01), so planning for
+ * 'Data Platform' plans for its sub-teams too. A role family is a discipline people belong to
+ * across the tree (ORG-02), so it is a set of PEOPLE, not of teams: team_ids stays null and
+ * person_ids carries the family. Everything downstream keys off whichever of the two is set.
+ *
+ * @return array{kind:string, team_id:?int, role_family_id:?int, name:?string, team_ids:?int[], person_ids:?int[]}|null
+ *         null for an unknown team or role family.
+ */
 function scope_team_ids($conn, $wsId, array $opts) {
-    if (isset($opts['team_id']) && $opts['team_id'] !== '') {
-        $t = row($conn, "SELECT id, name FROM dbo.teams WHERE id = ? AND workspace_id = ?", [(int)$opts['team_id'], $wsId]);
-        return $t ? ['kind' => 'team', 'team_id' => (int)$t['id'], 'portfolio_id' => null, 'name' => $t['name'], 'team_ids' => [(int)$t['id']]] : null;
+    $empty = ['kind' => 'workspace', 'team_id' => null, 'role_family_id' => null, 'name' => null, 'team_ids' => null, 'person_ids' => null];
+    if (isset($opts['team_id']) && $opts['team_id'] !== '' && $opts['team_id'] !== null) {
+        $t = team_node($conn, $wsId, (int)$opts['team_id']);
+        if (!$t) return null;
+        return ['kind' => 'team', 'team_id' => (int)$t['id'], 'role_family_id' => null, 'name' => $t['name'],
+                'team_ids' => team_descendants($conn, $wsId, (int)$t['id']), 'person_ids' => null];
     }
-    if (isset($opts['portfolio_id']) && $opts['portfolio_id'] !== '') {
-        $pf = row($conn, "SELECT id, name FROM dbo.portfolios WHERE id = ? AND workspace_id = ?", [(int)$opts['portfolio_id'], $wsId]);
-        if (!$pf) return null;
-        $ids = array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.teams WHERE workspace_id = ? AND portfolio_id = ? ORDER BY id", [$wsId, (int)$pf['id']]));
-        return ['kind' => 'portfolio', 'team_id' => null, 'portfolio_id' => (int)$pf['id'], 'name' => $pf['name'], 'team_ids' => $ids];
+    if (isset($opts['role_family_id']) && $opts['role_family_id'] !== '' && $opts['role_family_id'] !== null) {
+        $rf = row($conn, "SELECT id, name FROM dbo.role_families WHERE id = ? AND workspace_id = ?", [(int)$opts['role_family_id'], $wsId]);
+        if (!$rf) return null;
+        $ids = array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.people WHERE workspace_id = ? AND role_family_id = ? AND active = 1 ORDER BY id", [$wsId, (int)$rf['id']]));
+        return ['kind' => 'role_family', 'team_id' => null, 'role_family_id' => (int)$rf['id'], 'name' => $rf['name'], 'team_ids' => null, 'person_ids' => $ids];
     }
-    return ['kind' => 'workspace', 'team_id' => null, 'portfolio_id' => null, 'name' => null, 'team_ids' => null];
+    return $empty;
+}
+
+/** The keys a scope echoes back to the client. */
+function scope_public(array $scope) {
+    return array_intersect_key($scope, array_flip(['kind', 'team_id', 'role_family_id', 'name', 'team_ids', 'person_ids']));
+}
+
+/** True when the scope is narrower than the workspace. */
+function scope_is_partial(array $scope) {
+    return ($scope['team_ids'] ?? null) !== null || ($scope['person_ids'] ?? null) !== null;
+}
+
+/** team_pool for a scope array. */
+function scope_pool($conn, $wsId, array $scope, $from, $to) {
+    return team_pool($conn, $wsId, $scope['team_ids'] ?? null, $from, $to, $scope['person_ids'] ?? null);
+}
+
+/** team_load for a scope array. */
+function scope_load($conn, $wsId, array $scope, $from, $to) {
+    return team_load($conn, $wsId, $scope['team_ids'] ?? null, $from, $to, $scope['person_ids'] ?? null);
 }
 
 /** Loan rows overlapping [$from,$to], dates as Y-m-d, share as a fraction. Optional person / team filters. */
@@ -232,10 +272,19 @@ function loan_shape(array $l) {
  * active home members plus anyone loaned into one of the teams. Keyed by person id:
  *   ['home' => bool (home team in the set), 'team_id' => home team, 'loans' => [loan_shape + 'to_in','from_in']]
  * Pass $teamIds = null for the whole workspace (everyone, share 1).
+ *
+ * $personIds names a set of people directly (a role family, ORG-02). They are all "home" and
+ * every hour of theirs belongs to the set wherever they sit, so a loan between two teams moves
+ * nothing: the discipline still has the person either way.
  */
-function team_pool($conn, $wsId, $teamIds, $from, $to) {
+function team_pool($conn, $wsId, $teamIds, $from, $to, $personIds = null) {
     $people = rows($conn, "SELECT id, team_id FROM dbo.people WHERE workspace_id = ? AND active = 1 ORDER BY id", [$wsId]);
     $homeTeam = []; foreach ($people as $p) $homeTeam[(int)$p['id']] = $p['team_id'] !== null ? (int)$p['team_id'] : null;
+    if ($personIds !== null) {
+        $out = [];
+        foreach (array_map('intval', $personIds) as $pid) if (array_key_exists($pid, $homeTeam)) $out[$pid] = ['home' => true, 'team_id' => $homeTeam[$pid], 'loans' => []];
+        return $out;
+    }
     if ($teamIds === null) { $out = []; foreach ($homeTeam as $pid => $tid) $out[$pid] = ['home' => true, 'team_id' => $tid, 'loans' => []]; return $out; }
     $set = array_flip(array_map('intval', $teamIds));
     $out = [];
@@ -265,9 +314,9 @@ function team_share_for(array $entry, $day) {
  * Returns ['people' => [pid => {available_hours, assigned_hours, load_pct, home, share_days}],
  *          'available_hours', 'assigned_hours', 'load_pct', 'headcount', 'loaned_in', 'loaned_out'].
  */
-function team_load($conn, $wsId, $teamIds, $from, $to) {
+function team_load($conn, $wsId, $teamIds, $from, $to, $personIds = null) {
     ensure_capacity($conn, $wsId, $from, $to);
-    $pool = team_pool($conn, $wsId, $teamIds, $from, $to);
+    $pool = team_pool($conn, $wsId, $teamIds, $from, $to, $personIds);
     if (!$pool) return ['people' => [], 'available_hours' => 0.0, 'assigned_hours' => 0.0, 'load_pct' => 0, 'headcount' => 0, 'loaned_in' => 0, 'loaned_out' => 0];
     $ids = array_keys($pool);
     $ws = workspace_row($conn, $wsId);

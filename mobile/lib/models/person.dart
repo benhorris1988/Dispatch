@@ -22,6 +22,10 @@ class Person {
     this.prefers,
     this.avoid,
     this.lineManager,
+    this.managerPersonId,
+    this.managerName,
+    this.roleFamilyId,
+    this.roleFamilyName,
     this.colourHex,
     this.active = true,
     this.protectedUntil,
@@ -47,7 +51,15 @@ class Person {
   final int? minFocusDays;
   final String? prefers;
   final String? avoid;
+  /// ORG-02 made the reporting line a real person; this is that person's name,
+  /// kept under the old field name so nothing that already reads it breaks.
   final String? lineManager;
+  final int? managerPersonId;
+  final String? managerName;
+  /// The discipline this person practises (Data engineering, Analytics), which
+  /// spans teams rather than sitting under one.
+  final int? roleFamilyId;
+  final String? roleFamilyName;
   final String? colourHex;
   final bool active;
   final DateTime? protectedUntil;
@@ -61,7 +73,7 @@ class Person {
   final List<Loan> loans;
   /// The loan that moves this person to another team today, or null.
   final Loan? onLoanTo;
-  /// In a team- or portfolio-scoped list: the loan that brings this person into
+  /// In a team- or role-family-scoped list: the loan that brings this person into
   /// the scope from their home team, or null for a home member.
   final Loan? loanedFrom;
 
@@ -96,7 +108,11 @@ class Person {
         minFocusDays: asInt(j['min_focus_days']),
         prefers: asStr(j['prefers']),
         avoid: asStr(j['avoid']),
-        lineManager: asStr(j['line_manager']),
+        lineManager: asStr(j['manager_name'] ?? j['line_manager']),
+        managerPersonId: asInt(j['manager_person_id']),
+        managerName: asStr(j['manager_name']),
+        roleFamilyId: asInt(j['role_family_id'] ?? (j['role_family'] is Map ? j['role_family']['id'] : null)),
+        roleFamilyName: asStr(j['role_family_name'] ?? (j['role_family'] is Map ? j['role_family']['name'] : null)),
         colourHex: asStr(j['colour']),
         active: asBool(j['active'], fallback: true),
         protectedUntil: asDate(j['protected_until']),

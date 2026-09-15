@@ -14,6 +14,15 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
   `api/workspace_config.php`. Do not confuse the two.
 - `today()` in `api/lib.php` honours `fake_today` in `api/config.php`. The demo seed is built around
   Tue 8 Sep 2026; remove that key for live use.
+- **There is no development sign-in.** Sign-in is Google (ADM-01), which no test can perform, so
+  tests mint a token with `tests/mint_token.php <email|role>` (CLI only, admin DB connection) and
+  `tests/_auth.php` wraps it as `token_for($role)`. `auth.php providers` is the "is the server up"
+  probe, not `list_dev_users`.
+- **A team scope means the team and every team beneath it** (ORG-01). `teams.parent_team_id` makes the
+  tree; `engine/org_lib.php team_closure()` reads it once per request, and anything that writes a
+  parent, sort order, lead or visibility must call it again with `$fresh = true`.
+- **Portfolios are now role families, and they group people, not teams** (ORG-02). `dbo.role_families`
+  + `people.role_family_id`. `portfolio_id` is not a parameter anywhere any more.
 - The repo is served by PHP's built-in server (`run_local.ps1`, port 8090, `router.php`), not Apache.
   Apache's DocumentRoot on this box is the Badminton project; an Alias is optional (see README).
 - `seed_demo.php` **wipes and reseeds every table**. CLI only, guarded by `migration_connect.php`.
@@ -37,15 +46,19 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 C:\xampp\php\php.exe tests\run_all.php     # every PHP suite listed in run_all.php; re-seeds before and after
 python engine\test_solver.py               # CP-SAT hard-constraint checks (no server needed)
 "C:\temp\flutter sdk\flutter\bin\flutter.bat" analyze                        # in mobile/
-"C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/screens_smoke_test.dart
+"C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/org_layout_test.dart  # chart geometry; no server
+"C:\temp\flutter sdk\flutter\bin\flutter.bat" test test/screens_smoke_test.dart --dart-define=TEST_TOKEN=$(C:/xampp/php/php.exe tests/mint_token.php delivery_lead)
 ```
 
+The smoke test needs that `TEST_TOKEN`: there is no development sign-in to fall back on, and a
+minted token is the only way in for something that cannot open a browser.
+
 **`analyze` is not enough on its own.** It proves the client compiles; it draws nothing.
-`screens_smoke_test.dart` renders all seventeen screens against the running API at desktop,
+`screens_smoke_test.dart` renders every screen against the running API at desktop,
 tablet and phone widths and in dark theme, and fails on any framework exception, error
 state or blank screen. Its first run found 428 layout overflows that `analyze` and a
 green `build web` had both been perfectly happy with. It needs the server up and the demo
-seeded. Two things about it worth knowing before you change it:
+seeded. Three things about it worth knowing before you change it:
 
 - It drives its pumps inside `tester.runAsync`, because the test binding fakes async and
   the screens' real HTTP calls would otherwise never resolve.
@@ -53,6 +66,11 @@ seeded. Two things about it worth knowing before you change it:
   strings measure 2–3× their real width. That makes it a strict overflow test, not a
   faithful one: check a genuine near-miss in the browser against `docs/screens/` before
   reworking a layout to satisfy it.
+- It draws each screen's **first** view, which for a long time meant Settings was only ever
+  checked on Work types. A layout fault in a later section rendered a blank panel that every
+  check was happy with, so the test now walks all eleven Settings sections. A screen that
+  hides content behind a tab needs the same treatment; drawing it once proves less than it
+  looks like it does.
 
 `run_all.php` needs the local server up (`run_local.ps1`). The suites mutate the demo
 deliberately, so it re-seeds before and after; run `seed_demo.php` yourself if you
