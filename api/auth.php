@@ -178,7 +178,9 @@ function short_name_for($name) {
 
 function user_public($conn, $u) {
     $p = $u['person_id'] ? row($conn, "SELECT id, name, initials, colour, role_title, team_id FROM dbo.people WHERE id = ?", [$u['person_id']]) : null;
-    $ws = row($conn, "SELECT id, name, time_zone, working_days, hours_per_day, currency FROM dbo.workspaces WHERE id = ?", [$u['workspace_id']]);
+    // `kind` tells the client whether it is in the live workspace or a sandbox, which decides
+    // whether the campaign banner shows: nobody should have to guess which universe they are in.
+    $ws = row($conn, "SELECT id, name, time_zone, working_days, hours_per_day, currency, kind, description, source_workspace_id, seeded_from FROM dbo.workspaces WHERE id = ?", [$u['workspace_id']]);
     return ['id' => (int)$u['id'], 'email' => $u['email'], 'display_name' => $u['display_name'], 'short_name' => $u['short_name'],
         'role' => $u['role'], 'auth_provider' => $u['auth_provider'] ?? null,
         'person_id' => $u['person_id'] !== null ? (int)$u['person_id'] : null, 'person' => $p, 'workspace' => $ws];

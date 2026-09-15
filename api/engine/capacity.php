@@ -11,6 +11,137 @@ function workspace_row($conn, $wsId) {
 }
 // workspace_working_days() is canonical in lib.php.
 
+/**
+ * Public holidays in a window: [day => [region => label]], where the key '' means everyone.
+ *
+ * A holiday is a property of the calendar, not of anybody's plans, so it is resolved here
+ * rather than written into dbo.availability per person: a new joiner gets Christmas off
+ * without anybody remembering to book it for them.
+ */
+function holiday_map($conn, $wsId, $from, $to) {
+    if (public_holidays_table_exists($conn) === false) return [];
+    $m = [];
+    foreach (rows($conn, "SELECT CONVERT(char(10), day, 23) AS day, label, region FROM dbo.public_holidays WHERE workspace_id = ? AND day BETWEEN ? AND ?", [$wsId, $from, $to]) as $h) {
+        $m[$h['day']][$h['region'] === null ? '' : $h['region']] = $h['label'];
+    }
+    return $m;
+}
+
+/** True when dbo.public_holidays exists: the schema grows, and a database applied before it must still serve requests. */
+function public_holidays_table_exists($conn) {
+    static $exists = null;
+    if ($exists === null) $exists = scalar($conn, "SELECT OBJECT_ID('dbo.public_holidays')") !== null;
+    return $exists;
+}
+
+/** The holiday label for a person on a day, or null. A NULL-region holiday applies to everyone. */
+function holiday_label(array $holidays, $day, $region = null) {
+    $onDay = $holidays[$day] ?? null;
+    if (!$onDay) return null;
+    if (array_key_exists('', $onDay)) return $onDay[''];
+    if ($region !== null && array_key_exists($region, $onDay)) return $onDay[$region];
+    return null;
+}
+
+/**
+ * Hours a person can work on one day: their pattern for that weekday, less the share of the
+ * day they are away, and nothing at all on a public holiday.
+ *
+ * The one implementation of this arithmetic. There used to be five, and two of them disagreed:
+ * overlapping availability rows were added-and-clamped when capacity was derived and multiplied
+ * when the model fell back, so two half-days read as a whole day off in one place and a quarter
+ * day in the other. Fractions ADD and clamp at 1: two half-days off is a day off.
+ *
+ * @param array $pattern        weekday => hours, e.g. {"Mon":7.5,"Fri":3.75}
+ * @param string $dow           'Mon'..'Sun'
+ * @param float[] $awayFractions the fraction of each availability row covering the day
+ */
+function day_hours(array $pattern, $dow, array $awayFractions = [], $isHoliday = false) {
+    if ($isHoliday) return 0.0;
+    $hours = (float)($pattern[$dow] ?? 0);
+    if ($hours <= 0) return 0.0;
+    $away = 0.0;
+    foreach ($awayFractions as $f) $away += (float)$f;
+    $away = min(1.0, $away);
+    return $away >= 1.0 ? 0.0 : round($hours * (1 - $away), 2);
+}
+
+/**
+ * Which weekdays count as working days for a set of people.
+ *
+ * The workspace working week, plus any weekday somebody's own pattern gives hours to. Without
+ * the second half a Saturday worker simply does not exist: derive_capacity() would write no row
+ * for their Saturday and the planner would never see the time.
+ */
+function effective_working_days(array $workspaceDays, array $patterns) {
+    $set = [];
+    foreach ($workspaceDays as $d) $set[$d] = true;
+    foreach ($patterns as $pattern) {
+        foreach ((array)$pattern as $dow => $hours) if ((float)$hours > 0) $set[$dow] = true;
+    }
+    $order = ['Mon' => 0, 'Tue' => 1, 'Wed' => 2, 'Thu' => 3, 'Fri' => 4, 'Sat' => 5, 'Sun' => 6];
+    $out = array_keys($set);
+    usort($out, fn($a, $b) => ($order[$a] ?? 9) <=> ($order[$b] ?? 9));
+    return $out;
+}
+
+/**
+ * A person's leave year and what they have booked in it.
+ *
+ * Booked days are counted in THAT PERSON'S days, not calendar days: somebody who works Monday to
+ * Thursday and books Monday to Friday off has used four days, not five, and a bank holiday inside
+ * the range costs nobody any leave. A half-day row costs half a day.
+ *
+ * Informational only. Dispatch is not the system of record for leave approval (requirements
+ * section 3), nothing here blocks a booking, and the rows still carry a type and never a reason
+ * (ADM-05).
+ *
+ * @return array {leave_year_from, leave_year_to, entitlement_days, entitlement_source,
+ *                booked_days, taken_days, upcoming_days, remaining_days}
+ */
+function leave_balance($conn, $wsId, $personId, $asOf = null) {
+    $asOf = $asOf ?: today();
+    $ws = workspace_row($conn, $wsId);
+    $startMonth = (int)($ws['leave_year_start_month'] ?? 1) ?: 1;
+    $year = (int)date('Y', strtotime($asOf));
+    if ((int)date('n', strtotime($asOf)) < $startMonth) $year--;
+    $from = sprintf('%04d-%02d-01', $year, $startMonth);
+    $to = date('Y-m-d', strtotime($from . ' +1 year -1 day'));
+
+    $p = row($conn, "SELECT id, working_pattern, annual_leave_days, holiday_region FROM dbo.people WHERE id = ? AND workspace_id = ?", [$personId, $wsId]);
+    if (!$p) return null;
+    $pattern = json_col($p['working_pattern'], []);
+    $entitlement = $p['annual_leave_days'] !== null ? (float)$p['annual_leave_days'] : (float)($ws['default_annual_leave_days'] ?? 25);
+    $holidays = holiday_map($conn, $wsId, $from, $to);
+    $region = $p['holiday_region'] ?? null;
+
+    $booked = 0.0; $taken = 0.0; $upcoming = 0.0;
+    foreach (rows($conn, "SELECT CONVERT(char(10), from_date, 23) f, CONVERT(char(10), to_date, 23) t, fraction
+                          FROM dbo.availability WHERE workspace_id = ? AND person_id = ? AND type = 'leave' AND from_date <= ? AND to_date >= ?",
+        [$wsId, $personId, $to, $from]) as $a) {
+        $d = new DateTime(max($from, $a['f']));
+        $end = new DateTime(min($to, $a['t']));
+        while ($d <= $end) {
+            $day = $d->format('Y-m-d');
+            // A day the person does not work, or a public holiday, costs no leave.
+            if (day_hours($pattern, $d->format('D'), [], holiday_label($holidays, $day, $region) !== null) > 0) {
+                $part = min(1.0, (float)$a['fraction']);
+                $booked += $part;
+                if ($day < $asOf) $taken += $part; else $upcoming += $part;
+            }
+            $d->modify('+1 day');
+        }
+    }
+    return [
+        'leave_year_from' => $from, 'leave_year_to' => $to,
+        'entitlement_days' => round($entitlement, 1),
+        'entitlement_source' => $p['annual_leave_days'] !== null ? 'person' : 'workspace',
+        'booked_days' => round($booked, 2), 'taken_days' => round($taken, 2), 'upcoming_days' => round($upcoming, 2),
+        'remaining_days' => round($entitlement - $booked, 2),
+        'note' => 'For planning only. Dispatch is not the system of record for leave.',
+    ];
+}
+
 /** Last committed day of the freeze horizon (today + freeze_horizon_days working days). */
 function freeze_horizon_end($conn, $wsId, $policy = null) {
     $policy = $policy ?: current_policy($conn, $wsId);
@@ -19,7 +150,9 @@ function freeze_horizon_end($conn, $wsId, $policy = null) {
 
 /**
  * Derive dbo.capacity_days for [$from, $to] from people.working_pattern × availability rows, with the incident reserve
- * (policy incident_reserve_pct, or rota_reserve_pct in weeks the person is on the incident rota). Leave days write 0/0.
+ * (policy incident_reserve_pct, or rota_reserve_pct in weeks the person is on the incident rota). Leave days
+ * and public holidays write 0/0. The day grid is the workspace working week widened by any weekday one of
+ * these people's own patterns gives hours to, so a Saturday worker gets Saturday rows.
  * Upserts via MERGE. Returns the number of rows written.
  */
 function derive_capacity($conn, $wsId, $from, $to, $personIds = null) {
@@ -29,7 +162,8 @@ function derive_capacity($conn, $wsId, $from, $to, $personIds = null) {
     $rotaPct = (float)$policy['rota_reserve_pct'] / 100;
     $workingDays = workspace_working_days($conn, $wsId);
 
-    $sql = "SELECT id, working_pattern FROM dbo.people WHERE workspace_id = ? AND active = 1";
+    $hasRegion = (bool)scalar($conn, "SELECT COL_LENGTH('dbo.people', 'holiday_region')");
+    $sql = "SELECT id, working_pattern" . ($hasRegion ? ", holiday_region" : "") . " FROM dbo.people WHERE workspace_id = ? AND active = 1";
     $params = [$wsId];
     $personIds = $personIds === null ? null : array_values(array_map('intval', array_filter((array)$personIds, fn($v) => $v !== null && $v !== '')));
     if ($personIds !== null) {
@@ -41,6 +175,14 @@ function derive_capacity($conn, $wsId, $from, $to, $personIds = null) {
     if (!$people) return 0;
     $ids = array_map(fn($p) => (int)$p['id'], $people);
     $in = implode(',', array_fill(0, count($ids), '?'));
+
+    // Public holidays are workspace-wide facts, read once for the window.
+    $holidays = holiday_map($conn, $wsId, $from, $to);
+    // A weekday somebody's own pattern gives hours to is a working day for them, whatever the
+    // workspace week says — otherwise a Saturday worker's Saturdays are never written at all.
+    $patterns = [];
+    foreach ($people as $p) $patterns[(int)$p['id']] = json_col($p['working_pattern'], []);
+    $workingDays = effective_working_days($workingDays, $patterns);
 
     // Availability overlapping the window, per person.
     $avail = [];
@@ -66,18 +208,17 @@ function derive_capacity($conn, $wsId, $from, $to, $personIds = null) {
     $written = 0;
     foreach ($people as $p) {
         $pid = (int)$p['id'];
-        $pattern = json_col($p['working_pattern'], ['Mon'=>7.5,'Tue'=>7.5,'Wed'=>7.5,'Thu'=>7.5,'Fri'=>7.5]);
+        $pattern = $patterns[$pid] ?: ['Mon' => 7.5, 'Tue' => 7.5, 'Wed' => 7.5, 'Thu' => 7.5, 'Fri' => 7.5];
+        $region = $hasRegion ? ($p['holiday_region'] ?? null) : null;
         $d = new DateTime($from); $end = new DateTime($to);
         while ($d <= $end) {
             $dow = $d->format('D'); $day = $d->format('Y-m-d');
             if (in_array($dow, $workingDays, true)) {
-                $hours = (float)($pattern[$dow] ?? 0);
-                $away = 0.0;
+                $fractions = [];
                 foreach ($avail[$pid] ?? [] as $a) {
-                    if ($day >= substr($a['from_date'], 0, 10) && $day <= substr($a['to_date'], 0, 10)) $away += (float)$a['fraction'];
+                    if ($day >= substr($a['from_date'], 0, 10) && $day <= substr($a['to_date'], 0, 10)) $fractions[] = (float)$a['fraction'];
                 }
-                $away = min(1.0, $away);
-                $available = $away >= 1.0 ? 0.0 : round($hours * (1 - $away), 2);
+                $available = day_hours($pattern, $dow, $fractions, holiday_label($holidays, $day, $region) !== null);
                 $pct = isset($rota[$pid][week_start($day)]) ? $rotaPct : $incPct;
                 $reserve = $available > 0 ? round($available * $pct, 2) : 0.0;
                 $values[] = '(?,?,?,?,?)';
@@ -182,6 +323,8 @@ function person_shape(array $p) {
         // ORG-02: the reporting line is a real person now. line_manager is the old free-text column,
         // still returned so nothing that reads it breaks, but never written again.
         'line_manager' => $p['manager_name'] ?? ($p['line_manager'] ?? null), 'active' => (bool)$p['active'], 'email' => $p['email'],
+        'annual_leave_days' => isset($p['annual_leave_days']) && $p['annual_leave_days'] !== null ? (float)$p['annual_leave_days'] : null,
+        'holiday_region' => $p['holiday_region'] ?? null,
         'protected_until' => $p['protected_until'] ? substr($p['protected_until'], 0, 10) : null,
     ];
 }

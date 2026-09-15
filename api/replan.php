@@ -5,7 +5,7 @@
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/engine/proposals.php';
 require_once __DIR__ . '/engine/commit.php';
-foreach (['capacity', 'priority', 'watchlist'] as $peer) { $f = __DIR__ . "/engine/$peer.php"; if (file_exists($f)) require_once $f; }
+foreach (['capacity', 'priority', 'watchlist', 'requests_lib'] as $peer) { $f = __DIR__ . "/engine/$peer.php"; if (file_exists($f)) require_once $f; }
 
 $action = param('action', 'propose');
 $cfg = dp_config();
@@ -109,6 +109,8 @@ function run_nightly($conn, $wsId) {
         $steps['auto_apply']['reproposed_id'] = $r['proposal_id'];
     }
     // NOT-01: realisations that have fallen due, and watch-list entries naming a person or their work.
+    // A pending resource request whose start date has gone is closed off, and whoever asked is told.
+    $steps['requests_expired'] = function_exists('expire_requests') ? expire_requests($conn, $wsId) : 'skipped (engine/requests_lib.php absent)';
     $steps['realisation_due'] = notify_realisations_due($conn, $wsId);
     $steps['watch_list_notices'] = notify_watch_list($conn, $wsId);
     $model = build_model($conn, $wsId);

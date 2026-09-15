@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'parts/campaign_dialogs.dart';
 
 import '../app_state.dart';
 import '../models/json.dart';
@@ -125,6 +126,15 @@ class MoreScreen extends StatelessWidget {
                 selected: switch (prefs.mode) { ThemeMode.system => 0, ThemeMode.light => 1, ThemeMode.dark => 2 },
                 onChanged: (i) => prefs.set([ThemeMode.system, ThemeMode.light, ThemeMode.dark][i]),
               ),
+            ),
+            const Divider(),
+            // ADM-07: which universe this is, and the way to another one.
+            _Row(
+              icon: Icons.swap_horiz_rounded,
+              label: session.user?.workspace?.isCampaign == true
+                  ? 'Campaign: ${session.user!.workspace!.name}'
+                  : 'Workspaces',
+              onTap: () => showCampaignSwitcher(context),
             ),
             const Divider(),
             _Row(

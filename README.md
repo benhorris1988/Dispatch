@@ -137,4 +137,20 @@ C:\xampp\php\php.exe tests\mint_token.php priya.kaur@example.org
 
 It is CLI-only and uses the admin database connection, the same one seeding uses.
 
+## Campaigns
+
+A **campaign** is a sandbox workspace alongside the live one: somewhere to try a reorganisation, a
+quarter of new intake, or the app itself, without touching the plan anybody is working to. It is a
+real workspace of its own, isolated by the same row-level scoping every query already applies.
+
+Make one from **Settings → Campaigns** or the account menu, choosing what it starts with: a full copy
+of the workspace you are in (people, pipeline and the committed plan), the people and settings only,
+or the demo dataset. Creating one puts you in it; an amber strip across every screen says which
+workspace you are in, with a way back to Live.
+
+Sign-in always lands in Live and you switch from there, so a sandbox can never mint an account. A
+campaign never copies webhook subscriptions or intake sources (they carry signing secrets), device
+registrations, notifications or the audit trail, and it is skipped by the weekly digest and by push.
+The nightly replan does run in one, because a sandbox that never re-plans is useless.
+
 See `docs/API.md` for every endpoint and `CLAUDE.md` for the things that are easy to get wrong.

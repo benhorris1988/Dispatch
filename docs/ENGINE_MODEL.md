@@ -18,7 +18,7 @@ solver is an optimisation, never a dependency.
     "today": "2026-09-08",
     "hours_per_day": 7.5,
     "working_days": ["Mon","Tue","Wed","Thu","Fri"],
-    "days": ["2026-09-08", "..."],        // every working day in the modelled horizon, ascending
+    "days": ["2026-09-08", "..."],        // every working day in the modelled horizon, ascending (see below)
     "windows": {
       "today": "2026-09-08",
       "freeze_end": "2026-09-18",         // last locked day (freeze_horizon_days working days out)
@@ -142,6 +142,21 @@ share, so the borrowing team sees exactly what it was promised.
 The workspace (nightly) model ignores team boundaries as it always has; loans therefore change nothing
 there. They matter when a cycle is scoped to a branch of the tree, and in every per-team figure
 (`org.php tree`, `role_families.php overview`, `people.php list{team_id}`, `skills.php matrix{team_id}`).
+
+## What counts as a working day, and what a day is worth
+
+`days[]` is the workspace working week **widened by any weekday one of the workspace's own people
+actually works**. A pattern of `{"Mon":7.5,...,"Sat":6}` puts Saturdays in the grid; without that
+widening `derive_capacity()` writes no Saturday row and the planner cannot see the time at all.
+`hours_per_day` in the payload stays the workspace's nominal day and is only a days-to-hours
+conversion factor — a six-hour person is 0.8 of a nominal day, which is the intended reading.
+
+One function decides what a person-day is worth: `day_hours($pattern, $dow, $awayFractions,
+$isHoliday)` in `api/engine/capacity.php`. The pattern's hours for that weekday, less the share of
+the day the person is away, and zero on a public holiday. Overlapping availability rows **add** and
+clamp at 1, so two half-days off is a day off. Public holidays (`dbo.public_holidays`) are resolved
+from the calendar rather than stored against each person, so a day entered once applies to everyone,
+including people added later.
 
 ## Hard constraints the solver must honour (spec 8.5)
 

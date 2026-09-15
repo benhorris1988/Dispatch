@@ -6,6 +6,7 @@ import '../app_state.dart';
 import '../theme/app_theme.dart';
 import '../theme/tokens.dart';
 import 'breaks.dart';
+import 'campaign_banner.dart';
 import 'nav.dart';
 import 'sidebar.dart';
 import 'top_bar.dart';
@@ -55,6 +56,9 @@ class _AppShellState extends State<AppShell> {
         Expanded(
           child: Column(children: [
             TopBar(location: location),
+            // ADM-07: on every screen rather than only where you switched, because the whole risk
+            // of a sandbox is somebody thinking a decision in one landed in the plan.
+            const CampaignBanner(),
             Expanded(child: widget.child),
           ]),
         ),
@@ -97,7 +101,7 @@ class _PhoneShell extends StatelessWidget {
           const SizedBox(width: 4),
         ],
       ),
-      body: child,
+      body: Column(children: [const CampaignBanner(compact: true), Expanded(child: child)]),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(border: Border(top: BorderSide(color: context.borderColor))),
         child: NavigationBar(
@@ -107,11 +111,11 @@ class _PhoneShell extends StatelessWidget {
           destinations: [
             for (final t in Nav.phoneTabs)
               NavigationDestination(
-                icon: t.badge && shell.pendingChanges > 0
-                    ? Badge.count(count: shell.pendingChanges, backgroundColor: DispatchColors.orange, child: Icon(t.icon))
+                icon: shell.badgeFor(t.badgeKey) > 0
+                    ? Badge.count(count: shell.badgeFor(t.badgeKey), backgroundColor: DispatchColors.orange, child: Icon(t.icon))
                     : Icon(t.icon),
-                selectedIcon: t.badge && shell.pendingChanges > 0
-                    ? Badge.count(count: shell.pendingChanges, backgroundColor: DispatchColors.orange, child: Icon(t.selectedIcon))
+                selectedIcon: shell.badgeFor(t.badgeKey) > 0
+                    ? Badge.count(count: shell.badgeFor(t.badgeKey), backgroundColor: DispatchColors.orange, child: Icon(t.selectedIcon))
                     : Icon(t.selectedIcon),
                 label: t.label,
               ),

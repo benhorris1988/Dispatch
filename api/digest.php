@@ -46,6 +46,9 @@ function compose_digest($conn, $wsId, $userId) {
     $today = today(); $wd = workspace_working_days($conn, $wsId);
     $from = date('Y-m-d', strtotime(week_start($today) . ' +7 days'));
     $to = date('Y-m-d', strtotime("$from +6 days"));
+    // Capacity next week is THIS person's capacity, not a count of weekdays: a Mon-Thu worker has
+    // four days, a bank-holiday week has fewer, and somebody on leave has none. Counting weekdays
+    // told a part-timer they were under-loaded every single week.
     $capacityDays = working_days_between($from, $to, $wd);
     $sinceIsFirst = $u['last_digest_at'] === null;
     $clock = row($conn, "SELECT CONVERT(varchar(19), SYSDATETIME(), 120) AS now, CONVERT(varchar(27), DATEADD(day, -7, SYSDATETIME()), 121) AS week_ago");
@@ -121,6 +124,12 @@ function compose_digest($conn, $wsId, $userId) {
     // 5. Notifications their own preferences routed to the digest channel since the last one (NOT-02).
     $carried = array_map(fn($n) => ['id' => (int)$n['id'], 'kind' => $n['kind'], 'title' => $n['title'], 'body' => $n['body'], 'link' => $n['link'], 'created_at' => substr($n['created_at'], 0, 19), 'read' => $n['read_at'] !== null],
         rows($conn, "SELECT id, kind, title, body, link, created_at, read_at FROM dbo.notifications WHERE workspace_id = ? AND user_id = ? AND channel = 'digest' AND created_at > ? ORDER BY created_at DESC", [$wsId, (int)$u['id'], $since]));
+
+    if ($pid !== null) {
+        $nominal = (float)(workspace_row($conn, $wsId)['hours_per_day'] ?? 7.5) ?: 7.5;
+        $hours = (float)(scalar($conn, "SELECT SUM(available_hours) FROM dbo.capacity_days WHERE workspace_id = ? AND person_id = ? AND day BETWEEN ? AND ?", [$wsId, $pid, $from, $to]) ?? 0);
+        if ($hours > 0) $capacityDays = round($hours / $nominal, 1);
+    }
 
     $summary = ['has_person' => $pid !== null, 'assignments' => count($nextWeek), 'effort_days' => round($effort, 1), 'capacity_days' => $capacityDays,
         'load_pct' => $capacityDays > 0 ? (int)round($effort / $capacityDays * 100) : null, 'leave' => count($leave), 'changes' => count($changes), 'awaiting_ack' => count($awaiting),
@@ -243,7 +252,9 @@ $cfg = dp_config();
 if ($action === 'send' && (PHP_SAPI === 'cli' || (param('cron_key') && hash_equals((string)($cfg['cron_key'] ?? ''), (string)param('cron_key'))))) {
     $userId = null; $userName = 'Weekly digest';
     $results = [];
-    $wsIds = param('workspace_id') ? [(int)param('workspace_id')] : array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.workspaces ORDER BY id"));
+    // Campaigns are skipped: a sandbox is for trying things, and nobody wants a Friday email about
+    // a plan that is not real. Naming one explicitly still works, for testing the digest itself.
+    $wsIds = param('workspace_id') ? [(int)param('workspace_id')] : array_map(fn($r) => (int)$r['id'], rows($conn, "SELECT id FROM dbo.workspaces WHERE ISNULL(kind, 'live') = 'live' ORDER BY id"));
     foreach ($wsIds as $wsId) {
         $only = param('user_id');
         $recipients = ($only !== null && $only !== '') ? rows($conn, "SELECT id, email, display_name, person_id, last_digest_at FROM dbo.users WHERE id = ? AND workspace_id = ? AND active = 1", [(int)$only, $wsId]) : digest_recipients($conn, $wsId);

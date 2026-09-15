@@ -43,19 +43,23 @@ if ($seed && run_step('Re-seed demo data', $seedCmd) !== 0) {
 $suites = [
     'Engine (planner, diff, guardrails, stability)' => 'engine_test.php',
     'Workspace config, people, skills'              => 'config_people_test.php',
+    'Capacity, holidays and leave'                  => 'capacity_test.php',
     'Work items, estimates, benefits'               => 'work_items_test.php',
     'Non-financial benefits (BEN-02)'               => 'benefits_qualitative_test.php',
     'Role families and loans (TEAM-09, SCH-13)'     => 'role_family_test.php',
     'Organisation chart (ORG-01..05)'              => 'org_test.php',
     'Sign-in, provisioning and roles (ADM-01/02)'  => 'auth_test.php',
     'Overview, reports, watch list'                 => 'overview_reports_test.php',
+    'Resource requests and approval'                => 'resource_requests_test.php',
     'Plan, proposals, changes (HTTP smoke)'         => 'http_smoke.php',
     'Public API, webhooks, calendar feed'          => 'public_api_test.php',
     'Devices and push (MOB-04)'                    => 'devices_test.php',
     'Data retention and purge'                     => 'retention_test.php',
-    // Last: it edits the scheduling policy, commits plan versions and runs the nightly cycle,
-    // so it leaves the demo furthest from its seeded state.
+    // Last two. Campaigns creates and deletes whole workspaces of its own (and the policy suite
+    // edits the scheduling policy, commits plan versions and runs the nightly cycle), so between
+    // them they leave the demo furthest from its seeded state.
     'Policy switches, notifications, urgent cycle'  => 'policy_notifications_test.php',
+    'Campaigns: sandbox workspaces (ADM-07)'        => 'campaigns_test.php',
 ];
 
 $results = [];

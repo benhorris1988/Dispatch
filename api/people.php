@@ -218,6 +218,7 @@ if ($action === 'get') {
             'reserve_pct' => (float)$policy['incident_reserve_pct'], 'rota_reserve_pct' => (float)$policy['rota_reserve_pct'],
             'reserve_note' => "{$incPct}% held back every week; {$rotaPct}% on rota weeks"],
         'change_history' => array_values($hist), 'stability_note' => $stabilityNote,
+        'leave' => leave_balance($conn, $wsId, $id, $today),
         'pattern' => ['hours_label' => $person['pattern_label'] ?: $patternNote, 'hours_per_day' => $hpd,
             'max_concurrent_label' => ($concurrentMax . ' items') . ($person['max_concurrent'] === null ? " (team default {$policy['max_concurrent_items']})" : ''),
             'focus_label' => 'Minimum ' . ($person['min_focus_days'] ?? (int)$policy['min_focus_days']) . ' consecutive days per item'],
@@ -298,6 +299,9 @@ if ($action === 'save') {
         if (!array_key_exists('days_per_week', $b)) { $hpd = (float)workspace_row($conn, $wsId)['hours_per_day']; $data['days_per_week'] = $hpd > 0 ? round(array_sum($clean) / $hpd, 1) : 5; }
     }
     foreach (['max_concurrent','min_focus_days'] as $f) if (array_key_exists($f, $b)) $data[$f] = $b[$f] !== null && $b[$f] !== '' ? (int)$b[$f] : null;
+    // Annual leave entitlement: null falls back to the workspace default, so clearing it is meaningful.
+    if (array_key_exists('annual_leave_days', $b) && has_role('team_lead')) $data['annual_leave_days'] = $b['annual_leave_days'] !== null && $b['annual_leave_days'] !== '' ? max(0, (float)$b['annual_leave_days']) : null;
+    if (array_key_exists('holiday_region', $b) && has_role('team_lead')) $data['holiday_region'] = $b['holiday_region'] !== null && $b['holiday_region'] !== '' ? mb_substr((string)$b['holiday_region'], 0, 40) : null;
     if (array_key_exists('protected_until', $b) && has_role('team_lead')) $data['protected_until'] = $b['protected_until'] ?: null;
     if (array_key_exists('active', $b) && has_role('admin')) $data['active'] = $b['active'] ? 1 : 0;
     if ($id !== null) {
@@ -317,7 +321,9 @@ if ($action === 'save') {
         move_person_home_team($conn, $wsId, $after, $moveTo, param('reason'), (bool)param('force', false));
         $after = person_row($conn, $wsId, $id);
     }
-    if (isset($data['working_pattern']) || isset($data['active'])) derive_capacity($conn, $wsId, $today, date('Y-m-d', strtotime("$today +12 weeks")), [$id]);
+    // A changed pattern, an activation or a different holiday calendar all change what this
+    // person's days are worth, so the derived rows have to be rewritten.
+    if (array_key_exists('working_pattern', $data) || array_key_exists('active', $data) || array_key_exists('holiday_region', $data)) derive_capacity($conn, $wsId, $today, date('Y-m-d', strtotime("$today +12 weeks")), [$id]);
     ok(['person' => person_shape($after)]);
 }
 
@@ -415,6 +421,43 @@ if ($action === 'add_availability') {
     // STAB-05: sickness or leave inside the freeze horizon is urgent, and an urgent trigger starts
     // an immediate cycle scoped to the affected person. Everything above is already committed, and
     // start_urgent_cycle() never throws, so a replan problem cannot fail this request.
+    $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
+    ok(['availability' => $shape, 'days_written' => $written, 'trigger' => ['id' => $triggerId, 'class' => $class], 'freeze_horizon_end' => $freezeEnd]
+        + ($replan ? ['urgent_replan' => $replan] : []));
+}
+
+/**
+ * TEAM-07: an imported record "can be corrected but not deleted locally". Correcting it needed an
+ * action, and there was not one — so an HR row with the wrong dates could only be left wrong.
+ * Any source may be corrected here; delete_availability still refuses anything but `manual`.
+ */
+if ($action === 'update_availability') {
+    $id = (int)require_param('id');
+    $a = row($conn, "SELECT * FROM dbo.availability WHERE id = ? AND workspace_id = ?", [$id, $wsId]);
+    if (!$a) fail('Availability record not found', 404);
+    $pid = (int)$a['person_id'];
+    require_own_or_lead($pid);
+    $p = person_row($conn, $wsId, $pid);
+    $oldFrom = substr($a['from_date'], 0, 10); $oldTo = substr($a['to_date'], 0, 10);
+    $from = param('from_date') !== null ? substr((string)param('from_date'), 0, 10) : $oldFrom;
+    $to = param('to_date') !== null ? substr((string)param('to_date'), 0, 10) : $oldTo;
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) fail('Dates must be YYYY-MM-DD', 400);
+    if ($to < $from) fail('to_date must not be before from_date', 400);
+    $type = param('type') !== null ? strtolower(trim((string)param('type'))) : $a['type'];
+    if (!in_array($type, ['leave','training','sickness','other'], true)) fail('type must be leave, training, sickness or other', 400);
+    $fraction = param('fraction') !== null ? max(0.05, min(1.0, (float)param('fraction'))) : (float)$a['fraction'];
+    // ADM-05: still only a type. A reason in the request is dropped, exactly as on the way in.
+    $data = ['from_date' => $from, 'to_date' => $to, 'type' => $type, 'fraction' => $fraction, 'label' => ucfirst($type)];
+    update($conn, 'availability', $data, 'id = ? AND workspace_id = ?', [$id, $wsId]);
+    $rowNew = row($conn, "SELECT * FROM dbo.availability WHERE id = ?", [$id]);
+    $shape = availability_shape($rowNew);
+    audit($conn, $wsId, 'update', 'availability', $id, availability_shape($a), $shape, "{$p['name']} · " . ucfirst($type) . ' ' . fmt_range($from, $to));
+    // Both the old window and the new one have to be re-derived: shortening a leave gives days back.
+    $written = derive_capacity($conn, $wsId, min($from, $oldFrom), max($to, $oldTo), [$pid]);
+    $freezeEnd = freeze_horizon_end($conn, $wsId);
+    $class = min($from, $oldFrom) <= $freezeEnd ? 'urgent' : 'batched';
+    $triggerId = add_trigger($conn, $wsId, $type === 'sickness' ? 'sickness' : 'leave', $class,
+        "{$p['name']} " . ucfirst($type) . ' corrected to ' . fmt_range($from, $to), 'availability', $id, [$pid]);
     $replan = $class === 'urgent' ? start_urgent_cycle($conn, $wsId, [$pid]) : null;
     ok(['availability' => $shape, 'days_written' => $written, 'trigger' => ['id' => $triggerId, 'class' => $class], 'freeze_horizon_end' => $freezeEnd]
         + ($replan ? ['urgent_replan' => $replan] : []));

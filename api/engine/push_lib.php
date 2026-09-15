@@ -290,10 +290,15 @@ function push_http($method, $url, array $headers, $body, $http2 = false) {
     return [$code, $res];
 }
 
-/** Dispatch every workspace, for the cron runner. */
+/**
+ * Dispatch every LIVE workspace, for the cron runner.
+ *
+ * Campaigns are skipped on purpose: a sandbox exists so people can try things, and a trial
+ * reorganisation must not buzz somebody's phone at seven in the morning.
+ */
 function push_run_all($conn, $limit = 50) {
     $out = [];
-    foreach (rows($conn, "SELECT id FROM dbo.workspaces ORDER BY id") as $w) {
+    foreach (rows($conn, "SELECT id FROM dbo.workspaces WHERE ISNULL(kind, 'live') = 'live' ORDER BY id") as $w) {
         $out[] = ['workspace_id' => (int)$w['id']] + push_dispatch($conn, (int)$w['id'], $limit);
     }
     return $out;

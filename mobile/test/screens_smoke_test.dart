@@ -27,6 +27,8 @@ import 'package:dispatch_app/screens/plan_versions_screen.dart';
 import 'package:dispatch_app/screens/org_chart_screen.dart';
 import 'package:dispatch_app/screens/role_family_screen.dart';
 import 'package:dispatch_app/screens/reports_screen.dart';
+import 'package:dispatch_app/screens/request_detail_screen.dart';
+import 'package:dispatch_app/screens/requests_screen.dart';
 import 'package:dispatch_app/screens/scenarios_screen.dart';
 import 'package:dispatch_app/screens/schedule_screen.dart';
 import 'package:dispatch_app/screens/settings_screen.dart';
@@ -130,6 +132,8 @@ Future<void> main() async {
     'Plan versions': const PlanVersionsScreen(),
     'Scenarios': const ScenariosScreen(),
     'Changes': const ChangesScreen(),
+    'Requests': const RequestsScreen(),
+    'Request': const RequestDetailScreen(id: '1'),
     'Team & skills': const TeamSkillsScreen(),
     'Person': const PersonScreen(id: '1'),
     'Organisation': const OrgChartScreen(),
@@ -159,14 +163,14 @@ Future<void> main() async {
   }
 
 
-  // Settings hides eleven sections behind a side nav, and the screens map only
+  // Settings hides thirteen sections behind a side nav, and the screens map only
   // ever draws the first one. A layout fault in a later section is a blank panel
   // that every check above is perfectly happy with — which is exactly how one got
   // through. Open each section and look at it.
   const settingsSections = [
     'General', 'Work types', 'Size classes', 'Day rates', 'Scheduling & stability',
     'Priority & objective', 'Skills catalogue', 'Teams & roles', 'Integrations',
-    'Notifications', 'Audit log',
+    'Notifications', 'Audit log', 'Calendar & leave', 'Campaigns',
   ];
   for (final section in settingsSections) {
     testWidgets('Settings: $section', (tester) async {

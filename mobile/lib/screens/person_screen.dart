@@ -14,7 +14,8 @@ import '../widgets/adm_metrics.dart';
 import '../widgets/pf_metrics.dart';
 import '../widgets/team_widgets.dart';
 import '../widgets/tm_loan_list.dart';
-import '../widgets/widgets.dart';
+import '../widgets/widgets.dart';
+import 'parts/tm_pattern_dialog.dart';
 
 /// Person (TEAM-*, spec 9.4.7): load and concurrency against their own limits,
 /// plan changes over eight weeks, assignments with the incident reserve shown
@@ -101,6 +102,49 @@ class _PersonScreenState extends State<PersonScreen> {
     if (d == null) return;
     final saved = await showTmAddLeave(context, people: [(id: d.person.id, name: d.person.name)], personId: d.person.id);
     if (saved) await _load();
+  }
+
+  /// TEAM-02: the working pattern is what the scheduler books against, and it was read-only
+  /// everywhere in the client until now.
+  Future<void> _editPattern() async {
+    final d = _detail;
+    if (d == null) return;
+    final hpd = context.read<WorkspaceConfig>().workspace?.hoursPerDay ?? 7.5;
+    final saved = await showTmPatternDialog(context,
+        personId: d.person.id, personName: d.person.name, pattern: d.person.workingPattern,
+        patternLabel: d.person.patternLabel, hoursPerDay: hpd);
+    if (saved) await _load();
+  }
+
+  /// TEAM-07: an imported record can be corrected but not deleted, so editing is offered on every
+  /// row and deleting only on the ones this app owns.
+  Future<void> _editAvailability(_AvailabilityRow a) async {
+    final d = _detail;
+    if (d == null) return;
+    final saved = await showTmEditLeave(context,
+        id: a.id, personName: d.person.name, type: a.type, from: a.from, to: a.to, fraction: a.fraction, source: a.source);
+    if (saved) await _load();
+  }
+
+  Future<void> _deleteAvailability(_AvailabilityRow a) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove this record?'),
+        content: Text('${a.label} ${fmtDateRange(a.from, a.to)} will be removed and those days handed back to the plan.'),
+        actions: [
+          SecondaryButton('Cancel', onPressed: () => Navigator.of(context).pop(false)),
+          PrimaryButton('Remove', navy: true, onPressed: () => Navigator.of(context).pop(true)),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await Api.post('people.php', 'delete_availability', {'id': a.id});
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 
   Future<void> _editProfile() async {
@@ -233,8 +277,9 @@ class _PersonScreenState extends State<PersonScreen> {
           switch (_tab) {
             1 => _SkillsTab(detail: d, canEdit: _canEdit(session), isLead: session.isTeamLead, onSetLevel: _setLevel, onEndorse: _endorse),
             2 => _AssignmentsTab(detail: d, policy: policy),
-            3 => _AvailabilityTab(detail: d, policy: policy, canEdit: _canEdit(session), onAddLeave: _addLeave),
-            4 => _PreferencesTab(detail: d),
+            3 => _AvailabilityTab(detail: d, policy: policy, canEdit: _canEdit(session), onAddLeave: _addLeave,
+                onEditLeave: _editAvailability, onDeleteLeave: _deleteAvailability),
+            4 => _PreferencesTab(detail: d, canEdit: _canEdit(session), onEditPattern: _editPattern),
             5 => _HistoryTab(detail: d),
             _ => _OverviewTab(
                 detail: d,
@@ -806,15 +851,28 @@ class _AssignmentsTab extends StatelessWidget {
 }
 
 class _AvailabilityTab extends StatelessWidget {
-  const _AvailabilityTab({required this.detail, required this.policy, required this.canEdit, required this.onAddLeave});
+  const _AvailabilityTab({
+    required this.detail,
+    required this.policy,
+    required this.canEdit,
+    required this.onAddLeave,
+    required this.onEditLeave,
+    required this.onDeleteLeave,
+  });
   final _PersonDetail detail;
   final Policy policy;
   final bool canEdit;
   final VoidCallback onAddLeave;
+  final void Function(_AvailabilityRow) onEditLeave;
+  final void Function(_AvailabilityRow) onDeleteLeave;
 
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      if (detail.leave != null) ...[
+        _LeavePanel(balance: detail.leave!),
+        const SizedBox(height: Sp.lg),
+      ],
       TmMetricPanel(
         title: 'Availability',
         subtitle: 'Leave, training and sickness — only the type is stored',
@@ -835,6 +893,19 @@ class _AvailabilityTab extends StatelessWidget {
                         ]),
                       ),
                       ToneChip(humanise(a.type), compact: true),
+                      if (canEdit) ...[
+                        IconButton(
+                          tooltip: a.source == 'manual' ? 'Correct these dates' : 'Correct this imported record',
+                          icon: const Icon(Icons.edit_outlined, size: 18),
+                          onPressed: () => onEditLeave(a),
+                        ),
+                        // TEAM-07: an imported record can be corrected but never deleted here.
+                        IconButton(
+                          tooltip: a.source == 'manual' ? 'Remove this record' : 'Came from ${a.source}: correct it, do not delete it',
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          onPressed: a.source == 'manual' ? () => onDeleteLeave(a) : null,
+                        ),
+                      ],
                     ]),
                   ),
               ]),
@@ -870,18 +941,77 @@ class _AvailabilityTab extends StatelessWidget {
   }
 }
 
+/// Annual leave: what this person is entitled to, what they have booked and what is left.
+///
+/// Days are counted in their own working days, so a Mon-Thu worker booking a full week spends
+/// four, and a bank holiday inside a booking costs nobody anything. It is a planning figure and
+/// the card says so: Dispatch is not the system of record for leave.
+class _LeavePanel extends StatelessWidget {
+  const _LeavePanel({required this.balance});
+  final _LeaveBalance balance;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = balance;
+    final over = b.remainingDays < 0;
+    return Panel(
+      title: 'Annual leave',
+      subtitle: b.from == null ? null : 'Leave year ${fmtDayMonth(b.from)} to ${fmtDayMonth(b.to)}',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Wrap(spacing: Sp.xl, runSpacing: Sp.md, children: [
+          _stat(context, 'Entitlement', fmtDays(b.entitlementDays), b.source == 'person' ? 'Set for this person' : 'Workspace default'),
+          _stat(context, 'Booked', fmtDays(b.bookedDays), '${fmtDays(b.takenDays)} taken · ${fmtDays(b.upcomingDays)} ahead'),
+          _stat(context, 'Remaining', fmtDays(b.remainingDays), over ? 'More booked than the entitlement' : 'Left this leave year',
+              tone: over ? DispatchColors.red : null),
+        ]),
+        const SizedBox(height: Sp.md),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            value: b.usedFraction,
+            minHeight: 8,
+            backgroundColor: context.borderColor,
+            valueColor: AlwaysStoppedAnimation<Color>(over ? DispatchColors.red : DispatchColors.orange),
+          ),
+        ),
+        if (b.note != null) ...[
+          const SizedBox(height: Sp.md),
+          Text(b.note!, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+        ],
+      ]),
+    );
+  }
+
+  Widget _stat(BuildContext context, String label, String value, String sub, {Color? tone}) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(label, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+          Text(value, style: context.text.headlineSmall?.copyWith(color: tone)),
+          Text(sub, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+        ],
+      );
+}
+
 class _PreferencesTab extends StatelessWidget {
-  const _PreferencesTab({required this.detail});
+  const _PreferencesTab({required this.detail, this.canEdit = false, this.onEditPattern});
   final _PersonDetail detail;
+  final bool canEdit;
+  final VoidCallback? onEditPattern;
 
   @override
   Widget build(BuildContext context) {
     final p = detail.person;
-    final days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+    // Every weekday somebody could work, not just Monday to Friday: a pattern may give hours to a
+    // Saturday, and capacity is derived for any day it does.
+    final days = [...kWeekdays.take(5), for (final d in kWeekdays.skip(5)) if ((p.workingPattern[d] ?? 0) > 0) d];
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Panel(
         title: 'Working pattern',
         subtitle: 'The scheduler never books beyond these hours',
+        trailing: canEdit && onEditPattern != null
+            ? SecondaryButton('Edit pattern', icon: Icons.edit_calendar_outlined, onPressed: onEditPattern)
+            : null,
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Wrap(spacing: Sp.md, runSpacing: Sp.md, children: [
             for (final d in days)
@@ -906,6 +1036,9 @@ class _PreferencesTab extends StatelessWidget {
           const SizedBox(height: Sp.lg),
           TmKeyValue('Hours', detail.patternHoursLabel ?? p.patternLabel),
           TmKeyValue('Days per week', p.daysPerWeek.toStringAsFixed(1)),
+          if (detail.leave != null)
+            TmKeyValue('Annual leave', '${fmtDays(detail.leave!.entitlementDays)} a year'
+                '${detail.leave!.source == 'workspace' ? ' (workspace default)' : ''}'),
         ]),
       ),
       const SizedBox(height: Sp.lg),
@@ -1247,6 +1380,48 @@ class _AvailabilityRow {
       );
 }
 
+/// The leave year, what is booked in it and what is left (TEAM-06).
+///
+/// Days are the person's own: a Mon-Thu worker booking Mon-Fri spends four, and a bank holiday
+/// inside the range costs nobody anything. Informational — Dispatch is not the system of record
+/// for leave, and the copy on the card says so.
+class _LeaveBalance {
+  const _LeaveBalance({
+    required this.entitlementDays,
+    required this.bookedDays,
+    required this.remainingDays,
+    required this.takenDays,
+    required this.upcomingDays,
+    this.from,
+    this.to,
+    this.source = 'workspace',
+    this.note,
+  });
+  final double entitlementDays;
+  final double bookedDays;
+  final double remainingDays;
+  final double takenDays;
+  final double upcomingDays;
+  final DateTime? from;
+  final DateTime? to;
+  final String source;
+  final String? note;
+
+  double get usedFraction => entitlementDays > 0 ? (bookedDays / entitlementDays).clamp(0, 1).toDouble() : 0;
+
+  factory _LeaveBalance.fromJson(Map<String, dynamic> j) => _LeaveBalance(
+        entitlementDays: asDoubleOr(j['entitlement_days'], 0),
+        bookedDays: asDoubleOr(j['booked_days'], 0),
+        remainingDays: asDoubleOr(j['remaining_days'], 0),
+        takenDays: asDoubleOr(j['taken_days'], 0),
+        upcomingDays: asDoubleOr(j['upcoming_days'], 0),
+        from: asDate(j['leave_year_from']),
+        to: asDate(j['leave_year_to']),
+        source: asStrOr(j['entitlement_source'], 'workspace'),
+        note: asStr(j['note']),
+      );
+}
+
 class _ChangeWeek {
   const _ChangeWeek({required this.label, this.weekStart, this.changes = 0, this.insideFreeze = 0, this.assignmentDays = 0});
   final String label;
@@ -1277,6 +1452,7 @@ class _PersonDetail {
     this.patternHoursLabel,
     this.patternMaxConcurrentLabel,
     this.patternFocusLabel,
+    this.leave,
   });
 
   final Person person;
@@ -1290,6 +1466,7 @@ class _PersonDetail {
   final String? patternHoursLabel;
   final String? patternMaxConcurrentLabel;
   final String? patternFocusLabel;
+  final _LeaveBalance? leave;
 
   factory _PersonDetail.fromJson(Map<String, dynamic> j) {
     final pattern = asMap(j['pattern']);
@@ -1305,6 +1482,7 @@ class _PersonDetail {
       patternHoursLabel: asStr(pattern['hours_label']),
       patternMaxConcurrentLabel: asStr(pattern['max_concurrent_label']),
       patternFocusLabel: asStr(pattern['focus_label']),
+      leave: j['leave'] is Map ? _LeaveBalance.fromJson(asMap(j['leave'])) : null,
     );
   }
 }

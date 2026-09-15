@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import '../screens/parts/campaign_dialogs.dart';
 
 import '../app_state.dart';
 import '../theme/app_theme.dart';
@@ -50,7 +51,7 @@ class Sidebar extends StatelessWidget {
                       item: item,
                       selected: item.matches(location),
                       collapsed: collapsed,
-                      badge: item.badge ? shell.pendingChanges : 0,
+                      badge: shell.badgeFor(item.badgeKey),
                       onTap: () => context.go(item.path),
                     ),
               ],
@@ -163,13 +164,25 @@ class _UserMenu extends StatelessWidget {
             if (user.personId != null) context.go(Routes.person(user.personId!));
           case 'notifications':
             context.go(Routes.notifications);
+          case 'workspaces':
+            await showCampaignSwitcher(context);
           case 'signout':
             await session.signOut();
         }
       },
       itemBuilder: (context) => [
         PopupMenuItem(enabled: false, child: Text(user.email, style: Theme.of(context).textTheme.bodySmall)),
+        if (user.workspace != null)
+          PopupMenuItem(
+            enabled: false,
+            child: Text(
+              user.workspace!.isCampaign ? 'Campaign: ${user.workspace!.name}' : user.workspace!.name,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: user.workspace!.isCampaign ? DispatchColors.amber : null),
+            ),
+          ),
         const PopupMenuDivider(),
+        // ADM-07: which universe you are in, and how to get to another one.
+        const PopupMenuItem(value: 'workspaces', child: ListTile(dense: true, leading: Icon(Icons.swap_horiz_rounded), title: Text('Workspaces…'))),
         if (user.personId != null) const PopupMenuItem(value: 'profile', child: ListTile(dense: true, leading: Icon(Icons.person_outline_rounded), title: Text('My profile'))),
         const PopupMenuItem(value: 'notifications', child: ListTile(dense: true, leading: Icon(Icons.notifications_none_rounded), title: Text('Notifications'))),
         const PopupMenuItem(value: 'signout', child: ListTile(dense: true, leading: Icon(Icons.logout_rounded), title: Text('Sign out'))),

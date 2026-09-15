@@ -207,6 +207,7 @@ class ShellState extends ChangeNotifier {
   String _planStatusText = 'No committed plan';
   bool _planCommitted = false;
   int _pendingChanges = 0;
+  int _pendingRequests = 0;
   int _unreadNotifications = 0;
   String? _pageTitle;
   List<String> _breadcrumb = const [];
@@ -214,6 +215,7 @@ class ShellState extends ChangeNotifier {
   String get planStatusText => _planStatusText;
   bool get planCommitted => _planCommitted;
   int get pendingChanges => _pendingChanges;
+  int get pendingRequests => _pendingRequests;
   int get unreadNotifications => _unreadNotifications;
   String? get pageTitle => _pageTitle;
   List<String> get breadcrumb => _breadcrumb;
@@ -248,6 +250,19 @@ class ShellState extends ChangeNotifier {
     _notify();
   }
 
+  /// The count a nav item's badge shows, by its [NavItem.badgeKey].
+  int badgeFor(String? key) => switch (key) {
+        'changes' => _pendingChanges,
+        'requests' => _pendingRequests,
+        _ => 0,
+      };
+
+  void setPendingRequests(int n) {
+    if (n == _pendingRequests) return;
+    _pendingRequests = n;
+    _notify();
+  }
+
   void setUnreadNotifications(int n) {
     if (n == _unreadNotifications) return;
     _unreadNotifications = n;
@@ -272,6 +287,13 @@ class ShellState extends ChangeNotifier {
       setPendingChanges(asIntOr(counts['pending'], 0));
     } catch (e) {
       debugPrint('[shell] changes count unavailable: $e');
+    }
+    try {
+      // Only a lead ever has an approval queue; for everybody else this answers zero.
+      final r = await Api.post('resource_requests.php', 'list', {'view': 'for_me', 'status': 'pending'});
+      setPendingRequests(asIntOr(asMap(r['counts'])['pending_for_me'], 0));
+    } catch (e) {
+      debugPrint('[shell] pending request count unavailable: $e');
     }
     try {
       final r = await Api.post('notifications.php', 'list');

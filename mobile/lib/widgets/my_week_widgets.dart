@@ -191,15 +191,20 @@ class _MwDayTile extends StatelessWidget {
 
 /// Navy banner: proposed changes that affect this person (CHG-06, NOT-01).
 class MwChangesBanner extends StatelessWidget {
-  const MwChangesBanner({super.key, required this.count, this.headline, required this.onReview, this.actionLabel = 'Review'});
+  const MwChangesBanner({super.key, required this.count, this.headline, required this.onReview, this.actionLabel = 'Review', this.title, this.icon = Icons.swap_calls_rounded});
   final int count;
   final String? headline;
   final VoidCallback onReview;
   final String actionLabel;
 
+  /// Overrides the default "N proposed changes affect you" wording, for the
+  /// approval queue, which is the same banner about a different queue.
+  final String? title;
+  final IconData icon;
+
   @override
   Widget build(BuildContext context) {
-    final title = count == 1 ? '1 proposed change affects you' : '$count proposed changes affect you';
+    final title = this.title ?? (count == 1 ? '1 proposed change affects you' : '$count proposed changes affect you');
     final button = PrimaryButton(actionLabel, onPressed: onReview);
     final texts = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Text(title, style: context.text.titleMedium?.copyWith(color: Colors.white)),
@@ -215,7 +220,7 @@ class MwChangesBanner extends StatelessWidget {
       child: LayoutBuilder(builder: (context, c) {
         final stacked = c.maxWidth < 380 || MediaQuery.textScalerOf(context).scale(14) > 20;
         final head = Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Icon(Icons.swap_calls_rounded, color: Colors.white, size: 22),
+          Icon(icon, color: Colors.white, size: 22),
           const SizedBox(width: Sp.md),
           Expanded(child: texts),
           if (!stacked) ...[const SizedBox(width: Sp.md), button],

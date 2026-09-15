@@ -16,6 +16,7 @@ import '../widgets/widgets.dart';
 import '../widgets/work_widgets.dart';
 import 'parts/benefit_form_dialog.dart';
 import 'parts/external_link_panel.dart';
+import 'parts/req_request_dialog.dart';
 import 'parts/wc_dependency_dialog.dart';
 
 /// Work item (web-03 / mobile-work-item): what it is, who can do it, what it
@@ -36,6 +37,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
   String? _error;
   int _tab = 0;
   bool _priorityOpen = false;
+  List<ResourceRequest> _requests = const [];
   final _comment = TextEditingController();
 
   @override
@@ -72,6 +74,7 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
             '${asStrOr(item['ref'], widget.ref)} ${asStrOr(item['title'], '')}',
             breadcrumb: ['Pipeline', asStrOr(item['ref'], widget.ref)],
           );
+      _loadRequests(asIntOr(item['id'], 0));
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -92,6 +95,48 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
       (_item?['skills'] as List?)?.whereType<Map>().map((e) => SkillNeed.fromJson(Map<String, dynamic>.from(e))).toList() ?? const [];
   List<Map<String, dynamic>> _list(String key, [Map<String, dynamic>? from]) =>
       ((from ?? _item)?[key] as List?)?.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList() ?? const [];
+
+  /// The requests raised against this item (the demand side). Loaded separately from the
+  /// item itself so a workspace without the endpoint still renders the page.
+  Future<void> _loadRequests(int itemId) async {
+    if (itemId <= 0) return;
+    try {
+      final r = await Api.post('resource_requests.php', 'list', {'view': 'all', 'work_item_id': itemId});
+      if (!mounted) return;
+      setState(() => _requests = asList(r['requests'], ResourceRequest.fromJson));
+    } on ApiException {
+      // A requester may not list every request in the workspace; theirs still show under 'mine'.
+      try {
+        final r = await Api.post('resource_requests.php', 'list', {'view': 'mine', 'work_item_id': itemId});
+        if (!mounted) return;
+        setState(() => _requests = asList(r['requests'], ResourceRequest.fromJson));
+      } on ApiException {
+        if (mounted) setState(() => _requests = const []);
+      }
+    }
+  }
+
+  /// Ask for somebody on this item. The person list is the planning pool; the server works
+  /// out what the hours mean against that person's capacity and who may approve it.
+  Future<void> _requestPerson() async {
+    List<({int id, String name})> people;
+    try {
+      final r = await Api.post('people.php', 'list');
+      people = [
+        for (final p in (r['people'] as List?) ?? const [])
+          if (asBool((p as Map)['active'], fallback: true)) (id: asIntOr(p['id'], 0), name: asStrOr(p['name'], 'Somebody')),
+      ];
+    } on ApiException catch (e) {
+      _snack(e.message);
+      return;
+    }
+    if (!mounted || people.isEmpty) return;
+    final raised = await showRequestPersonDialog(context, workItemId: _row.id, itemRef: _row.ref, people: people);
+    if (raised && mounted) {
+      _snack('Request sent. Whoever leads them decides.');
+      await _loadRequests(_row.id);
+    }
+  }
 
   // ─── Actions ────────────────────────────────────────────────────────────
 
@@ -602,6 +647,8 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
     final right = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       _planPanel(row, plan),
       const SizedBox(height: Sp.lg),
+      _requestsPanel(),
+      const SizedBox(height: Sp.lg),
       // REQ-05: the ticket or page this came from, with the server's honest badge.
       ExternalLinkPanel(item: _item ?? const {}, canEdit: context.watch<Session>().isTeamLead, onChanged: _load),
       const SizedBox(height: Sp.lg),
@@ -885,6 +932,58 @@ class _WorkItemScreenState extends State<WorkItemScreen> {
               SecondaryButton('Clear', onPressed: _clearOverride),
             ],
           ]),
+        ],
+      ]),
+    );
+  }
+
+  /// Requests for a person on this item (the demand side).
+  ///
+  /// Anyone at requester or above may ask; the card says who decides, and the buttons to
+  /// decide live on the Requests screen so there is one place a lead reviews them.
+  Widget _requestsPanel() {
+    final session = context.watch<Session>();
+    final canAsk = session.can('requester') && !['delivered', 'cancelled'].contains(_row.status);
+    final pending = _requests.where((r) => r.isPending).length;
+    return Panel(
+      title: 'Requests for a person',
+      subtitle: pending > 0 ? '$pending awaiting a decision' : null,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        if (_requests.isEmpty)
+          Text(
+            canAsk
+                ? 'Nobody has been asked for yet. Ask for a named person and the lead above them decides.'
+                : 'Nobody has been asked for on this item.',
+            style: context.text.bodyMedium?.copyWith(color: context.mutedColor),
+          )
+        else
+          for (final r in _requests)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Sp.sm),
+              child: InkWell(
+                onTap: () => context.go(Routes.request(r.id)),
+                borderRadius: DispatchRadius.panelR,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(children: [
+                    PersonAvatar(r.person.initials ?? initialsOf(r.person.name), colourHex: r.person.colour, seed: r.person.id, size: 26),
+                    const SizedBox(width: Sp.sm),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(r.person.name, style: context.text.bodyMedium, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        Text(dotJoin([fmtDays(r.hours, unit: 'hour'), fmtDateRange(r.fromDate, r.toDate)]),
+                            style: context.text.bodySmall?.copyWith(color: context.mutedColor), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      ]),
+                    ),
+                    const SizedBox(width: Sp.sm),
+                    ToneChip(r.statusLabel, tone: r.tone, compact: true),
+                  ]),
+                ),
+              ),
+            ),
+        if (canAsk) ...[
+          const SizedBox(height: Sp.md),
+          SecondaryButton('Request a person', icon: Icons.person_add_alt_1_outlined, onPressed: _requestPerson),
         ],
       ]),
     );

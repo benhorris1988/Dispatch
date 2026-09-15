@@ -26,6 +26,33 @@ Server** API (`api/`) + optional Python OR-Tools solver (`engine/`). Start with 
 - The repo is served by PHP's built-in server (`run_local.ps1`, port 8090, `router.php`), not Apache.
   Apache's DocumentRoot on this box is the Badminton project; an Alias is optional (see README).
 - `seed_demo.php` **wipes and reseeds every table**. CLI only, guarded by `migration_connect.php`.
+- **A resource request is decided by the requested PERSON's lead chain, not by whoever is a team lead.**
+  `requests_lib.php can_approve_request()` is ORG-05 applied to a person; one approval is enough, and
+  approving writes a committed plan version with a *fixed* assignment. Over-booking is reported, never
+  blocked: the committed plan books people at ~100%, so a request that "does not fit" is the normal case.
+- **`day_hours()` in `api/engine/capacity.php` is the only place that decides what a person-day is
+  worth.** Overlapping availability fractions ADD and clamp at 1; a public holiday is zero. Five copies
+  of this arithmetic existed and two of them disagreed. Anything that needs "hours on a day" calls it.
+- **A public holiday is never stored against a person.** `dbo.public_holidays` is read by
+  `derive_capacity()`, so it applies to everyone including later joiners. `api/holidays_rules.php`
+  computes the UK dates from the rules (no network, no list to maintain) and the seed uses the same function.
+- **A weekday is a working day if the workspace says so OR somebody's pattern gives it hours**
+  (`effective_working_days()`), which is what makes a Saturday worker possible.
+- `workspace_working_days()` is memoised like `current_policy()`: pass `$fresh = true` after writing
+  `workspaces.working_days`, and re-derive capacity, because it changes what every day is worth.
+- **A campaign is a workspace with `kind = 'campaign'`** (ADM-07). Isolation is the row-level
+  `workspace_id` scoping that was always there; `api/campaigns.php` adds making one, switching into
+  it (a *re-issued* token, never a widened one), resetting and deleting. Sign-in always lands in Live.
+  `reset` keeps the workspace id but rebuilds the accounts, so tokens issued before it are spent.
+- **`tests/mint_token.php` is live-only unless you pass `--workspace=N`.** Without that, a role match
+  could hand a suite a token for a campaign and every assertion after it would 404.
+- `seed_demo.php` is split: the file itself wipes and inserts the workspace row, and
+  `seed_demo_content.php` builds everything else. `workspace_clone.php seed_demo_into()` includes that
+  second file to fill a campaign over HTTP, with `api/engine/seed_shims.php` supplying the CLI helpers.
+  **`addItem()` in `seed_demo_items.php` reaches its lookups with `global`**, which is why
+  `seed_demo_into()` declares that exact set global before including anything.
+- **A new table referencing an existing one must be added to `seed_demo.php`'s `$wipe` and identity
+  lists**, or the next reseed dies on a foreign-key error part-way through, leaving a half-built demo.
 
 ## Conventions
 

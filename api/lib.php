@@ -255,10 +255,14 @@ function current_policy($conn, $wsId, $fresh = false) {
     return $p;
 }
 
-/** The workspace's working week, e.g. ['Mon','Tue','Wed','Thu','Fri']. Canonical here for the same reason as current_policy(). */
-function workspace_working_days($conn, $wsId) {
+/**
+ * The workspace's working week, e.g. ['Mon','Tue','Wed','Thu','Fri']. Canonical here for the same
+ * reason as current_policy(), and memoised for the same reason — so anything that WRITES
+ * workspaces.working_days must pass $fresh = true afterwards, or it reads back the old week.
+ */
+function workspace_working_days($conn, $wsId, $fresh = false) {
     static $cache = [];
-    if (array_key_exists($wsId, $cache)) return $cache[$wsId];
+    if (!$fresh && array_key_exists($wsId, $cache)) return $cache[$wsId];
     $s = scalar($conn, "SELECT working_days FROM dbo.workspaces WHERE id = ?", [$wsId]);
     $d = array_values(array_filter(array_map('trim', explode(',', (string)$s))));
     return $cache[$wsId] = ($d ?: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']);

@@ -2,6 +2,7 @@
 // Watch list (SCH-05, edge cases 8.13) + shared read helpers used by overview.php / reports.php.
 // Pure PHP, no HTTP. Entry point: build_watch_list($conn, $wsId).
 require_once __DIR__ . '/../lib.php';
+require_once __DIR__ . '/capacity.php';   // day_hours(), holiday_map(): one implementation of "hours on a day"
 
 // ---- shared read helpers ----------------------------------------------------------
 function wl_policy($conn, $wsId) {
@@ -71,20 +72,26 @@ function wl_rota_map($conn, $wsId, $from, $to) {
 function wl_pattern_hours($person, $day) {
     return (float)($person['pattern'][date('D', strtotime($day))] ?? 0);
 }
-/** Available hours for a person on a day: capacity_days if derived, else pattern minus leave. */
-function wl_available_hours($person, $day, $capMap, $leaveMap) {
+/**
+ * Available hours for a person on a day: capacity_days if derived, else the shared day_hours()
+ * arithmetic over their pattern, their leave and the public-holiday calendar.
+ *
+ * $holidays is optional so callers written before holidays existed still work; without it a
+ * derived row still carries the zero, because derive_capacity() applied the holiday when it wrote.
+ */
+function wl_available_hours($person, $day, $capMap, $leaveMap, $holidays = []) {
     $pid = (int)$person['id'];
     if (isset($capMap[$pid][$day])) return $capMap[$pid][$day]['available'];
-    $h = wl_pattern_hours($person, $day);
-    if (isset($leaveMap[$pid][$day])) $h *= (1 - $leaveMap[$pid][$day]['fraction']);
-    return max(0.0, $h);
+    $fraction = $leaveMap[$pid][$day]['fraction'] ?? null;
+    $isHoliday = $holidays && holiday_label($holidays, $day, $person['holiday_region'] ?? null) !== null;
+    return day_hours($person['pattern'] ?? [], date('D', strtotime($day)), $fraction === null ? [] : [$fraction], $isHoliday);
 }
 /** Reserve hours for a person on a day (12% or 25% when on rota). */
-function wl_reserve_hours($person, $day, $capMap, $leaveMap, $policy, $onRota) {
+function wl_reserve_hours($person, $day, $capMap, $leaveMap, $policy, $onRota, $holidays = []) {
     $pid = (int)$person['id'];
     if (isset($capMap[$pid][$day])) return $capMap[$pid][$day]['reserve'];
     $pct = $onRota ? (float)$policy['rota_reserve_pct'] : (float)$policy['incident_reserve_pct'];
-    return wl_available_hours($person, $day, $capMap, $leaveMap) * $pct / 100;
+    return wl_available_hours($person, $day, $capMap, $leaveMap, $holidays) * $pct / 100;
 }
 /** Working days (list of Y-m-d) inside [$from,$to]. */
 function wl_days_in($from, $to, $workingDays) {

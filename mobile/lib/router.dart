@@ -18,6 +18,8 @@ import 'screens/pipeline_screen.dart';
 import 'screens/plan_versions_screen.dart';
 import 'screens/role_family_screen.dart';
 import 'screens/reports_screen.dart';
+import 'screens/request_detail_screen.dart';
+import 'screens/requests_screen.dart';
 import 'screens/scenarios_screen.dart';
 import 'screens/schedule_screen.dart';
 import 'screens/settings_screen.dart';
@@ -75,6 +77,9 @@ GoRouter buildRouter(Session session) {
           _page(ScenariosScreen.route, (s) => const ScenariosScreen()),
           _page(Routes.changes, (s) => const ChangesScreen()),
           _page('/changes/:id', (s) => ChangeDetailScreen(id: s.pathParameters['id']!)),
+          // The demand side: asking for a named person, and the lead above them deciding.
+          _page(Routes.requests, (s) => const RequestsScreen()),
+          _page('/requests/:id', (s) => RequestDetailScreen(id: s.pathParameters['id']!)),
           _page(Routes.team, (s) => const TeamSkillsScreen()),
           // ORG-01..05: the whole organisation, teams within teams.
           _page(Routes.org, (s) => const OrgChartScreen()),

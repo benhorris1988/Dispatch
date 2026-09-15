@@ -13,6 +13,10 @@ const NOTIFICATION_KINDS = [
     'estimate_requested' => ['label' => 'An estimate is requested', 'urgent_capable' => false],
     'realisation_due'    => ['label' => 'A benefit realisation is due', 'urgent_capable' => false],
     'watch_list'         => ['label' => 'A watch-list item I own', 'urgent_capable' => false],
+    // The demand side: a request I raised for somebody's time has been approved, declined or expired.
+    // The approval itself reaches the approver as `approval_requested` and the person as `item_assigned`,
+    // so this kind is only ever the answer coming back to whoever asked.
+    'request_decided'    => ['label' => 'A resource request I made was decided', 'urgent_capable' => false],
     // NOT-04. The weekly digest itself. `in_app` here decides whether the digest lands as an
     // in-app notification when no mail transport is configured (see engine/mail_lib.php); the
     // weekly run addresses everyone who has email_digest on for any kind (see digest.php).

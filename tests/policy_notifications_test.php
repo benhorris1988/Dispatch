@@ -106,7 +106,7 @@ check((int)($req3['notified'] ?? -1) === (int)$req['notified'] - 1, "one fewer r
 check(count(myNotifications('estimate_requested')) === $before + 2, 'and no notification row is written for the reader who turned it off');
 api('notifications', ['action' => 'save_prefs', 'kind' => 'estimate_requested', 'in_app' => true, 'email_digest' => false, 'digest' => 'daily']);
 [, $prefs] = api('notifications', ['action' => 'prefs']);
-check(count($prefs['prefs'] ?? []) === 8, 'all eight notification kinds have preferences, the weekly digest included (' . count($prefs['prefs'] ?? []) . ')');
+check(count($prefs['prefs'] ?? []) === 9, 'all nine notification kinds have preferences, the weekly digest and request_decided included (' . count($prefs['prefs'] ?? []) . ')');
 check(in_array('digest', $prefs['kinds'] ?? [], true), 'digest is one of them (NOT-04)');
 
 section('An item moving to needs_estimate raises estimate_requested (NOT-01)');

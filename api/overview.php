@@ -185,6 +185,7 @@ if ($action === 'my_week') {
     $capMap = wl_capacity_map($conn, $wsId, $weekStart, $weekEnd);
     $leaveMap = wl_leave_map($conn, $wsId, $weekStart, $weekEnd);
     $rota = wl_rota_map($conn, $wsId, $weekStart, $weekEnd);
+    $myHolidays = holiday_map($conn, $wsId, $weekStart, $weekEnd);
     $onRota = isset($rota[$target][$weekStart]);
 
     $mine = wl_committed_assignments($conn, $wsId, $weekStart, $weekEnd, $target);
@@ -199,8 +200,8 @@ if ($action === 'my_week') {
     $days = []; $weekAvail = 0.0; $weekAssigned = 0.0; $usedReserve = 0.0; $reserveWeek = 0.0;
     foreach (['Mon','Tue','Wed','Thu','Fri'] as $i => $dow) {
         $d = date('Y-m-d', strtotime("$weekStart +$i days"));
-        $avail = wl_available_hours($person, $d, $capMap, $leaveMap);
-        $reserveWeek += wl_reserve_hours($person, $d, $capMap, $leaveMap, $policy, $onRota);
+        $avail = wl_available_hours($person, $d, $capMap, $leaveMap, $myHolidays);
+        $reserveWeek += wl_reserve_hours($person, $d, $capMap, $leaveMap, $policy, $onRota, $myHolidays);
         $assigned = 0.0; $list = [];
         foreach ($mine as $a) {
             if ($a['from_date'] > $d || $a['to_date'] < $d) continue;
@@ -221,9 +222,14 @@ if ($action === 'my_week') {
         }
         $weekAvail += $avail; $weekAssigned += $assigned;
         $leave = $leaveMap[$target][$d] ?? null;
+        // A bank holiday is a day off nobody booked, so it reads as one: the card says what it is
+        // rather than leaving an unexplained empty day.
+        $holiday = holiday_label($myHolidays, $d, $person['holiday_region'] ?? null);
         $days[] = ['date' => $d, 'label' => date('D j', strtotime($d)), 'dow' => $dow, 'day_num' => (int)date('j', strtotime($d)), 'is_today' => $d === $today,
                    'assignments' => $list, 'hours_available' => round($avail, 1), 'hours_assigned' => round($assigned, 1),
-                   'leave' => $leave !== null && $leave['fraction'] >= 0.5, 'leave_label' => $leave ? $leave['label'] : null];
+                   'leave' => $holiday !== null || ($leave !== null && $leave['fraction'] >= 0.5),
+                   'leave_label' => $holiday ?? ($leave ? $leave['label'] : null),
+                   'holiday' => $holiday];
     }
 
     // pending changes that touch this person

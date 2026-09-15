@@ -185,7 +185,7 @@ class AppNotification {
   });
 
   final int id;
-  final String kind; // change_proposed | change_committed | approval_requested | item_assigned | estimate_requested | realisation_due | watch_list | digest
+  final String kind; // change_proposed | change_committed | approval_requested | item_assigned | estimate_requested | realisation_due | watch_list | request_decided | digest
   final String title;
   final String? body;
   final String? link; // app route, e.g. /changes/12

@@ -893,10 +893,56 @@ Future<bool> showTmAddLeave(BuildContext context, {required List<TmPersonOption>
   return r ?? false;
 }
 
+/// Correct an existing absence record (TEAM-07). Any source may be corrected — an HR import with
+/// the wrong dates could otherwise only be left wrong — while deleting stays limited to records
+/// this app owns. Still only a type, never a reason (ADM-05).
+Future<bool> showTmEditLeave(
+  BuildContext context, {
+  required int id,
+  required String personName,
+  required String type,
+  DateTime? from,
+  DateTime? to,
+  double fraction = 1,
+  String source = 'manual',
+}) async {
+  final r = await showDialog<bool>(
+    context: context,
+    builder: (context) => _TmAddLeaveDialog(
+      people: [(id: 0, name: personName)],
+      personId: 0,
+      editId: id,
+      initialType: type,
+      initialFrom: from,
+      initialTo: to,
+      initialFraction: fraction,
+      source: source,
+    ),
+  );
+  return r ?? false;
+}
+
 class _TmAddLeaveDialog extends StatefulWidget {
-  const _TmAddLeaveDialog({required this.people, this.personId});
+  const _TmAddLeaveDialog({
+    required this.people,
+    this.personId,
+    this.editId,
+    this.initialType,
+    this.initialFrom,
+    this.initialTo,
+    this.initialFraction,
+    this.source,
+  });
   final List<TmPersonOption> people;
   final int? personId;
+
+  /// Set when correcting an existing record rather than adding one.
+  final int? editId;
+  final String? initialType;
+  final DateTime? initialFrom;
+  final DateTime? initialTo;
+  final double? initialFraction;
+  final String? source;
 
   @override
   State<_TmAddLeaveDialog> createState() => _TmAddLeaveDialogState();
@@ -915,6 +961,10 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
   void initState() {
     super.initState();
     _personId = widget.personId ?? (widget.people.isNotEmpty ? widget.people.first.id : null);
+    _type = widget.initialType ?? 'leave';
+    _from = widget.initialFrom;
+    _to = widget.initialTo;
+    _halfDays = (widget.initialFraction ?? 1) < 1;
   }
 
   Future<void> _pick(bool isFrom) async {
@@ -945,6 +995,8 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
     return '${d.day} ${months[d.month - 1]} ${d.year}';
   }
 
+  bool get _editing => widget.editId != null;
+
   Future<void> _save() async {
     if (_personId == null || _from == null || _to == null) return;
     setState(() {
@@ -952,8 +1004,8 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
       _error = null;
     });
     try {
-      await Api.post('people.php', 'add_availability', {
-        'person_id': _personId,
+      await Api.post('people.php', _editing ? 'update_availability' : 'add_availability', {
+        if (_editing) 'id': widget.editId else 'person_id': _personId,
         'from_date': _iso(_from!),
         'to_date': _iso(_to!),
         'type': _type,
@@ -973,12 +1025,12 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Add leave'),
+      title: Text(_editing ? 'Correct this record' : 'Add leave'),
       content: SizedBox(
         width: 460,
         child: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            if (widget.people.length > 1) ...[
+            if (!_editing && widget.people.length > 1) ...[
               TmField(
                 label: 'Person',
                 child: DropdownButtonFormField<int>(
@@ -1021,8 +1073,10 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
             const SizedBox(height: Sp.sm),
             TmSwitchRow(label: 'Half days', value: _halfDays, onChanged: (v) => setState(() => _halfDays = v)),
             const SizedBox(height: Sp.md),
-            const TmInfoBox(
-              'Only the type of absence is stored — never a reason, a medical detail or a note. People who can see the schedule see the dates and the type.',
+            TmInfoBox(
+              _editing && (widget.source ?? 'manual') != 'manual'
+                  ? 'This record came from ${widget.source}. It can be corrected here but not deleted, so the import stays the source of truth (TEAM-07). Only the type is stored — never a reason.'
+                  : 'Only the type of absence is stored — never a reason, a medical detail or a note. People who can see the schedule see the dates and the type.',
             ),
             if (_error != null) TmInlineError(_error!),
           ]),
@@ -1030,7 +1084,7 @@ class _TmAddLeaveDialogState extends State<_TmAddLeaveDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-        PrimaryButton('Add leave', busy: _busy, onPressed: (_personId == null || _from == null || _to == null) ? null : _save),
+        PrimaryButton(_editing ? 'Save changes' : 'Add leave', busy: _busy, onPressed: (_personId == null || _from == null || _to == null) ? null : _save),
       ],
     );
   }

@@ -17,7 +17,18 @@ String roleLabel(String? role) {
 
 /// Workspace summary attached to the signed-in user.
 class Workspace {
-  Workspace({required this.id, required this.name, this.timeZone, this.workingDays, this.hoursPerDay, this.currency});
+  Workspace({
+    required this.id,
+    required this.name,
+    this.timeZone,
+    this.workingDays,
+    this.hoursPerDay,
+    this.currency,
+    this.kind = 'live',
+    this.description,
+    this.seededFrom,
+    this.sourceWorkspaceId,
+  });
 
   final int id;
   final String name;
@@ -26,6 +37,18 @@ class Workspace {
   final double? hoursPerDay;
   final String? currency;
 
+  /// live | campaign. A campaign is a sandbox: a real workspace of its own, isolated from the
+  /// plan people are working to. The shell says so on every screen, because nobody should have
+  /// to remember which universe they are in.
+  final String kind;
+  final String? description;
+
+  /// full | config | demo — how the campaign was built.
+  final String? seededFrom;
+  final int? sourceWorkspaceId;
+
+  bool get isCampaign => kind == 'campaign';
+
   factory Workspace.fromJson(Map<String, dynamic> j) => Workspace(
         id: asIntOr(j['id'], 0),
         name: asStrOr(j['name'], 'Workspace'),
@@ -33,6 +56,10 @@ class Workspace {
         workingDays: asStr(j['working_days']),
         hoursPerDay: asDouble(j['hours_per_day']),
         currency: asStr(j['currency']),
+        kind: asStrOr(j['kind'], 'live'),
+        description: asStr(j['description']),
+        seededFrom: asStr(j['seeded_from']),
+        sourceWorkspaceId: asInt(j['source_workspace_id']),
       );
 
   String get currencySymbol => switch (currency) { 'USD' => r'$', 'EUR' => '€', _ => '£' };

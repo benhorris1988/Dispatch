@@ -57,22 +57,34 @@ if ($action === 'schedule') {
         $aSql .= " ORDER BY a.person_id, a.from_date";
         foreach (rows($conn, $aSql, $aParams) as $a) $assignments[] = assignment_shape($a, $windows, $today);
     }
+    // Public holidays over the visible range: read once, used for the lane fallback and the away blocks.
+    $planHolidays = holiday_map($conn, $wsId, $from, $to);
     // capacity over the visible range (available hours)
     if ($pids) {
         foreach (rows($conn, "SELECT person_id, SUM(available_hours) AS h FROM dbo.capacity_days WHERE workspace_id = ? AND day >= ? AND day <= ? AND person_id IN (" . implode(',', $pids) . ") GROUP BY person_id", [$wsId, $from, $to]) as $c) $capByPerson[(int)$c['person_id']] = (float)$c['h'];
     }
+    // Assigned hours are a share of THAT PERSON'S day, not of a nominal 7.5-hour one: a lane
+    // header that multiplied working days by the workspace day told a part-timer they were at
+    // 140% when they were not, and a Saturday worker that their Saturday did not count.
+    $capDayMap = $pids ? capacity_map($conn, $wsId, $from, $to, $pids) : [];
     $assignedHours = [];
     foreach ($assignments as $a) {
-        $f = max($a['from_date'], $from); $t = min($a['to_date'], $to);
-        $assignedHours[$a['person_id']] = ($assignedHours[$a['person_id']] ?? 0) + working_days_between($f, $t, $workingDays) * $a['allocation_pct'] / 100 * $hpd;
+        $pid = (int)$a['person_id'];
+        $d = new DateTime(max($a['from_date'], $from)); $end = new DateTime(min($a['to_date'], $to));
+        while ($d <= $end) {
+            $day = $d->format('Y-m-d');
+            $dayHours = $capDayMap[$pid][$day]['available'] ?? (in_array($d->format('D'), $workingDays, true) ? $hpd : 0);
+            $assignedHours[$pid] = ($assignedHours[$pid] ?? 0) + $dayHours * $a['allocation_pct'] / 100;
+            $d->modify('+1 day');
+        }
     }
     $people = [];
     foreach ($peopleRows as $p) {
         $pid = (int)$p['id'];
         $cap = $capByPerson[$pid] ?? null;
-        if ($cap === null) { // fall back to pattern
+        if ($cap === null) { // nothing derived yet: fall back to the pattern, through the shared arithmetic
             $pattern = json_col($p['working_pattern'], []); $cap = 0; $d = new DateTime($from); $end = new DateTime($to);
-            while ($d <= $end) { $cap += (float)($pattern[$d->format('D')] ?? 0); $d->modify('+1 day'); }
+            while ($d <= $end) { $cap += day_hours($pattern, $d->format('D'), [], holiday_label($planHolidays, $d->format('Y-m-d'), $p['holiday_region'] ?? null) !== null); $d->modify('+1 day'); }
         }
         $people[] = ['id' => $pid, 'name' => $p['name'], 'initials' => trim((string)$p['initials']), 'colour' => $p['colour'], 'role_title' => $p['role_title'], 'tagline' => $p['tagline'], 'team_id' => $p['team_id'] !== null ? (int)$p['team_id'] : null, 'team_name' => $p['team_name'],
             'days_per_week' => (float)$p['days_per_week'], 'load_pct' => $cap > 0 ? round(($assignedHours[$pid] ?? 0) / $cap * 100) : 0, 'assigned_hours' => round($assignedHours[$pid] ?? 0, 1), 'available_hours' => round($cap, 1),
@@ -80,6 +92,15 @@ if ($action === 'schedule') {
     }
     $availability = $pids ? array_map(fn($r) => ['id' => (int)$r['id'], 'person_id' => (int)$r['person_id'], 'from_date' => substr($r['from_date'], 0, 10), 'to_date' => substr($r['to_date'], 0, 10), 'type' => $r['type'], 'fraction' => (float)$r['fraction'], 'label' => $r['label'] ?: ucfirst($r['type'])],
         rows($conn, "SELECT * FROM dbo.availability WHERE workspace_id = ? AND to_date >= ? AND from_date <= ? AND person_id IN (" . implode(',', $pids) . ")", [$wsId, $from, $to])) : [];
+    // A public holiday is nobody's leave, so it is not in that table; it is still a day the lane
+    // must explain, so it is synthesised per visible person with the same shape.
+    foreach ($peopleRows as $p) {
+        foreach ($planHolidays as $day => $_) {
+            $label = holiday_label($planHolidays, $day, $p['holiday_region'] ?? null);
+            if ($label === null || $day < $from || $day > $to) continue;
+            $availability[] = ['id' => 0, 'person_id' => (int)$p['id'], 'from_date' => $day, 'to_date' => $day, 'type' => 'holiday', 'fraction' => 1.0, 'label' => $label];
+        }
+    }
     $rota = array_map(fn($r) => ['person_id' => (int)$r['person_id'], 'week_start' => substr($r['week_start'], 0, 10)], rows($conn, "SELECT person_id, week_start FROM dbo.incident_rota WHERE workspace_id = ? AND week_start >= ? AND week_start <= ?", [$wsId, week_start($from), $to]));
     // unscheduled queue (open, ready, no assignment in this version)
     $unschedSql = "SELECT wi.id, wi.ref, wi.title, wi.status, wi.priority_score, wi.needed_by, wt.name AS type_name, wt.colour AS type_colour, sc.stamp AS size_stamp

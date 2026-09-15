@@ -368,6 +368,21 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
         ),
       ],
 
+      // A lead away from their desk is exactly who an approval is waiting on.
+      if (context.watch<ShellState>().pendingRequests > 0) ...[
+        const SizedBox(height: Sp.lg),
+        MwChangesBanner(
+          count: context.watch<ShellState>().pendingRequests,
+          title: context.watch<ShellState>().pendingRequests == 1
+              ? '1 request awaits your approval'
+              : '${context.watch<ShellState>().pendingRequests} requests await your approval',
+          headline: 'Somebody has asked for a person you lead.',
+          icon: Icons.how_to_reg_rounded,
+          actionLabel: 'Review',
+          onReview: () => context.push(Routes.requests),
+        ),
+      ],
+
       for (final c in pendingAck) ...[
         const SizedBox(height: Sp.lg),
         _AckCard(

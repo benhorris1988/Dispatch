@@ -8,6 +8,7 @@ class Routes {
   static const pipeline = '/pipeline';
   static const schedule = '/schedule';
   static const changes = '/changes';
+  static const requests = '/requests';
   static const team = '/team';
   static const org = '/org';
   static const estimates = '/estimates';
@@ -22,20 +23,23 @@ class Routes {
   static String item(String ref) => '/items/$ref';
   static String estimate(String ref) => '/items/$ref/estimate';
   static String change(Object id) => '/changes/$id';
+  static String request(Object id) => '/requests/$id';
   static String person(Object id) => '/people/$id';
 }
 
 /// One sidebar / tab entry.
 class NavItem {
-  const NavItem({required this.label, required this.icon, required this.selectedIcon, required this.path, this.minRole = 'viewer', this.badge = false});
+  const NavItem({required this.label, required this.icon, required this.selectedIcon, required this.path, this.minRole = 'viewer', this.badgeKey});
   final String label;
   final IconData icon;
   final IconData selectedIcon;
   final String path;
   /// Hidden from users below this role.
   final String minRole;
-  /// Show the pending-changes count.
-  final bool badge;
+  /// Which shell counter the badge shows: 'changes', 'requests', or none.
+  final String? badgeKey;
+
+  bool get badge => badgeKey != null;
 
   bool matches(String location) => location == path || location.startsWith('$path/');
 }
@@ -53,7 +57,8 @@ class Nav {
   static const overview = NavItem(label: 'Overview', icon: Icons.grid_view_outlined, selectedIcon: Icons.grid_view_rounded, path: Routes.overview);
   static const pipeline = NavItem(label: 'Pipeline', icon: Icons.format_list_numbered_rounded, selectedIcon: Icons.format_list_numbered_rounded, path: Routes.pipeline);
   static const schedule = NavItem(label: 'Schedule', icon: Icons.calendar_month_outlined, selectedIcon: Icons.calendar_month_rounded, path: Routes.schedule);
-  static const changes = NavItem(label: 'Changes', icon: Icons.swap_calls_rounded, selectedIcon: Icons.swap_calls_rounded, path: Routes.changes, badge: true);
+  static const changes = NavItem(label: 'Changes', icon: Icons.swap_calls_rounded, selectedIcon: Icons.swap_calls_rounded, path: Routes.changes, badgeKey: 'changes');
+  static const requests = NavItem(label: 'Requests', icon: Icons.how_to_reg_outlined, selectedIcon: Icons.how_to_reg_rounded, path: Routes.requests, badgeKey: 'requests');
   static const team = NavItem(label: 'Team & skills', icon: Icons.people_alt_outlined, selectedIcon: Icons.people_alt_rounded, path: Routes.team);
   static const org = NavItem(label: 'Organisation', icon: Icons.account_tree_outlined, selectedIcon: Icons.account_tree_rounded, path: Routes.org);
   static const estimates = NavItem(label: 'Estimates', icon: Icons.balance_rounded, selectedIcon: Icons.balance_rounded, path: Routes.estimates);
@@ -66,7 +71,7 @@ class Nav {
 
   /// Desktop / tablet sidebar.
   static const List<NavGroup> sidebar = [
-    NavGroup(items: [overview, pipeline, schedule, changes, team, org]),
+    NavGroup(items: [overview, pipeline, schedule, changes, requests, team, org]),
     NavGroup(label: 'Value', items: [estimates, benefits, reports]),
     NavGroup(label: 'Admin', items: [settings]),
   ];
@@ -75,7 +80,7 @@ class Nav {
   static const List<NavItem> phoneTabs = [myWeek, pipeline, changes, more];
 
   /// Entries listed on the phone 'More' page (Sign out is appended by the screen).
-  static const List<NavItem> moreItems = [schedule, team, org, benefits, estimates, reports, settings, notifications];
+  static const List<NavItem> moreItems = [schedule, requests, team, org, benefits, estimates, reports, settings, notifications];
 
   /// Human title for a location, for the top bar / AppBar.
   static String titleFor(String location) {
@@ -83,6 +88,7 @@ class Nav {
     if (location.startsWith('/items/')) return 'Work item';
     if (location.startsWith('/people/')) return 'Person';
     if (location.startsWith('/changes/')) return 'Change';
+    if (location.startsWith('/requests/')) return 'Request';
     for (final g in sidebar) {
       for (final i in g.items) {
         if (i.matches(location)) return i.label;

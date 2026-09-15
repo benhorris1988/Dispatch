@@ -217,7 +217,7 @@ echo "notifications / audit\n";
 [$code, $n] = api('notifications.php', ['action' => 'list'], $lead);
 check('notifications list 200 with unread count', $code === 200 && isset($n['notifications']) && is_int($n['unread'] ?? null), short($n));
 [$code, $r] = api('notifications.php', ['action' => 'prefs'], $lead);
-check('prefs has 8 default kinds (seven of NOT-01 plus the NOT-04 digest)', $code === 200 && count($r['prefs'] ?? []) === 8 && ($r['prefs'][0]['is_default'] ?? null) !== null);
+check('prefs has 9 default kinds (seven of NOT-01, the NOT-04 digest, and request_decided)', $code === 200 && count($r['prefs'] ?? []) === 9 && ($r['prefs'][0]['is_default'] ?? null) !== null);
 [$code, $r] = api('notifications.php', ['action' => 'save_prefs', 'kind' => 'change_committed', 'teams' => true, 'digest' => 'weekly'], $lead);
 $cc = null; foreach ($r['prefs'] ?? [] as $p) if ($p['kind'] === 'change_committed') $cc = $p;
 check('save_prefs persists', $code === 200 && ($cc['teams'] ?? null) === true && ($cc['digest'] ?? null) === 'weekly', short($cc));

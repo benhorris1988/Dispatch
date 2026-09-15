@@ -45,7 +45,12 @@ function build_model($conn, $wsId, array $opts = []) {
     $committedVersion = row($conn, "SELECT TOP 1 * FROM dbo.plan_versions WHERE workspace_id = ? AND status = 'committed' ORDER BY version_no DESC", [$wsId]);
     $windows = model_windows($today, $policy, $workingDays, $committedVersion['committed_through'] ?? null);
 
-    // Working-day grid
+    // Working-day grid. The workspace week, widened by any weekday one of this workspace's own
+    // people works — a Saturday worker's Saturdays are real days with real capacity, and a grid
+    // that omitted them would make that time invisible to the planner.
+    $gridPatterns = [];
+    foreach (rows($conn, "SELECT working_pattern FROM dbo.people WHERE workspace_id = ? AND active = 1", [$wsId]) as $gp) $gridPatterns[] = json_col($gp['working_pattern'], []);
+    $workingDays = effective_working_days($workingDays, $gridPatterns);
     $days = [];
     $d = new DateTime($today); $end = new DateTime($windows['indicative_end']);
     while ($d <= $end) { if (in_array($d->format('D'), $workingDays, true)) $days[] = $d->format('Y-m-d'); $d->modify('+1 day'); }
@@ -92,18 +97,22 @@ function build_model($conn, $wsId, array $opts = []) {
             $have[$pid] = true;
         }
         $avail = rows($conn, "SELECT person_id, from_date, to_date, fraction FROM dbo.availability WHERE workspace_id = ? AND to_date >= ? AND from_date <= ?", [$wsId, $today, $windows['indicative_end']]);
-        $rawPeople = rows($conn, "SELECT id, working_pattern FROM dbo.people WHERE workspace_id = ? AND active = 1", [$wsId]);
-        $patterns = []; foreach ($rawPeople as $rp) $patterns[(int)$rp['id']] = json_col($rp['working_pattern'], []);
+        $rawPeople = rows($conn, "SELECT id, working_pattern, holiday_region FROM dbo.people WHERE workspace_id = ? AND active = 1", [$wsId]);
+        $patterns = []; $regions = [];
+        foreach ($rawPeople as $rp) { $patterns[(int)$rp['id']] = json_col($rp['working_pattern'], []); $regions[(int)$rp['id']] = $rp['holiday_region'] ?? null; }
+        $holidays = holiday_map($conn, $wsId, $today, $windows['indicative_end']);
         foreach ($people as $pid => &$pp) {
             foreach ($days as $day) {
                 if (isset($pp['capacity'][$day])) continue;
                 if (!empty($have[$pid])) { $pp['capacity'][$day] = ['available' => 0.0, 'reserve' => 0.0]; continue; } // derived but missing day = none
-                $dow = date('D', strtotime($day));
-                $hours = (float)($patterns[$pid][$dow] ?? 0);
+                $fractions = [];
                 foreach ($avail as $a) {
-                    if ((int)$a['person_id'] === $pid && substr($a['from_date'], 0, 10) <= $day && substr($a['to_date'], 0, 10) >= $day) $hours -= $hours * (float)$a['fraction'];
+                    if ((int)$a['person_id'] === $pid && substr($a['from_date'], 0, 10) <= $day && substr($a['to_date'], 0, 10) >= $day) $fractions[] = (float)$a['fraction'];
                 }
-                $hours = max(0.0, $hours);
+                // day_hours() is the one implementation: this branch used to MULTIPLY overlapping
+                // fractions where derive_capacity() added them, so two half-days off read as a
+                // quarter-day here and a whole day there.
+                $hours = day_hours($patterns[$pid] ?? [], date('D', strtotime($day)), $fractions, holiday_label($holidays, $day, $regions[$pid] ?? null) !== null);
                 $onRota = in_array(week_start($day), $pp['rota_weeks'], true);
                 $reservePct = $onRota ? $policy['rota_reserve_pct'] : $policy['incident_reserve_pct'];
                 $pp['capacity'][$day] = ['available' => round($hours, 2), 'reserve' => round($hours * $reservePct / 100, 2)];

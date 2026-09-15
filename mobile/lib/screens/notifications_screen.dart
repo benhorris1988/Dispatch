@@ -177,6 +177,7 @@ class _NotificationTile extends StatelessWidget {
         'estimate_requested' => Icons.straighten_rounded,
         'realisation_due' => Icons.savings_outlined,
         'watch_list' => Icons.visibility_outlined,
+        'request_decided' => Icons.how_to_reg_outlined,
         'digest' => Icons.calendar_view_week_rounded,
         _ => Icons.notifications_none_rounded,
       };

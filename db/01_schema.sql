@@ -863,3 +863,124 @@ END
 IF COL_LENGTH('dbo.users', 'auth_provider') IS NULL
   ALTER TABLE dbo.users ADD auth_provider NVARCHAR(20) NULL;
 GO
+
+-- ---------------------------------------------------------------------------------------
+-- Resource requests with approval (demand side).
+--
+-- A project owner asks for a named person for an amount of time on a work item ("Priya for
+-- 7.5 hours on WI-1042 from Monday"), and somebody with authority over that PERSON says yes.
+-- Authority runs up the team tree exactly as ORG-05 defines it: the person's team lead, any
+-- lead above them, or a delivery lead. One approval is enough.
+--
+-- Approving materialises the booking immediately as a new committed plan version carrying a
+-- FIXED assignment (SCH-06), so the engine reproduces it rather than planning it away. The
+-- engine still never edits the committed plan: a person does, through this endpoint, exactly
+-- as they do through plan.php move_assignment.
+--
+-- hours is what was asked for; from_date/to_date/allocation_pct are what that converts to
+-- against the person's own capacity, computed at request time and re-checked at approval.
+-- note is a business reason for the request — never personal data (ADM-05).
+-- ---------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.resource_requests') IS NULL
+CREATE TABLE dbo.resource_requests (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  work_item_id INT NOT NULL REFERENCES dbo.work_items(id),
+  person_id INT NOT NULL REFERENCES dbo.people(id),
+  requested_by INT NOT NULL REFERENCES dbo.users(id),
+  hours DECIMAL(7,2) NOT NULL,                        -- what was asked for
+  from_date DATE NOT NULL,
+  to_date DATE NOT NULL,                              -- computed from hours when not supplied
+  allocation_pct INT NOT NULL DEFAULT 100,            -- computed from hours + span when not supplied
+  note NVARCHAR(300) NULL,                            -- business reason, never personal data (ADM-05)
+  status NVARCHAR(10) NOT NULL DEFAULT 'pending',     -- pending|approved|declined|withdrawn|expired
+  decided_by INT NULL REFERENCES dbo.users(id),
+  decided_at DATETIME2 NULL,
+  decision_reason NVARCHAR(300) NULL,
+  plan_version_id INT NULL,                           -- the committed version approval created (no FK: versions are purged by retention)
+  assignment_id INT NULL,                             -- the fixed assignment row in that version
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_resource_requests_status')
+  CREATE INDEX ix_resource_requests_status ON dbo.resource_requests(workspace_id, status, from_date);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_resource_requests_item')
+  CREATE INDEX ix_resource_requests_item ON dbo.resource_requests(workspace_id, work_item_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_resource_requests_person')
+  CREATE INDEX ix_resource_requests_person ON dbo.resource_requests(workspace_id, person_id, status);
+GO
+
+-- ---------------------------------------------------------------------------------------
+-- Supply side: public holidays, and how much leave a person gets.
+--
+-- A bank holiday is NOT written into dbo.availability per person. It is a property of the
+-- calendar, not of anybody's plans: deriving it in derive_capacity() means it applies to
+-- everyone, including people added after the holiday was entered, and nobody has to
+-- remember to book Christmas off for a new joiner.
+--
+-- region is NULL for "everyone in this workspace", or a nation when the workspace spans
+-- more than one — England and Wales, Scotland and Northern Ireland do not share a calendar.
+-- A person's holiday_region picks their set; NULL there means they take the NULL-region days.
+--
+-- annual_leave_days is an entitlement, for showing a balance against what has been booked.
+-- Dispatch is not the system of record for leave approval (requirements section 3), and the
+-- balance is informational: it never blocks anything, and availability rows still carry a
+-- type and never a reason (ADM-05).
+-- ---------------------------------------------------------------------------------------
+IF OBJECT_ID('dbo.public_holidays') IS NULL
+CREATE TABLE dbo.public_holidays (
+  id INT IDENTITY(1,1) PRIMARY KEY,
+  workspace_id INT NOT NULL REFERENCES dbo.workspaces(id),
+  day DATE NOT NULL,
+  label NVARCHAR(80) NOT NULL,                 -- 'Christmas Day', 'Summer bank holiday'
+  region NVARCHAR(40) NULL,                    -- NULL = everyone; else matches people.holiday_region
+  source NVARCHAR(12) NOT NULL DEFAULT 'manual',  -- manual|import
+  created_by INT NULL REFERENCES dbo.users(id),
+  created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+);
+GO
+-- SQL Server treats two NULLs as equal in a unique index, which is exactly the rule wanted
+-- here: one row per day per region, and one workspace-wide (NULL region) row per day. A
+-- filtered index would say the same thing and then fail under sqlcmd, which runs with
+-- QUOTED_IDENTIFIER OFF.
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='uq_public_holiday')
+  CREATE UNIQUE INDEX uq_public_holiday ON dbo.public_holidays(workspace_id, day, region);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='ix_public_holidays_day')
+  CREATE INDEX ix_public_holidays_day ON dbo.public_holidays(workspace_id, day);
+
+IF COL_LENGTH('dbo.workspaces', 'leave_year_start_month') IS NULL
+  ALTER TABLE dbo.workspaces ADD leave_year_start_month TINYINT NOT NULL CONSTRAINT df_workspaces_leave_year DEFAULT 1;   -- 1 = January, 4 = April
+IF COL_LENGTH('dbo.workspaces', 'default_annual_leave_days') IS NULL
+  ALTER TABLE dbo.workspaces ADD default_annual_leave_days DECIMAL(4,1) NOT NULL CONSTRAINT df_workspaces_leave_days DEFAULT 25;
+IF COL_LENGTH('dbo.people', 'annual_leave_days') IS NULL
+  ALTER TABLE dbo.people ADD annual_leave_days DECIMAL(4,1) NULL;      -- NULL = the workspace default
+IF COL_LENGTH('dbo.people', 'holiday_region') IS NULL
+  ALTER TABLE dbo.people ADD holiday_region NVARCHAR(40) NULL;         -- NULL = the workspace-wide holidays
+GO
+
+-- ---------------------------------------------------------------------------------------
+-- Campaigns: sandbox workspaces alongside the live one (ADM-07).
+--
+-- Every table already carried workspace_id and every cron job already looped over all
+-- workspaces, so tenancy was never the missing piece. What was missing was a way to MAKE
+-- another workspace, get into it, and know which one you are in. A campaign is a workspace
+-- with kind = 'campaign': real in every respect, isolated by the same row-level scoping as
+-- everything else, and clearly labelled in the client so nobody mistakes it for the plan.
+--
+-- The seeded workspace is 'live' by default, which is what the column default says.
+-- ---------------------------------------------------------------------------------------
+IF COL_LENGTH('dbo.workspaces', 'kind') IS NULL
+  ALTER TABLE dbo.workspaces ADD kind NVARCHAR(10) NOT NULL CONSTRAINT df_workspaces_kind DEFAULT 'live';   -- live|campaign
+IF COL_LENGTH('dbo.workspaces', 'description') IS NULL
+  ALTER TABLE dbo.workspaces ADD description NVARCHAR(300) NULL;
+IF COL_LENGTH('dbo.workspaces', 'source_workspace_id') IS NULL
+  ALTER TABLE dbo.workspaces ADD source_workspace_id INT NULL;      -- what it was copied from (no FK: the source may be deleted)
+IF COL_LENGTH('dbo.workspaces', 'seeded_from') IS NULL
+  ALTER TABLE dbo.workspaces ADD seeded_from NVARCHAR(12) NULL;     -- full|config|demo — replayed by reset
+IF COL_LENGTH('dbo.workspaces', 'open_to_all') IS NULL
+  ALTER TABLE dbo.workspaces ADD open_to_all BIT NOT NULL CONSTRAINT df_workspaces_open DEFAULT 1;
+IF COL_LENGTH('dbo.workspaces', 'created_by_email') IS NULL
+  ALTER TABLE dbo.workspaces ADD created_by_email NVARCHAR(200) NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name='ck_workspaces_kind')
+  ALTER TABLE dbo.workspaces ADD CONSTRAINT ck_workspaces_kind CHECK (kind IN ('live','campaign'));
+GO

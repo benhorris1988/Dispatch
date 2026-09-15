@@ -19,6 +19,7 @@ require_once __DIR__ . '/../api/engine/summary.php';
 require_once __DIR__ . '/../api/engine/explain.php';
 require_once __DIR__ . '/../api/engine/cpsat_client.php';
 require_once __DIR__ . '/../api/engine/watchlist.php';
+require_once __DIR__ . '/../api/engine/requests_lib.php';
 
 $pass = 0; $fail = 0;
 function check($cond, $label) { global $pass, $fail; if ($cond) { $pass++; echo "  ok   $label\n"; } else { $fail++; echo "  FAIL $label\n"; } }
@@ -488,17 +489,52 @@ try {
     check(!$placedBy($ipR) && $unschedReason($ipR) === 'skills_gap', 'Integration Platform alone cannot place it: skills gap (' . ($unschedReason($ipR) ?? 'placed') . ')');
     $rows = $placedBy($pfR);
     $teamsUsed = array_unique(array_map(fn($a) => $pfX['people'][$a['person_id']]['team_id'], $rows));
-    check(count($rows) === 2 && count($teamsUsed) === 2, 'the parent team places it across both branches (' . count($rows) . ' rows, ' . count($teamsUsed) . ' teams: ' . implode(', ', array_map(fn($a) => $pfX['people'][$a['person_id']]['name'] . ' · ' . ($a['role_label'] ?? '?'), $rows)) . ')');
+    // A development pairing (TEAM-05) may ride along on a portion — the demo gives Jon a Terraform
+    // target with pairing enabled — so the working rows are the ones that carry the skill effort and
+    // a `pair · …` row is an extra, not one of them. Asserting an exact row count made this flake.
+    $working = array_values(array_filter($rows, fn($a) => !str_starts_with((string)($a['role_label'] ?? ''), 'pair')));
+    $workingTeams = array_unique(array_map(fn($a) => $pfX['people'][$a['person_id']]['team_id'], $working));
+    $describe = implode(', ', array_map(fn($a) => $pfX['people'][$a['person_id']]['name'] . ' · ' . ($a['role_label'] ?? '?'), $rows));
+    check(count($working) === 2 && count($workingTeams) === 2, 'the parent team places it across both branches (' . count($working) . ' working rows over ' . count($workingTeams) . ' teams, from: ' . $describe . ')');
     $skillOk = true;
-    foreach ($rows as $a) { $p = $pfX['people'][$a['person_id']]; $need = $a['role_label'] === 'Terraform' ? [$tfSkill, 3] : [$apiSkill, 4]; if (($p['skills'][$need[0]] ?? 0) < $need[1]) $skillOk = false; }
+    // Only the working rows must meet the level: a pair is there to LEARN the skill, which is the
+    // whole point of TEAM-05, so requiring them to already have it would contradict the feature.
+    foreach ($working as $a) { $p = $pfX['people'][$a['person_id']]; $need = $a['role_label'] === 'Terraform' ? [$tfSkill, 3] : [$apiSkill, 4]; if (($p['skills'][$need[0]] ?? 0) < $need[1]) $skillOk = false; }
     check($skillOk, 'each portion goes to someone qualified for that skill');
     check(empty(plan_check_constraints($pfR['assignments'], $pfX)), 'and the whole-organisation candidate still breaks no hard constraint');
     // The same item in the whole-workspace model is also placeable (one pool): SCH-13 adds team boundaries, it does not remove capability.
     $wsR = heuristic_plan(build_model($conn, $wsId));
-    check(count($placedBy($wsR)) === 2, 'the workspace model places it too');
+    $wsWorking = array_values(array_filter($placedBy($wsR), fn($a) => !str_starts_with((string)($a['role_label'] ?? ''), 'pair')));
+    check(count($wsWorking) === 2, 'the workspace model places it too (' . count($wsWorking) . ' working rows)');
 } finally {
     q($conn, "DELETE FROM dbo.skill_requirements WHERE work_item_id = ?", [$xId]);
     q($conn, "DELETE FROM dbo.work_items WHERE id = ?", [$xId]);
+}
+
+// -------------------------------------------------------------------------------------------------
+// Resource requests: expiry. A pending request whose start date has gone is closed by the nightly
+// cycle rather than left to rot. It cannot be reached over HTTP (create refuses a past start date),
+// so it is asserted here, where the row can be written directly.
+// -------------------------------------------------------------------------------------------------
+section('resource requests: a pending request whose date has passed expires (nightly)');
+$rqItem = (int)scalar($conn, "SELECT TOP 1 id FROM dbo.work_items WHERE workspace_id = ? AND status = 'ready' ORDER BY id", [$wsId]);
+$rqPerson = (int)scalar($conn, "SELECT TOP 1 id FROM dbo.people WHERE workspace_id = ? AND active = 1 ORDER BY id", [$wsId]);
+$rqUser = (int)scalar($conn, "SELECT TOP 1 id FROM dbo.users WHERE workspace_id = ? AND active = 1 ORDER BY id", [$wsId]);
+$yesterday = date('Y-m-d', strtotime(today() . ' -1 day'));
+$rqId = null;
+try {
+    $rqId = (int)insert($conn, 'resource_requests', ['workspace_id' => $wsId, 'work_item_id' => $rqItem, 'person_id' => $rqPerson,
+        'requested_by' => $rqUser, 'hours' => 7.5, 'from_date' => $yesterday, 'to_date' => $yesterday,
+        'allocation_pct' => 100, 'note' => 'engine_test expiry fixture', 'status' => 'pending']);
+    $notesBefore = (int)scalar($conn, "SELECT COUNT(*) FROM dbo.notifications WHERE workspace_id = ? AND user_id = ? AND kind = 'request_decided'", [$wsId, $rqUser]);
+    $expired = expire_requests($conn, $wsId);
+    check($expired >= 1, "expire_requests closed $expired request(s) starting before " . today());
+    check(scalar($conn, "SELECT status FROM dbo.resource_requests WHERE id = ?", [$rqId]) === 'expired', 'the row is marked expired');
+    $notesAfter = (int)scalar($conn, "SELECT COUNT(*) FROM dbo.notifications WHERE workspace_id = ? AND user_id = ? AND kind = 'request_decided'", [$wsId, $rqUser]);
+    check($notesAfter > $notesBefore, 'and whoever asked was told rather than left waiting');
+    check(expire_requests($conn, $wsId) === 0, 'running it again expires nothing: it is not a repeating nag');
+} finally {
+    if ($rqId !== null) q($conn, "DELETE FROM dbo.resource_requests WHERE id = ?", [$rqId]);
 }
 
 echo "\n$pass passed, $fail failed\n";

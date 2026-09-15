@@ -24,7 +24,7 @@ class DeepLinks {
   static const String webPathPrefix = '/mobile/build/web';
 
   static final Set<String> _static = {
-    Routes.overview, Routes.pipeline, Routes.schedule, Routes.changes, Routes.team, Routes.estimates, Routes.benefits,
+    Routes.overview, Routes.pipeline, Routes.schedule, Routes.changes, Routes.requests, Routes.team, Routes.estimates, Routes.benefits,
     Routes.reports, Routes.settings, Routes.myWeek, Routes.addWork, Routes.notifications, Routes.more,
     '/schedule/versions', '/schedule/scenarios',
   };
@@ -33,6 +33,7 @@ class DeepLinks {
     RegExp(r'^/items/[A-Za-z0-9._-]+$'),
     RegExp(r'^/items/[A-Za-z0-9._-]+/estimate$'),
     RegExp(r'^/changes/\d+$'),
+    RegExp(r'^/requests/\d+$'),
     RegExp(r'^/people/\d+$'),
   ];
 

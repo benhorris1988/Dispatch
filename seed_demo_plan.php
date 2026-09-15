@@ -461,13 +461,35 @@ foreach ($integrations as $g) {
 }
 
 // -------------------------------------------------------------------------------------
+// 10b. RESOURCE REQUESTS — the demand side waiting on a decision.
+//
+// One pending (so "For my approval" has something in it for Lena, who leads Platform
+// engineering, and for anyone above her), one declined (so the history is not empty).
+// An approved one is not seeded: approving writes a whole committed plan version, and the
+// demo's committed plan is the hand-built v6 the mockups are drawn from.
+// -------------------------------------------------------------------------------------
+$N['resource_requests'] = 0;
+foreach ([
+    // person, item, hours, from, to, allocation, status, note, decided_by, reason
+    ['Hana',  'WI-1046', 15.0, '2026-09-28', '2026-09-30', 76, 'pending',  'Scorecard needs a pipeline engineer for the ingestion half.', null, null],
+    ['Amira', 'WI-1060', 22.5, '2026-09-21', '2026-09-23', 100, 'declined', 'Lineage capture for the finance pipelines.', 'Sam', 'Amira is on the finance data mart until the end of the month. Ask again in October.'],
+] as $r) {
+    xid($conn, 'resource_requests', ['workspace_id' => $W, 'work_item_id' => $I[$r[1]], 'person_id' => $PN[$r[0]],
+        'requested_by' => $U['requester'], 'hours' => $r[2], 'from_date' => $r[3], 'to_date' => $r[4],
+        'allocation_pct' => $r[5], 'note' => $r[7], 'status' => $r[6],
+        'decided_by' => $r[8] !== null ? $U[$r[8]] : null, 'decided_at' => $r[8] !== null ? '2026-09-07 15:40:00' : null,
+        'decision_reason' => $r[9], 'created_at' => '2026-09-07 11:20:00']);
+    $N['resource_requests']++;
+}
+
+// -------------------------------------------------------------------------------------
 // 11. SUMMARY
 // -------------------------------------------------------------------------------------
 $tables = ['workspaces', 'users', 'work_types', 'size_classes', 'scheduling_policies', 'teams', 'role_families', 'people', 'person_loans', 'skills',
     'person_skills', 'availability', 'incident_rota', 'capacity_days', 'work_items', 'ref_sequences', 'tasks',
     'dependencies', 'skill_requirements', 'estimates', 'day_rates', 'benefits', 'benefit_realisations',
     'plan_versions', 'assignments', 'proposals', 'change_proposals', 'replan_triggers', 'audit_events',
-    'notifications', 'item_comments', 'stability_weeks', 'person_change_log', 'progress_logs', 'integrations'];
+    'notifications', 'item_comments', 'stability_weeks', 'person_change_log', 'progress_logs', 'integrations', 'resource_requests'];
 echo "\n--- Dispatch demo seed ------------------------------------------\n";
 foreach ($tables as $t) {
     $r = xrows($conn, "SELECT COUNT(*) AS n FROM dbo.$t");

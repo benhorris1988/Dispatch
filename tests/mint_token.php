@@ -22,11 +22,19 @@ $who = array_values(array_filter($args, fn($a) => !str_starts_with($a, '--')))[0
 $json = in_array('--json', $flags, true);
 $withPerson = in_array('--with-person', $flags, true) ? true : (in_array('--without-person', $flags, true) ? false : null);
 $create = in_array('--create', $flags, true);
+// --workspace=N picks which workspace to mint for. Without it a role match can land in any of them
+// once campaigns exist, which is a confusing 404 three assertions later rather than an obvious error.
+$wsFlag = null;
+foreach ($flags as $f) if (str_starts_with($f, '--workspace=')) $wsFlag = (int)substr($f, strlen('--workspace='));
 
 $select = "SELECT u.id, u.workspace_id, u.email, u.display_name, u.short_name, u.role, u.person_id, u.auth_provider,
                   p.name AS person_name, p.initials, p.colour, p.role_title, t.name AS team_name
            FROM dbo.users u LEFT JOIN dbo.people p ON p.id = u.person_id LEFT JOIN dbo.teams t ON t.id = p.team_id
            WHERE u.active = 1";
+// Live only unless a workspace is named. Campaigns hold a users row per member, so without this a
+// role match could hand a suite a token for a sandbox and every assertion after it would 404.
+if ($wsFlag !== null) $select .= " AND u.workspace_id = $wsFlag";   // from an int cast, never from input
+else $select .= " AND u.workspace_id IN (SELECT id FROM dbo.workspaces WHERE ISNULL(kind, 'live') = 'live')";
 
 if (in_array('--list', $flags, true)) {
     $rows = xrows($conn, "$select ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'delivery_lead' THEN 1 WHEN 'team_lead' THEN 2 ELSE 3 END, u.display_name");
@@ -35,7 +43,7 @@ if (in_array('--list', $flags, true)) {
     echo json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), "\n";
     exit(0);
 }
-if ($who === null) { fwrite(STDERR, "usage: php tests/mint_token.php <email|role> [--with-person|--without-person] [--create] [--json]\n       php tests/mint_token.php --list\n"); exit(2); }
+if ($who === null) { fwrite(STDERR, "usage: php tests/mint_token.php <email|role> [--with-person|--without-person] [--create] [--json] [--workspace=N]\n       php tests/mint_token.php --list\n"); exit(2); }
 
 if (strpos($who, '@') !== false) {
     $rows = xrows($conn, "$select AND LOWER(u.email) = ?", [strtolower($who)]);
@@ -48,7 +56,7 @@ if (strpos($who, '@') !== false) {
 $u = $rows[0] ?? null;
 
 if (!$u && $create) {
-    $wsId = (int)(xrows($conn, "SELECT TOP 1 id FROM dbo.workspaces ORDER BY id")[0]['id'] ?? 0);
+    $wsId = $wsFlag ?: (int)(xrows($conn, "SELECT TOP 1 id FROM dbo.workspaces WHERE ISNULL(kind, 'live') = 'live' ORDER BY id")[0]['id'] ?? 0);
     if (!$wsId) { fwrite(STDERR, "no workspace — run seed_demo.php first\n"); exit(2); }
     $email = strpos($who, '@') !== false ? strtolower($who) : strtolower($who) . '@test.local';
     $role = strpos($who, '@') !== false ? 'team_member' : $who;

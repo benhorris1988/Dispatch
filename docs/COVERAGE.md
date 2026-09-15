@@ -18,15 +18,22 @@ column is deliberately unkind.
 
 | Scope | Done | Partial | Not done | Not applicable here | Total |
 |---|---|---|---|---|---|
-| All functional requirements | 82 | 43 | 0 | 7 | 132 |
-| R1 (the MVP) | 66 | 14 | 0 | 0 | 80 |
-| Must priority | 64 | 21 | 0 | 1 | 86 |
-| Must **and** R1 | 63 | 13 | 0 | 0 | 76 |
-| Should priority | 15 | 22 | 0 | 5 | 42 |
+| All functional requirements | 85 | 41 | 0 | 6 | 132 |
+| R1 (the MVP) | 68 | 12 | 0 | 0 | 80 |
+| Must priority | 66 | 19 | 0 | 1 | 86 |
+| Must **and** R1 | 65 | 11 | 0 | 0 | 76 |
+| Should priority | 16 | 22 | 0 | 4 | 42 |
 | Could priority | 3 | 0 | 0 | 1 | 4 |
 
 The five ORG requirements are new in this release and did not exist in v0.1; ADM-01 counts as Done
 with the client ids left to configure, which the row explains.
+
+**Changed in this release.** ADM-07 moves Partial → Done (campaigns: sandbox workspaces, section 2.14).
+TEAM-02 and TEAM-06 move Partial → Done and TEAM-07 moves N/A → Partial, all from the supply-side work
+in section 2.12b — a working-pattern editor, a public-holiday calendar, leave balances and a way to
+correct an imported availability record. Three capabilities in sections 2.12b, 2.13 and 2.14 are beyond
+v0.1 and have no requirement id to sit under, so they are written up as their own sections rather than
+counted in this table.
 
 Non-functional: of the 18 NFRs, two are structurally met, eight are partly met, and eight are
 hosting or operations claims that a local implementation cannot make. Section 3 sets them out.
@@ -142,12 +149,12 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | ID | Requirement | Pri | Rel | Status | Evidence, or what is missing |
 |---|---|---|---|---|---|
 | TEAM-01 | Skills catalogue; merge and retire | Must | R1 | Done | `skills.php` `save` / `merge` / `retire`; Team & skills → Skills tab wires all three to per-row actions gated on the admin role |
-| TEAM-02 | Person profile: role, team, days per week, pattern, max concurrent, min focus, preferences, avoid | Must | R1 | Partial | `people.php save` accepts the whole profile; the client does not. **The edit dialog covers only name, role title, tagline, days per week, prefers and avoid; working pattern, max concurrent and focus blocks are read-only rows.** A team can be chosen when a person is created and never changed afterwards |
+| TEAM-02 | Person profile: role, team, days per week, pattern, max concurrent, min focus, preferences, avoid | Must | R1 | Done | Was Partial: the server took the whole profile and the client could not send it. `parts/tm_pattern_dialog.dart` now edits the working pattern itself — hours per weekday, Monday to Sunday, with presets and a live days-per-week figure — from the person page, alongside the annual-leave entitlement. Max concurrent and focus blocks are still read-only rows, which is a deliberate line: they are scheduling policy per person, and the pattern was the one that made a part-timer's data wrong |
 | TEAM-03 | Proficiency 0–4, lead endorsement, certifications attached | Must | R1 | Partial | Levels and endorsement are real and reachable from both the person page and the matrix cell picker. **Certification is a single BIT with no issuer, expiry or file; `set_skill` accepts a `certified` flag that no Dart file sends, and there is no attachment table anywhere** |
 | TEAM-04 | Skills matrix with proficiency, people at L3+, demand over the horizon, gaps highlighted | Must | R1 | Done | `skills.php matrix` returns cells, `people_at_3_plus`, a single-point summary and `demand_vs_supply`; rendered as the matrix, summary strip and demand panel with single points flagged and over-demand reddened |
 | TEAM-05 | Development targets; scheduler prefers pairing that person as a second | Should | R2 | Partial | The scheduler half is implemented (`pl_try_pairing()`) and the pairing switch is now live and writes. **But the switch can only re-send a target that already exists** — no control creates one, and the panel's own empty state says "Set a target level on a person to plan pairing" with nothing that does so, so targets exist only in seed data |
-| TEAM-06 | Availability covers leave, training, rota and recurring patterns | Must | R1 | Partial | Leave, training, sickness and rota all reduce capacity through `derive_capacity()`, and `showTmAddLeave` creates records with type, range and a half-day fraction. **There are no recurring patterns: `availability` is a single date pair with no recurrence column.** The only recurring element is `people.working_pattern`, which no screen can edit |
-| TEAM-07 | Leave imported from HR and calendar, source-marked, correctable but not deletable | Should | R2 | N/A | Needs an HR system and an M365 tenant. `availability.source` accepts `hr` and `calendar` and `delete_availability` refuses non-manual rows. **But there is no importer, and still no `update_availability` action — so the local half of the rule is "not deletable, not correctable"**, and `delete_availability` itself is called by no screen |
+| TEAM-06 | Availability covers leave, training, rota and recurring patterns | Must | R1 | Done | Was Partial for the recurring half. The recurring element people actually have is the working pattern, which is now editable (TEAM-02), and the recurring absence everybody shares is the public-holiday calendar, which is new: `dbo.public_holidays`, read by `derive_capacity()` so it applies to everyone including later joiners, with the UK dates computed from the rules rather than typed in. Leave, training, sickness and rota all still reduce capacity. What is still absent is a per-person repeating rule ("every other Friday"), which nothing in the demo needs |
+| TEAM-07 | Leave imported from HR and calendar, source-marked, correctable but not deletable | Should | R2 | Partial | Was N/A with the note that the local half was "not deletable, not correctable". The correctable half now exists: `people.php update_availability` corrects a record of any source and re-derives capacity over both the old window and the new one, reachable from the person page, while `delete_availability` still refuses anything but `manual`. **The importer itself still needs an HR system and an M365 tenant**, so the row stays Partial rather than Done |
 | TEAM-08 | Incident rota per week; that person's reserve rises to the rota percentage | Must | R1 | Done | Was Partial. `screens/parts/adm_rota_panel.dart` lists eight weeks, offers assign per week and a per-person clear, and posts `set_rota` / `clear_rota`; wired into the Availability tab gated on the team-lead role. `capacity.php` applies `rota_reserve_pct` on those weeks, asserted by the engine suite |
 | TEAM-09 | People grouped into role families; a person loanable to another team for a dated period | Should | R3 | Done | Reshaped. `dbo.portfolios` is now `dbo.role_families` and the grouping moved from the team to the person (`people.role_family_id`): a role family is the discipline somebody practises, so it spans the tree — *Data engineering* reaches into three of the demo's teams — which a grouping of whole teams could never say. `role_families.php` `list` / `overview` (the family's people grouped by the team each sits in, each row with headcount, loans, share-weighted load, single-skill dependencies, stability index and open proposals, and the family computed the same way as a row rather than summed, which `tests/role_family_test.php` checks to 0.05 of an hour) and admin `save` / `delete` (409 while anybody is in it) / `set_person`. Loans are unchanged and still the time-boxed half of the requirement: `people.php` `add_loan` (overlap → 409, `to_date < from_date` → 400, team-lead-of-either-team or above), `end_loan` (shortens, never deletes; cancels an unstarted loan), `loans`; `list{team_id\|role_family_id}` returns the planning pool with `loaned_from` / `on_loan_to`, `capacity{team_id}` carries `team_share`; capacity is attributed at read time (`capacity.php team_pool` / `team_share_for`), never as a team column on `capacity_days`. A loan moves somebody between teams and never between disciplines, so a family's `loaned_in` / `loaned_out` are always zero and nobody is counted twice. Every mutation audited and raises a `leave` trigger (urgent inside the freeze horizon). Seeded: three role families across five teams, Mei Chen lent to Data Platform 14–25 Sep at 50%. Asserted by `tests/role_family_test.php` (72 checks) and the TEAM-09 section of `engine_test.php`. Client: Team & skills has a scope selector (workspace / role family / team, teams indented by depth) feeding `skills.php matrix` and `people.php list`; borrowed people carry an *On loan from … · until … · 50%* chip and lent-out members *Lent to … until …*; team leads get **Add loan** and **End early** / **Cancel** in the Loans panel. `/role-families/:id` (`RoleFamilyScreen`) renders the overview as a card per team the family reaches into, with the totals row beneath and an admin rename. Person screen has a Loans panel; the Schedule shows the loan chip on the person lane. Rendered at 1440 / 900 / 390 by `screens_smoke_test.dart` |
 | TEAM-10 | Capacity derived nightly; load percentage on the profile and in the lane header | Must | R1 | Done | `cron.php` → `run_nightly` calls `derive_capacity`, which also re-runs on availability, rota and pattern changes; `load_pct_map` feeds the profile's load tile and the colour-banded lane header |
@@ -226,7 +233,7 @@ implies it), **Partial** (the substance is there, with the specific gap named), 
 | CHG-04 | Before-and-after summary of late items, quarterly value, people over 100%, single-skill dependencies, days changed and stability index | Must | R1 | Done | `plan_summary()` computes all six; stored on the proposal and rendered as a before/after table on the Changes screen |
 | CHG-05 | Accepting creates a new committed version; the previous remains viewable and restorable | Must | R1 | Done | Was Partial. `plan_versions_screen.dart` calls `versions`, `version` and `restore`, is routed at `/schedule/versions` and is reachable from three Schedule controls, with restore gated on the delivery-lead role to match the server |
 | CHG-06 | Affected people notified before the change takes effect, with the reason, and can comment; policy can require acknowledgement inside the horizon | Must | R1 | Done | Notification happens at propose time with the reason, comments work, and `acknowledge` exists. `require_ack_inside_horizon` is read at commit time and stamped on `change_proposals.ack_required`, so turning it off stops asking rather than hiding the ask; `mine` drives My week's acknowledgement card. Tested on and off |
-| CHG-07 | Approval roles configurable: who approves inside the horizon, who overrides guardrails, whether auto-apply is allowed outside it | Must | R1 | Partial | The approval rules are enforced but hardcoded: `require_role('delivery_lead')` to approve and `has_role('admin')` to override, **neither configurable — `workspace_config.php` has no approver-role action and `scheduling_policies` has no approver column**. The auto-apply clause is done: `auto_apply_outside_horizon` is read by the nightly run, which accepts and commits every pending change that passes all guardrails and falls wholly outside the freeze horizon, audits each, and re-proposes the rest |
+| CHG-07 | Approval roles configurable: who approves inside the horizon, who overrides guardrails, whether auto-apply is allowed outside it | Must | R1 | Partial | The approval rules are enforced but hardcoded: `require_role('delivery_lead')` to approve and `has_role('admin')` to override, **neither configurable — `workspace_config.php` has no approver-role action and `scheduling_policies` has no approver column**. A second approval path now exists alongside it and is equally hardcoded: a resource request is decided by the requested person's lead chain (section 2.13). The auto-apply clause is done: `auto_apply_outside_horizon` is read by the nightly run, which accepts and commits every pending change that passes all guardrails and falls wholly outside the freeze horizon, audits each, and re-proposes the rest |
 | CHG-08 | A proposal expires at the next cycle, which notes what was carried over | Should | R1 | Done | `run_propose` supersedes every open proposal, collects the undecided headlines and writes `carried_over_note`, shown as a chip on the Changes screen |
 
 ### 2.10 Schedule and overview views (VIEW)
@@ -286,7 +293,7 @@ reporting lines or who may reorganise what.
 | ADM-04 | Every create, update, delete, approval and configuration change audited; searchable and exportable | Must | R1 | Done | `audit()` records actor, time, entity, label, before and after JSON and reason from about eighty-four call sites including config changes, approvals and commits; `audit.php` gives entity, action, actor, free-text and date filters, paging and CSV, exposed in Settings. The export lands in a clipboard dialog rather than a downloaded file |
 | ADM-05 | Personal data minimised; leave reasons never stored; retention policy removes plan history after a configurable period | Must | R1 | Partial | Was Partial for a different reason — the retention half now exists. Data minimisation is still honoured deliberately: `availability` holds a type and nothing else and `add_availability` drops any reason. `api/retention.php` adds `get` / `save` / `preview` / `purge` over new `workspaces.plan_history_months` (24) and `audit_retention_years` (7) columns; the scan protects the committed version, the newest superseded one and anything a proposal references, and the purge writes its audit row before trimming the audit table. `cron_retention.php` is the job. **But `grep` for retention across `mobile/lib/` returns nothing**, so no administrator can see the period, change it, preview a purge or run one from the app. `intake_log.payload` and `notifications` are covered by no retention rule at all |
 | ADM-06 | Administrators manage day rates, skills catalogue, teams, integrations and notification defaults | Must | R1 | Partial | Day rates are now genuinely editable (see EST-05), and skills, work types, size classes and policy all save. Two of the three gaps are closed: `org.php` is the team CRUD that existed nowhere — `save_team` / `move_team` / `delete_team` / `set_visibility`, reachable by drag on the Organisation chart and by menu in its list view — and the role dropdown in Teams & roles is live against `auth.php set_role`. **What remains: integrations are read-only, and the "notification defaults" table is `notifications.php prefs` scoped to the signed-in user, so it shows an administrator their own preferences rather than editable workspace defaults** |
-| ADM-07 | Multiple workspaces in one tenancy, a user able to belong to more than one | Should | R3 | Partial | The tenancy model is sound in principle — every table carries `workspace_id` and, with the single exception recorded under NFR-SEC-02, every query filters on it. **`users.workspace_id` is a single foreign key, the JWT carries one workspace, there is no switcher and the seed creates one workspace**, so a user cannot belong to two |
+| ADM-07 | Multiple workspaces in one tenancy, a user able to belong to more than one | Should | R3 | Done | Was Partial. The tenancy model was always sound — every table carries `workspace_id` and every query filters on it — and what was missing was a way to make a second workspace, get into it and know which one you are in. `campaigns.php` does all three: `create` (a full copy, a config-only copy, or the demo dataset), `switch` (which **re-issues** the token rather than widening it), `reset`, `delete`. A user now has one `users` row per workspace keyed on their email, so a role, a linked person and notification preferences stay per workspace. `tests/campaigns_test.php` proves the isolation both ways: a change in a campaign leaves Live untouched, and neither token can read the other's rows. **Sign-in still always lands in Live** (ADM-01), which is deliberate: an account exists because somebody signed in with an identity the deployment accepts, and no sandbox can mint one |
 
 ### 2.14 Integrations (INT)
 
@@ -328,6 +335,61 @@ build. Judged on that basis:
 | MOB-05 | Biometric unlock; sessions follow conditional access | Must | R2 | Partial | Was Not done. Biometric unlock is implemented with `local_auth` (`services/app_lock.dart`, `screens/lock_screen.dart`): offered once after an interactive sign-in on a capable device and, when on, a full-screen lock view — not a dialog — covers the app on cold start and on returning from the background after a configurable idle period (Immediately / 1 / 5 / 15 / 30 minutes, default 5), with "Use PIN/passcode instead" through the OS device-credential fallback, failures explained in place, and a switch, idle picker and "Lock now" under More → Security. The preference lives in `shared_preferences` on the device; the API token is untouched; web and desktop never see the option. `test/deep_links_test.dart` drives it through a fake gate (19 tests). **Conditional access is not done and cannot be exercised here**: it is a property of the identity provider's own policy, and neither a Google account in this environment nor the minted token the tests use has one to follow |
 | MOB-06 | Platform conventions respected while keeping one visual identity | Must | R2 | Partial | Material 3, light and dark themes, bottom tabs on phone and one visual identity throughout. **Browser conventions, not platform ones: no back-gesture handling, no share sheet, no dynamic type** |
 | MOB-07 | Distributed through Intune and the public stores | Must | R2 | N/A | Needs an Intune tenant and store accounts, and there is no signing configuration or store metadata either. In its place: `flutter build web --release` served from a URL |
+
+### 2.12b The supply side: public holidays, patterns and leave balances (new)
+
+TEAM-02, TEAM-06 and TEAM-07 were all recorded Partial for the same underlying reason: the data
+existed and nothing could reach or complete it. This closes that.
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Public holidays reduce capacity | Done | `dbo.public_holidays` + `holiday_map()`; `derive_capacity()` writes 0/0 on a holiday, so it applies to everyone including later joiners, and nothing is stored against a person. `holidays.php import_uk` computes a year from the rules (`api/holidays_rules.php`) with no network call and no list to maintain — the seed uses the same function |
+| A working pattern can be edited in the client (TEAM-02) | Done | Was Partial: the edit dialog covered six fields and the pattern was a read-only row. `parts/tm_pattern_dialog.dart` edits all seven weekdays with presets, re-derives days per week, and the person page shows the entitlement beside it |
+| Weekend working | Done | `effective_working_days()` widens the day grid by any weekday a pattern gives hours to, in `derive_capacity()` and in the model's grid, so a Saturday worker's Saturdays carry real capacity instead of vanishing |
+| An availability record can be corrected (TEAM-07) | Done | Was N/A with the note "not deletable, not correctable". `people.php update_availability` corrects any source and re-derives both windows; `delete_availability` still refuses anything but `manual`. Both reachable from the person page |
+| Leave entitlement and balance | Done | `leave_balance()` counts booked leave in the person's own days — a Mon–Thu worker booking a week spends four, and a bank holiday inside a booking costs nobody anything. Shown on the person page with the copy saying it is for planning, not an HR record |
+| One implementation of "hours on a day" | Done | `day_hours()`. There were five, and two disagreed about overlapping leave (added-and-clamped when derived, multiplied in the model fallback). `capacity.php`, `model.php`, `watchlist.php` and `plan.php` now all call it |
+| Per-person hours where the workspace day was assumed | Done | `plan.php` lane headers counted weekdays × 7.5 (a part-timer read as over-loaded); `digest.php` counted weekdays (a Mon–Thu worker was told they had five days every week). Both now read the derived capacity |
+| Leave approval workflow | N/A | Out of scope by the requirements themselves (section 3 excludes being the system of record for leave approval). The balance is informational and says so |
+| Importing leave from HR (TEAM-07's first half) | Not done | There is still no importer. What changed is that an imported row can now be corrected once it is there |
+
+### 2.13 Resource requests and approval (new, beyond v0.1)
+
+Not in the requirements document. The gap it closes is real, though, and the document is close to
+naming it: CHG-07 asks for configurable approval, and the roles table gives a requester nothing to
+do after raising a work item. Until now the only way a named person got booked was the engine
+proposing it or a delivery lead dragging a block — a project owner could not ask for somebody, and
+the lead who actually manages that person had no say at all.
+
+| Capability | Status | Evidence |
+|---|---|---|
+| A requester asks for a named person for an amount of time on a work item | Done | `resource_requests.php create`, reached from the Requests panel on the work item screen (`Request a person`). A team lead may ask on anything; below that only on work you raised or own |
+| Hours become dates against that person's own capacity | Done | `requests_lib.php request_span()` reads `capacity_days`, skips days with no schedulable time and derives the allocation from the day set, so 7.5 hours from a Friday for a half-day-Friday worker books Friday and Monday at 76%, not two whole days. Asserted in `tests/resource_requests_test.php` |
+| A lead above that person approves, and one approval is enough | Done | `can_approve_request()` is ORG-05 applied to a person: `team_lead_chain()` of their team, or a delivery lead. The suite proves a lead of a sibling branch gets 403 naming who can decide, and that both the immediate lead and the lead above them can |
+| Approving books them into the committed plan | Done | `approve_request()` writes a new committed version through `new_committed_version()` with `fixed_person`/`fixed_dates` set, an already-decided manual proposal and its accepted change, `person_change_log`, the stability week and a batched replan trigger. The engine reproduces a fixed booking rather than planning it away |
+| Inside the freeze horizon a reason is required | Done | Same rule and message shape as `changes.php decide` and `plan.php move_assignment`; 409 with `reason_required`, and the client re-asks with the server's sentence |
+| Everyone who should hear about it, does | Done | `approval_requested` to the lead chain and the delivery leads, `item_assigned` to the person booked, `request_decided` to whoever asked — on approval, decline and expiry |
+| A request nobody decides is closed off | Done | `expire_requests()` in `replan.php run_nightly` (`steps.requests_expired`), asserted in `tests/engine_test.php` because `create` refuses a past start date |
+| Over-booking is reported, not prevented | Deliberate | A committed plan books people at or near 100%, so nearly every request lands on top of something. The preview and the approval response carry `fit` and `over_booked` and the next cycle moves lower-priority work; blocking would mean no request could be approved against a healthy plan |
+| Approver roles configurable | Not done | The lead chain is the rule, hardcoded, exactly as CHG-07 records for the rest of the approval model. There is no approver column on `scheduling_policies` and no action to set one |
+| Requesting a skill rather than a named person | Not done | v1 is a named person only. The engine already places by skill; asking for "anyone at Terraform L3" would be a different shape of request |
+
+### 2.14 Campaigns: sandbox workspaces (new)
+
+The requirement this answers is ADM-07, which the previous audit scored Partial for a precise
+reason: the isolation existed and nothing could use it.
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Make a second workspace | Done | `campaigns.php create` in three shapes — a full copy (people, pipeline and the committed plan), a config-only copy (everything needed to plan, no work), or the demo dataset. The demo path includes `seed_demo_content.php`, the same file the CLI seed uses, so a campaign's demo is the demo the tests run against |
+| Copy correctly | Done | `engine/workspace_clone.php` breaks the five circular references (users.person_id, teams.parent_team_id / lead_person_id, people.manager_person_id / role_family_id, role_families.lead_person_id) with a two-pass insert, and derives capacity rather than copying it. The suite checks the counts match and that every person still sits in a team and the team leads survived |
+| Move between them | Done | `switch` re-issues the session token for the target workspace; the client throws away the cached config and badge counts with it. A campaign token is only ever good for a campaign |
+| Know which universe you are in | Done | `auth.php me` carries `workspace.kind`, and `shell/campaign_banner.dart` puts an amber strip with a "Back to Live" button on **every** screen on both layouts. The account menu and the phone More page name the current workspace |
+| Isolation | Done | Row-level `workspace_id` scoping, unchanged. `tests/campaigns_test.php` renames WI-1042 inside a campaign and proves Live still reads the original, and that each token gets a 404 for the other's row |
+| Reset and delete | Done | `reset` empties and rebuilds in place, **keeping the workspace id** so links survive (the accounts inside are rebuilt with it, so the reply hands back a fresh token). `delete` removes everything. Both refuse the live workspace with 409, and are limited to whoever created the campaign or an administrator |
+| A sandbox cannot reach anything real | Done | Webhook subscriptions and intake sources are never copied (they carry signing secrets), nor are device registrations, calendar-feed tokens, notifications or the audit trail. The weekly digest and push dispatch skip campaigns; the nightly replan does not, because a sandbox that never re-plans is useless |
+| Signing in to a campaign directly | Not done, deliberately | Sign-in always lands in Live (ADM-01) and you switch from there. An account exists because somebody signed in with an identity the deployment accepts; letting a sandbox mint one would undo that |
+| A campaign with its own "today" | Not done | `today()` takes no workspace and is read in ~40 places. A campaign follows the same clock as Live |
 
 ## 3 Non-functional requirements
 
@@ -381,7 +443,8 @@ structurally met at the last audit no longer is.
 - **NFR-PERF-03 (50 lanes over 26 weeks without lag).** Not verified. The demo has 8 lanes; lanes
   render through a `ListView.builder` and the months zoom does draw 26 weeks.
 - **NFR-SCAL-01 (200 people, 5,000 items, 24 months of history, 20 workspaces).** Not verified, and
-  the last clause is contradicted by ADM-07 — one workspace is seeded and a user belongs to one.
+  the last clause is no longer contradicted by ADM-07: a person can belong to several workspaces, one
+  `users` row each, and move between them (campaigns).
 - **NFR-DATA-02 (audit kept 7 years, plan versions 24 months configurable).** Much improved, and now
   partly met by design rather than by accident. Three of the four clauses hold: the periods are real
   stored columns on `dbo.workspaces` with exactly the defaults the requirement names, they are
@@ -508,13 +571,22 @@ window rather than workspace-wide (REQ-02); drawing dependencies on the schedule
 or at least surfacing the commit cadence (STAB-05); attachments (PIP-09); and PDF export
 (VIEW-09's other half).
 
-Three things worth saying plainly to whoever picks this up. First, the previous audit's complaint
+Four things worth saying plainly to whoever picks this up. First, the previous audit's complaint
 about Settings → Integrations has been dealt with properly — it reads the table and reports the truth
-— and the contract gap that followed it has been closed too: `docs/API.md` now documents `v1.php`,
-`webhooks.php`, `calendar.php`, `intake.php`, `retention.php`, `role_families.php`, `org.php`, `digest.php` and
-`devices.php`, so every endpoint in `api/` appears in the contract. Second, `dev_login` still takes a user id and issues a token for them with no secret. That
-is correct for a local demo and is gated by `dev_login_enabled`, but it is the first thing that must
-be provably unreachable before this goes anywhere near a real tenant. Third, the two rows that moved
-down this time (EST-09, STAB-10) and the one re-read more strictly (REQ-02) are not regressions in
-the code; they are the same rule applied consistently. A policy an administrator cannot reach is no
-more usable than an endpoint no screen calls.
+— and the contract gap that followed it has been closed too: `docs/API.md` documents every endpoint in
+`api/`, including `resource_requests.php`, `holidays.php` and `campaigns.php`.
+
+Second, **the sentence that used to stand here about `dev_login` was out of date and has gone.** There
+is no development sign-in and no `dev_login_enabled` switch; the ADM-01 row has said so since Google
+sign-in landed, and this paragraph had not caught up. What is worth watching in its place is
+`tests/mint_token.php`, which issues a token from the database with no credential: it is CLI-only and
+uses the admin connection, and it must stay that way.
+
+Third, the rows that moved down in earlier audits (EST-09, STAB-10) and the one re-read more strictly
+(REQ-02) are not regressions in the code; they are the same rule applied consistently. A policy an
+administrator cannot reach is no more usable than an endpoint no screen calls.
+
+Fourth, three of the capabilities in this release — resource requests, the supply-side calendar and
+campaigns — answer needs the requirements document either names loosely (CHG-07, ADM-07) or does not
+name at all. They are written up as sections 2.12b, 2.13 and 2.14 with the same unkind status column,
+including what they deliberately do not do.

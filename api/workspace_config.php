@@ -245,10 +245,25 @@ if ($action === 'save_workspace') {
     if (param('working_days') !== null) { $wd = param('working_days'); $data['working_days'] = is_array($wd) ? implode(',', $wd) : $wd; }
     if (param('hours_per_day') !== null) $data['hours_per_day'] = (float)param('hours_per_day');
     if (param('currency') !== null) $data['currency'] = strtoupper(substr(trim(param('currency')), 0, 3));
+    if (param('leave_year_start_month') !== null) {
+        $m = (int)param('leave_year_start_month');
+        if ($m < 1 || $m > 12) fail('leave_year_start_month must be 1 to 12', 400);
+        $data['leave_year_start_month'] = $m;
+    }
+    if (param('default_annual_leave_days') !== null) $data['default_annual_leave_days'] = max(0, (float)param('default_annual_leave_days'));
     update($conn, 'workspaces', $data, 'id = ?', [$wsId]);
     $after = workspace_row($conn, $wsId);
     audit($conn, $wsId, 'config', 'workspace', $wsId, $before, $after, $after['name']);
-    ok(['workspace' => get_config($conn, $wsId)['workspace']]);
+    // The working week and the length of a day decide what every derived capacity row is worth.
+    // Changing them without rewriting those rows left the whole plan costed against the old week.
+    $rewritten = 0;
+    if ((array_key_exists('working_days', $data) && $data['working_days'] !== $before['working_days'])
+        || (array_key_exists('hours_per_day', $data) && (float)$data['hours_per_day'] !== (float)$before['hours_per_day'])) {
+        workspace_working_days($conn, $wsId, true);
+        $to = date('Y-m-d', strtotime(week_start(today()) . ' +' . (int)current_policy($conn, $wsId)['model_horizon_weeks'] . ' weeks'));
+        $rewritten = derive_capacity($conn, $wsId, today(), $to);
+    }
+    ok(['workspace' => get_config($conn, $wsId)['workspace'], 'capacity_days_rewritten' => $rewritten]);
 }
 
 if ($action === 'save_day_rate') {

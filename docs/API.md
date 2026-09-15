@@ -60,7 +60,8 @@ provider in use; the Entra path is verified and waiting for a tenant.
   to the `people` row with the same work address if there is one. 501 when no `google.client_ids` are configured.
 - `oidc_login{id_token}` → the same for Entra ID, plus `group_roles` mapping, which may only *raise* a role. 501 until
   `entra.tenant_id` and `entra.client_id` are set.
-- `me` → `{user}` including `auth_provider`.
+- `me` → `{user}` including `auth_provider`, and `user.workspace` carrying `kind` (`live`|`campaign`), `description`,
+  `seeded_from` and `source_workspace_id` — what the client's campaign banner reads (ADM-07).
 - `list_users` (team_lead) → `{users:[{id, email, display_name, short_name, role, active, auth_provider, person_id, person_name, initials, colour, role_title, team_name, created_at}], roles:[the seven, in rank order]}`. Seeing who is in the workspace and what role they hold is not restricted; changing a role is.
 - `set_role{user_id, role, reason?}` (admin) → `{user}`. 400 for an unknown role, 409 when the only administrator would
   demote themselves out of the workspace. Audited. `auth_middleware.php` re-reads the role on every request, so it applies
@@ -68,6 +69,65 @@ provider in use; the Entra path is verified and waiting for a tenant.
 
 Tests cannot perform a Google sign-in, so they mint a token directly with `tests/mint_token.php` (CLI only, admin
 database connection) and `tests/_auth.php` wraps it as `token_for($role)` / `token_for_email($email)`.
+
+## campaigns.php — sandbox workspaces alongside the live one (ADM-07)
+
+A **campaign** is a place to try something — a reorganisation, a quarter's worth of new intake, the
+app itself — without touching the plan people are working to. It is a real workspace with
+`kind = 'campaign'`, isolated by the same row-level `workspace_id` scoping every query already
+applies: nothing in a campaign can reach Live and nothing in Live can see it.
+
+**Identity is the lower-cased email address; membership is a `users` row per workspace.** That is
+what keeps a role, a linked person, notification preferences and devices per workspace, and it is
+why `switch` **re-issues** the session token for the target rather than widening the one already
+held — a campaign token is only ever good for a campaign. Signing in is unchanged and always lands
+in Live (ADM-01): an account there exists because somebody signed in with an identity this
+deployment accepts, and no campaign can create one.
+
+Who may go where: anybody with a `users` row there; the person who created a campaign; and any
+member of a campaign's **source** workspace when it is `open_to_all`, which creates their row on
+first entry carrying the role they hold in the workspace they came from.
+
+```
+Campaign {id, name, kind:'live'|'campaign', description, source_workspace_id, source_name,
+          seeded_from:'full'|'config'|'demo', open_to_all, created_by_email, created_at,
+          member, my_role, people_count, items_count, can_reset, can_delete, is_current}
+```
+
+- `list` → `{current: Campaign, workspaces:[Campaign], can_create, note}` — every workspace this
+  person may enter, Live first. `can_*` are about the caller, so the client hides controls.
+- `create{name, description?, mode:'full'|'config'|'demo', source_workspace_id?, open_to_all?}`
+  (delivery_lead) → `{workspace, token, user}`. **The token is for the new workspace**, so creating
+  one puts you in it. Three shapes:
+  - `full` — the vocabulary, policy, skills, teams, people, availability, the pipeline and **the
+    committed plan**. The closest thing to trying something for real.
+  - `config` — everything you need to plan with and no work: no items, no plan.
+  - `demo` — the seeded worked example, built by including the same `seed_demo_content.php` the CLI
+    seed uses, so a campaign's demo is the demo the tests run against.
+  409 on a duplicate name; 403 when copying a workspace you are not in.
+- `switch{workspace_id}` → `{token, user, workspace}`, or `{already_here:true}` for the current one.
+  403 when not a member of a workspace that is not open to join.
+- `update{workspace_id, name?, description?, open_to_all?}` → `{workspace}`.
+- `reset{workspace_id}` → `{workspace, token}`. Empties it and rebuilds it from whatever
+  `seeded_from` records. **It keeps the same workspace id**, so links and bookmarks survive — but the
+  accounts inside are rebuilt with everything else, so tokens issued before the reset are spent and
+  the reply carries a fresh one.
+- `delete{workspace_id, reason?}` → `{deleted, name, switch_to}`.
+- `update`, `reset` and `delete` **refuse the live workspace with 409**, and are limited to whoever
+  created the campaign or an administrator.
+
+**What a campaign never copies**: webhook subscriptions and intake sources (they carry signing
+secrets — a sandbox that could post to a real endpoint is not a sandbox), device registrations,
+calendar-feed tokens, notifications, the audit trail, proposals and plan history. A full copy takes
+the *committed* plan only, as version 1.
+
+**Scheduled jobs**: the nightly replan and the retention purge run for campaigns, because a sandbox
+that never re-plans is useless. The **weekly digest and push notifications skip them** — nobody
+wants a Friday email about a plan that is not real. An administrator inside a campaign can still
+send its digest by hand, because `send` acts on the workspace their own token names.
+
+`auth.php me` returns `workspace.kind`, `description`, `seeded_from` and `source_workspace_id`, which
+is what the client's campaign banner reads.
 
 ## workspace_config.php — workspace vocabulary and policy (CFG-*)
 (Named `workspace_config.php` because `api/config.php` is the gitignored secrets file.)
@@ -81,7 +141,11 @@ database connection) and `tests/_auth.php` wraps it as `token_for($role)` / `tok
   `priority_weights` keys: `value, urgency, riskCompliance, dependencyLeverage, age, confidenceScale{high,medium,low}, severityScores{P1..P4}` and, for BEN-02,
   `qualitativeValuePerPoint` — the currency-equivalent of one qualitative scale point for a non-financial benefit with no proxy value (default 25000, read by `engine/priority.php` and `benefits.php`).
 - `export` → `{config: {...Appendix A JSON shape}}`; `import{config}` (admin, CFG-10).
-- `save_workspace{name, time_zone, working_days, hours_per_day, currency}` (admin)
+- `save_workspace{name, time_zone, working_days, hours_per_day, currency, leave_year_start_month, default_annual_leave_days}` (admin)
+  → `{workspace, capacity_days_rewritten}`. **Changing `working_days` or `hours_per_day` re-derives every capacity day**
+  over the modelled horizon — they decide what a day is worth, and leaving the derived rows behind costed the whole
+  plan against the old week. `leave_year_start_month` (1–12) and `default_annual_leave_days` are what a leave balance
+  is measured against when a person has no entitlement of their own.
 - `save_day_rate{id?, name, rate, currency, effective_from, is_blended}` (admin)
 
 ## people.php — team, skills, availability, loans (TEAM-*)
@@ -95,8 +159,16 @@ database connection) and `tests/_auth.php` wraps it as `token_for($role)` / `tok
 - `set_skill{person_id, skill_id, proficiency, certified?, development_target?, pairing_enabled?}` (own or team_lead)
 - `endorse_skill{person_id, skill_id}` (team_lead) appends endorser.
 - `add_availability{person_id, from_date, to_date, type, fraction?}` (own or team_lead) → recompute capacity_days for the range; add trigger `leave` (class urgent if from_date within freeze horizon, else batched). NEVER store a reason (ADM-05). An urgent trigger also starts a scoped replan cycle immediately (STAB-05) and the reply carries `urgent_replan:{proposal_id, changes, held, scope_person_ids}` (or `{skipped}` when there was nothing to replan). A failure there never fails this request.
+- `update_availability{id, from_date?, to_date?, type?, fraction?}` (own or team_lead) → `{availability, days_written, trigger, freeze_horizon_end, urgent_replan?}`.
+  TEAM-07 says an imported record "can be corrected but not deleted locally", and until now there was no way to correct
+  one — so an HR row with the wrong dates could only be left wrong. **Any source may be corrected here**; the reason is
+  still never stored (ADM-05). Both the old window and the new one are re-derived, because shortening leave hands days back.
 - `delete_availability{id}` (409 if source != manual — imported records can be corrected not deleted, TEAM-07)
 - `set_rota{week_start, person_id}` / `clear_rota{week_start, person_id}` (team_lead) → recompute capacity.
+- `get{id}` also returns `leave: {leave_year_from, leave_year_to, entitlement_days, entitlement_source:'person'|'workspace',
+  booked_days, taken_days, upcoming_days, remaining_days, note}` — the leave year and what is booked in it. **Days are that
+  person's own**: somebody who works Mon–Thu and books Mon–Fri off has spent four, and a public holiday inside a booking
+  costs nobody any leave. Informational: Dispatch is not the system of record for leave approval, and nothing here blocks a booking.
 - `capacity{person_id?, from, to, team_id?}` → `{days:[{person_id, day, available_hours, reserve_hours, assigned_hours, team_share?, team_available_hours?}]}`. With `team_id`, each day also says what share of it belongs to that team (1 for a home member with no loan, the loan's share for a borrowed person or a lent one, 0 when the person is entirely elsewhere) and the hours that share is worth. `capacity_days` itself never changes for a loan.
 - `recompute_capacity{from?, to?}` (team_lead) → derives capacity_days for everyone (TEAM-10) → `{days_written}`
 
@@ -115,6 +187,38 @@ organisation chart is not, and an outstanding loan blocks such a move until some
 - `add_loan{person_id, to_team_id, from_date, to_date, allocation_pct?=100, reason?}` (delivery_lead+, or a team_lead whose own person sits in or leads either team) → `{loan, trigger:{id, class}, freeze_horizon_end, urgent_replan?}`. The person's current team is the lending team. 400 when `to_date < from_date`, the share is outside 1..100, or the target is the person's own team; 409 with `{overlaps: Loan}` when it overlaps another loan of the same person (a person is lent to one place at a time). Audited; raises a `leave`-class trigger for the person — batched, or **urgent when from_date is inside the freeze horizon** (the same rule as `add_availability`), in which case a scoped cycle starts and `urgent_replan` reports it (a whole-workspace cycle moves nothing for a loan and reports `skipped`).
 - `end_loan{id, to_date?}` (same authority) → `{loan, trigger}`. Ends a loan early: `to_date` must satisfy `from_date ≤ to_date ≤ current to_date` (400 otherwise — extending is a new loan); omitted, the loan ends yesterday. A loan that happened is history and is never deleted; a loan that has **not started yet** is cancelled outright (`{loan:null, cancelled:true}`). Audited; `leave` trigger, urgent when the days handed back fall inside the freeze horizon.
 - `loans{person_id? | team_id?, from?, to?}` → `{loans:[Loan], window}` — loans touching the window (default today to the end of the modelled horizon); `team_id` matches the lending or the borrowing side.
+
+## holidays.php — the public-holiday calendar (TEAM-06, the supply side)
+
+A public holiday is a property of the calendar, not of anybody's plans, so it is **never written
+into `dbo.availability` per person**. `derive_capacity()` reads `dbo.public_holidays` directly,
+which means a day entered here is zero hours for everyone it applies to — including people added
+to the workspace afterwards. Nobody has to remember to book Christmas off for a new joiner.
+
+Reading is open to every signed-in role: a bank holiday is not a secret and every screen that draws
+a week needs it. Writing is **admin**, because it changes everyone's capacity at once, and every
+write re-derives the affected capacity days and reports how many (`capacity_days_rewritten`).
+
+`region` is `null` for "everyone in this workspace", or one of `england-and-wales | scotland |
+northern-ireland` when a workspace spans nations that do not share a calendar; a person's
+`people.holiday_region` selects their set, and `null` there takes the workspace-wide days.
+
+- `list{from?, to?}` → `{holidays:[{id, day, label, region, region_label, source, created_at}], window, regions, regions_in_use, can_edit, note}`.
+  Defaults to this year and next. `can_edit` lets the client hide the controls rather than rely on a 403.
+- `regions` → the three nations and their labels, so the client does not invent them.
+- `save{id?, day, label, region?}` (admin) → `{holiday, capacity_days_rewritten}`. 400 for a
+  malformed date or an unknown region; **409 when that day already has a holiday for that region**.
+- `delete{id}` (admin) → `{deleted, capacity_days_rewritten}`.
+- `import_uk{year, region?='england-and-wales', per_region?=false}` (admin) →
+  `{added, already_there, year, region, capacity_days_rewritten, holidays}`.
+  **The dates are computed, not fetched.** `api/holidays_rules.php` derives them from the rules that
+  define them: Easter by the anonymous Gregorian algorithm, Good Friday and Easter Monday from it,
+  the first or last Monday of a month, St Andrew's Day and the Battle of the Boyne where they apply,
+  and a substitute weekday whenever a fixed date lands at a weekend or on a day already taken. No
+  network call, no list anybody has to extend each December, and the seed uses the same function so
+  the demo and the importer cannot drift apart. `per_region: true` stores the nation on each row;
+  by default the days are stored with no region, because one nation in a workspace means they belong
+  to everybody. Re-importing the same year adds nothing and reports it as `already_there`.
 
 ## skills.php — catalogue + matrix (TEAM-01, TEAM-04)
 - `list{team_id?, role_family_id?, include_retired?}` → `{skills:[{id,name,category,description,retired,people_at_3_plus,demand_days_6w,supply_days_6w,single_point}], scope}`
@@ -268,6 +372,86 @@ hold something back from the delivery lead is most of the point.
   `reestimate` entries (EST-09) are added by this endpoint only, from `reestimate_class_threshold`; `overview.php`
   builds its watch list from `engine/watchlist.php` and does not carry them.
 
+## resource_requests.php — asking for a person, and approving it (demand side)
+
+A project owner asks for a named person for an amount of time on a work item ("Priya for 7.5 hours on
+WI-1042 from Monday"); a lead **above that person** says yes, and the booking lands in the committed
+plan. It is the one route into the plan besides `plan.php move_assignment`, and it works the same way:
+a new committed version (CHG-05) carrying a **fixed** assignment (SCH-06), recorded as an
+already-decided manual proposal so it shows in history like any other change. The engine still never
+edits the committed plan — a person does.
+
+**Hours, not dates, are the unit of the ask.** The span is derived from the person's own
+`capacity_days`: 7.5 hours from a Friday for somebody who works Friday mornings lands on Friday *and*
+Monday, and the allocation is whatever books 7.5 hours across those two days — never 100% of both.
+A request for hours books those hours, so approving one cannot quietly swallow a day of the plan.
+
+**Authority (ORG-05, applied to a person rather than a team).** A delivery lead or administrator may
+decide anything; a team lead may decide for the team they lead and every team beneath it, because they
+appear in `team_lead_chain()` of each. **One approval is enough** — the chain is the list of people who
+*may* say yes, not a queue who all must. A person with no home team has no lead, so only a delivery
+lead can book them. A team-lead account with no linked person passes on role alone, as
+`can_edit_team()` and `require_loan_authority()` already do.
+
+**Not fitting is not a refusal.** A committed plan books people at or near 100%, so almost every
+request lands on top of something. That is exactly what the approver is deciding about: the response
+reports `fit` and `over_booked`, the approval goes through, and a batched replan trigger lets the next
+cycle move the lower-priority work out of the way. The only hard refusal at approval time is a span
+that can no longer be computed at all (leave booked since, pattern changed, dates run out), which
+answers 409 with `refit_failed` unless `force: true`.
+
+```
+Request {id, work_item:{id, ref, title, status, type_colour, type_name},
+         person:{id, name, initials, colour, team_id, team_name},
+         requested_by:{id, name}, hours, from_date, to_date, allocation_pct, note, status,
+         decided_by_name, decided_at, decision_reason, plan_version_id, assignment_id, created_at,
+         can_approve, can_withdraw, approver_label}
+Span    {from, to, allocation_pct, schedulable_hours, booked_hours,
+         days:[{day, schedulable, committed_pct, free_pct, free}]}
+Fit     {fits, free_hours, short_hours, conflicts:[{ref, title, from, to, allocation_pct}]}
+```
+`schedulable` is `available − reserve` for that person-day; `committed_pct` / `free_pct` are shares of
+the person's whole day, which is what `assignments.allocation_pct` means everywhere else. `status` is
+`pending | approved | declined | withdrawn | expired`. `can_approve` / `can_withdraw` are about the
+caller, so the client hides controls rather than relying on 403s (ADM-02).
+
+- `preview{work_item_id, person_id, hours, from_date, to_date?, allocation_pct?}` (requester) →
+  `{span, fit, inside_freeze, freeze_end, approver_label, on_loan}`. Writes nothing. `approver_label`
+  reads "Lena Torres, Priya Kaur or a delivery lead", so the asker knows who they are waiting on.
+- `create{…the same, note?}` (requester) → `{request, notified, span, fit, inside_freeze, approver_label}`.
+  A team lead may ask for anyone on anything; below that you may only ask on work you raised or own —
+  the rule `work_items.php update` already applies (403 otherwise). 400 for hours ≤ 0, a start date
+  before today, or an end date before the start; 404 for an item or person outside the workspace; 409
+  when the item is delivered or cancelled, the person is inactive, the person is on loan to another
+  team for the whole span (TEAM-09, with the loan named), the hours do not fit between the given
+  dates, or **a pending request for the same person on the same item already overlaps those dates** —
+  asking twice is a mistake, not a queue. Raises `approval_requested` (NOT-01, urgent inside the
+  freeze horizon) to the lead chain and every delivery lead; `notified` counts the rows actually
+  written, so a recipient who has turned the kind off is not reported as told. Audited.
+- `list{view:'mine'|'for_me'|'all', status?, work_item_id?, person_id?, limit?}` →
+  `{requests:[Request], counts:{pending_for_me, mine_pending}}`. `mine` is what I asked for; `for_me`
+  is only what I could actually decide (a lead's own sub-tree, everything for a delivery lead), so it
+  is an approval queue rather than a list to filter by hand; `all` needs team_lead. `counts` feeds the
+  nav badge.
+- `get{id}` → `{request}`.
+- `approve{id, reason?, force?}` → `{request, plan_version:{id, assignment_id}, headline,
+  stability_cost_days, inside_freeze, over_booked, fit}`. 403 naming the lead chain when the caller is
+  not one of them; 409 when the request is already decided. **Inside the freeze horizon a `reason` is
+  required** (409 `reason_required`, the same rule as `changes.php decide` and `plan.php
+  move_assignment`). Writes the committed version, the manual proposal and its accepted change, a
+  `person_change_log` row and the stability week; notifies the person (`item_assigned`) and the asker
+  (`request_decided`); raises a batched replan trigger. Audited as `approve`.
+- `decline{id, reason}` → `{request}`. The reason is **required** (422): the person who asked has to
+  know why. Notifies the asker; audited as `reject`.
+- `withdraw{id}` (the asker, or a delivery lead) → `{request}`.
+
+`replan.php run_nightly` expires pending requests whose start date has passed
+(`steps.requests_expired`), telling the asker — a request nobody decided is closed off rather than
+left to rot.
+
+Notification kinds used: `approval_requested` (to the approvers), `item_assigned` (to the person
+booked) and `request_decided` (to whoever asked — approved, declined or expired).
+
 ## changes.php — proposals and review (CHG-*)
 - `current` → `{proposal:{id, kind, generated_at, status, triggers:[{type,label}], summary_before, summary_after, improvement_pct, below_threshold, carried_over_note, budget:{used, limit, per_person:[{person, used}]}}, changes:[Change], held:[Change], awaiting_ack:[Change], guardrails:[{key,label,detail,enabled}], counts:{proposed, held, pending, awaiting_ack}}` — the open proposal (or the latest decided one with `status`).
   `awaiting_ack` lists the committed changes whose affected person has not acknowledged them yet (CHG-06); it is
@@ -297,9 +481,9 @@ hold something back from the delivery lead is most of the point.
 
 ## notifications.php
 - `list` → `{notifications:[{id, kind, title, body, link, urgent, channel, created_at, read_at, read}], unread}`; `mark_read{id|all}`; `prefs` / `save_prefs{kind, in_app, push, email_digest, teams, digest}`
-- Eight kinds, all of them generated: the seven of NOT-01 — `change_proposed` and `approval_requested` by `replan.php propose`;
-  `change_committed` and `item_assigned` by `changes.php commit`; `estimate_requested` by `work_items.php`
-  (`request_estimate`, or any move into `needs_estimate`); `realisation_due` and `watch_list` by `replan.php run_nightly` — plus
+- Nine kinds, all of them generated: the seven of NOT-01 — `change_proposed` and `approval_requested` by `replan.php propose` (and `approval_requested` again by `resource_requests.php create`);
+  `change_committed` and `item_assigned` by `changes.php commit` (and by an approved resource request); `estimate_requested` by `work_items.php`
+  (`request_estimate`, or any move into `needs_estimate`); `realisation_due` and `watch_list` by `replan.php run_nightly` — plus `request_decided` (`resource_requests.php`, when a request you raised is approved, declined or expires) and
   `digest`, the weekly digest itself when it is delivered in-app (NOT-04, `digest.php`). The `in_app` switch on `digest` decides whether a
   digest that cannot be emailed is written at all; `email_digest` on *any* kind makes the user a recipient of the weekly run.
 - `lib.php notify()` reads `dbo.notification_prefs` before writing (NOT-02). The row is the in-app copy, so in-app is
@@ -383,6 +567,13 @@ and an opaque `cursor` returned as `page.next_cursor`.
 ## Engine library (api/engine/) — pure PHP, no HTTP
 - `org_lib.php` (required by capacity.php, so every endpoint that includes that has it): `team_closure($conn,$wsId,$fresh=false)` reads the whole tree once per request — anything that writes `parent_team_id`, `sort_order`, `lead_person_id` or `visibility` must call it again with `$fresh=true`, the rule `current_policy()` follows. Then `team_descendants`, `team_ancestors`, `team_is_within` (the cycle guard), `team_lead_chain`, `team_path`, `team_restricted_by`, `team_visible_to($conn,$wsId,$teamId,$role,$personId)` (ORG-04), `can_edit_team` / `require_team_authority` / `editable_team_ids` (ORG-05), `validate_manager` (no loops), and `move_person_home_team(...)` — shared by `org.php move_person` and `people.php save`, so a drag on the chart and an edit in the person dialog obey the same loan rules and write the same audit entry. Every walk is cycle-safe: the API prevents cycles, the schema cannot, and a walk that looped would hang a request rather than return a wrong answer.
 - `capacity.php`: `derive_capacity($conn,$wsId,$from,$to,$personIds=null)` writes capacity_days. TEAM-09 / ORG-01: `scope_team_ids($conn,$wsId,['team_id'|'role_family_id'])` → `{kind, team_id, role_family_id, name, team_ids, person_ids}` (a team scope carries the team and its descendants; a role family carries people and leaves `team_ids` null), with `scope_public`, `scope_is_partial`, `scope_pool` and `scope_load` wrapping it; `loans_in_window(...)`, `team_pool($conn,$wsId,$teamIds,$from,$to,$personIds=null)` (home members + loaned-in people, with their loans — or a named set of people, all home), `team_share_for($poolEntry,$day)` (0..1 share of that person-day belonging to the set), `team_load(...)` (share-weighted capacity, assigned hours and load per person and in total).
+- `capacity.php` also carries the supply side's one piece of arithmetic: `day_hours($pattern, $dow, $awayFractions, $isHoliday)` —
+  the pattern's hours for that weekday, less the share of the day the person is away, and zero on a public holiday. There used to be
+  five copies of this and two disagreed (derive_capacity ADDED overlapping availability fractions and clamped at 1; the model fallback
+  MULTIPLIED them), so two half-days off read as a whole day in one place and a quarter day in the other. `holiday_map()` /
+  `holiday_label()` resolve the calendar; `effective_working_days($workspaceDays, $patterns)` widens the workspace week by any weekday
+  somebody's own pattern gives hours to, which is what lets a Saturday worker exist; `leave_balance($conn,$wsId,$personId,$asOf?)`
+  counts booked leave in that person's own days.
 - `priority.php`: `compute_priority_scores($conn,$wsId)` implements section 8.4 (value 40 / urgency 25 / risk 15 / leverage 10 / age 10, confidence scale, P90 normalisation, severity for interrupt types, override, nightly rescale so top ≈ 100). Stores priority_score + priority_terms JSON `{value:{input,normalised,weight,contribution}, urgency:{...}, risk:{...}, leverage:{...}, age:{...}, override:{...}, raw_total, scaled}`.
   BEN-02: the Value term sums, per benefit and confidence-scaled, `annual_value` for a financial benefit and `proxy_value ?? qualitative_scale × qualitativeValuePerPoint` for a
   non-financial one (`items_lib.php benefit_priority_value()`; the per-point default is `priority_weights.qualitativeValuePerPoint`, 25000 when unset). The term records its
@@ -394,6 +585,12 @@ and an opaque `cursor` returned as `page.next_cursor`.
   five planned terms reproduces the score instead of drawing five empty bars; anything summing the terms must skip a
   term carrying `alias_of`.
 - `model.php`: `build_model($conn,$wsId,$opts)` → arrays: people (capacity per day incl. reserve and the scope's `share`, skills, maxConcurrent, minFocus, prefs, `home`, `loans`), items (remaining effort per policy planAt, granularity, required skills, deps, earliest start, needed_by, priority, interrupt flag, `external`), committed assignments, policy, windows, `scope`. `$opts.team_id` builds a model of that team and every team beneath it, `$opts.role_family_id` one of a discipline's people (SCH-13, ORG-01/02); neither = the whole workspace as one pool. Returns null for an unknown workspace, team or role family.
+- `workspace_clone.php`: `clone_workspace($conn,$srcWsId,$opts)` copies a workspace (mode `full` or `config`) into a new one, breaking the
+  five circular references — users.person_id, teams.parent_team_id / lead_person_id, people.manager_person_id / role_family_id,
+  role_families.lead_person_id — by inserting them NULL and filling them in a second pass, and deriving capacity rather than copying it;
+  `seed_demo_into($conn,$wsId)` fills an empty workspace by including `seed_demo_content.php`, the same file the CLI seed uses;
+  `delete_workspace_contents($conn,$wsId,$keepWorkspaceRow?)` empties one in foreign-key order and refuses the live workspace.
+- `requests_lib.php`: the demand side. `request_span($conn,$wsId,$personId,$hours,$from,$to?,$alloc?)` turns hours into a dated span against that person's own capacity_days (skipping days with no schedulable time, and deriving the allocation from the day set so the span books the hours asked for and no more); `request_fit(...)` reports what it collides with; `can_approve_request($conn,$wsId,$personId)` is ORG-05 applied to a person (the lead chain of their team, or a delivery lead); `request_approver_people/_user_ids/_label(...)` say who that is; `approve_request($conn,$wsId,$req,$reason,$force)` writes the committed version, the manual proposal and its accepted change, the notifications and the replan trigger; `expire_requests($conn,$wsId)` is the nightly close-off. Shared by resource_requests.php and replan.php.
 - `commit.php`: `commit_proposal($conn,$wsId,$proposal,$opts)` materialises accepted changes into a new committed version (CHG-05/06, EST-09, NOT-01); `auto_apply_outside_horizon($conn,$wsId,$proposalId)` is the nightly CHG-07 pass; `reestimate_blocked_changes(...)` is the EST-09 gate. Shared by changes.php and replan.php.
 - `planner.php`: `heuristic_plan($model, $opts)` list scheduling per 8.9 (respects all hard constraints in 8.5; incoming work the policy counts as small — `remaining_days <= small_fill_threshold_days` — is queued ahead of larger incoming work so it fills the gaps the kept committed work leaves (STAB-10); never moves committed/locked; extend-in-place for upward re-estimates (STAB-09); incidents consume reserve then displace lowest-priority planned work of that person (SCH-10); `scope_person_ids` for urgent cycles) → candidate assignments + unscheduled reasons + objective terms (8.6).
 - `diff.php`: `diff_plans($committed,$candidate,$model)` → list of changes with kind, before/after, stability_cost_days (assignment-days moved inside committed+planned windows; indicative = 0), inside_freeze, affected people; `objective_delta`.

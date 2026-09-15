@@ -15,7 +15,9 @@ $limit = 50;
 foreach (array_slice($argv, 1) as $arg) if (preg_match('/^--limit=(\d+)$/', $arg, $m)) $limit = (int)$m[1];
 
 $out = [];
-foreach (xrows($conn, "SELECT id FROM dbo.workspaces ORDER BY id") as $w) {
+// Live only. A campaign never copies webhook subscriptions (they carry signing secrets), so this
+// changes nothing today — but a sandbox that could post to a real endpoint would not be a sandbox.
+foreach (xrows($conn, "SELECT id FROM dbo.workspaces WHERE ISNULL(kind, 'live') = 'live' ORDER BY id") as $w) {
     $out[] = webhook_run($conn, (int)$w['id'], $limit);
 }
 echo '[' . date('Y-m-d H:i:s') . '] ' . json_encode(['status' => 'ok', 'workspaces' => $out], JSON_UNESCAPED_SLASHES) . "\n";

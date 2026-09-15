@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'parts/campaign_dialogs.dart';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -40,6 +41,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'Integrations',
     'Notifications',
     'Audit log',
+    'Calendar & leave',
+    'Campaigns',
   ];
 
   /// Sections whose edits accumulate in [_policyDraft] rather than saving as
@@ -91,7 +94,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  bool get _dirty => _section == 0 ? _wsDraft.isNotEmpty : (_policySections.contains(_section) && _policyDraft.isNotEmpty);
+  /// Sections whose fields live on the workspace row rather than the policy.
+  bool get _isWorkspaceSection => sections[_section] == 'General' || sections[_section] == 'Calendar & leave';
+
+  bool get _dirty => _isWorkspaceSection ? _wsDraft.isNotEmpty : (_policySections.contains(_section) && _policyDraft.isNotEmpty);
 
   void _discard() {
     setState(() {
@@ -103,7 +109,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      if (_section == 0) {
+      if (_isWorkspaceSection) {
         await Api.post('workspace_config.php', 'save_workspace', Map<String, dynamic>.from(_wsDraft));
         if (mounted) tmToast(context, 'Workspace saved');
       } else {
@@ -203,7 +209,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         7 => const _TeamsRolesSection(),
         8 => _IntegrationsSection(rows: c.integrations),
         9 => const _NotificationDefaultsSection(),
-        _ => const _AuditLogSection(),
+        10 => const _AuditLogSection(),
+        11 => _CalendarLeaveSection(config: c, isAdmin: isAdmin, draft: _wsDraft, onChange: _setWs, onReload: _load),
+        _ => const _CampaignsSection(),
       };
 }
 
@@ -2187,4 +2195,481 @@ class _Config {
         integrations: [for (final r in (j['integrations'] as List? ?? const [])) if (r is Map) Map<String, dynamic>.from(r)],
         incidentWorkTypeId: asInt(j['incident_work_type_id']),
       );
+}
+
+// ─── Calendar & leave ─────────────────────────────────────────────────────
+
+/// The workspace calendar: the leave year, the default entitlement and the public holidays.
+///
+/// A public holiday here is zero hours for everyone it applies to, on the day it falls, for ever.
+/// It is never written against a person, so somebody who joins in November still has Christmas
+/// off. The dates are computed from the rules that define them rather than typed in, which is why
+/// importing a year needs only a year.
+class _CalendarLeaveSection extends StatefulWidget {
+  const _CalendarLeaveSection({required this.config, required this.isAdmin, required this.draft, required this.onChange, required this.onReload});
+  final _Config config;
+  final bool isAdmin;
+  final Map<String, dynamic> draft;
+  final void Function(String, dynamic) onChange;
+  final Future<void> Function() onReload;
+
+  @override
+  State<_CalendarLeaveSection> createState() => _CalendarLeaveSectionState();
+}
+
+class _CalendarLeaveSectionState extends State<_CalendarLeaveSection> {
+  List<Map<String, dynamic>> _holidays = const [];
+  List<Map<String, dynamic>> _regions = const [];
+  bool _loading = true;
+  bool _busy = false;
+  String? _error;
+
+  static const _months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final r = await Api.post('holidays.php', 'list');
+      if (!mounted) return;
+      setState(() {
+        _holidays = [for (final h in (r['holidays'] as List? ?? const [])) if (h is Map) Map<String, dynamic>.from(h)];
+        _regions = [for (final h in (r['regions'] as List? ?? const [])) if (h is Map) Map<String, dynamic>.from(h)];
+        _loading = false;
+        _error = null;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _post(String action, Map<String, dynamic> body, String done) async {
+    setState(() => _busy = true);
+    try {
+      final r = await Api.post('holidays.php', action, body);
+      if (!mounted) return;
+      final rewritten = asIntOr(r['capacity_days_rewritten'], 0);
+      tmToast(context, rewritten > 0 ? '$done · $rewritten capacity days recalculated' : done);
+      await _load();
+      if (mounted) await widget.onReload();
+    } on ApiException catch (e) {
+      if (mounted) tmToast(context, e.message, bad: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _import() async {
+    final year = DateTime.now().year;
+    final choice = await showDialog<_ImportChoice>(
+      context: context,
+      builder: (context) => _ImportHolidaysDialog(year: year, regions: _regions),
+    );
+    if (choice == null || !mounted) return;
+    await _post('import_uk', {'year': choice.year, 'region': choice.region}, 'Bank holidays imported');
+  }
+
+  Future<void> _add() async {
+    final entry = await showDialog<_HolidayEntry>(context: context, builder: (context) => const _AddHolidayDialog());
+    if (entry == null || !mounted) return;
+    await _post('save', {'day': entry.day, 'label': entry.label}, 'Holiday added');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ws = widget.config.workspace;
+    final isAdmin = widget.isAdmin;
+    String v(String key, String? current) => (widget.draft[key] ?? current ?? '').toString();
+    final startMonth = int.tryParse(v('leave_year_start_month', asStr(ws['leave_year_start_month']))) ?? 1;
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Panel(
+        title: 'Leave year',
+        subtitle: 'What a balance is measured against. Dispatch is not the system of record for leave: these figures are for planning.',
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            child: TmField(
+              label: 'Leave year starts',
+              child: DropdownButtonFormField<int>(
+                initialValue: startMonth.clamp(1, 12),
+                items: [for (var m = 1; m <= 12; m++) DropdownMenuItem(value: m, child: Text(_months[m - 1]))],
+                onChanged: isAdmin ? (m) => widget.onChange('leave_year_start_month', m) : null,
+              ),
+            ),
+          ),
+          const SizedBox(width: Sp.md),
+          Expanded(
+            child: TmField(
+              label: 'Default entitlement',
+              hint: 'Days a year, unless a person has their own.',
+              child: TextFormField(
+                initialValue: v('default_annual_leave_days', asStr(ws['default_annual_leave_days'])),
+                enabled: isAdmin,
+                keyboardType: TextInputType.number,
+                onChanged: (s) => widget.onChange('default_annual_leave_days', double.tryParse(s) ?? s),
+              ),
+            ),
+          ),
+        ]),
+      ),
+      const SizedBox(height: Sp.lg),
+      Panel(
+        title: 'Public holidays',
+        subtitle: 'Zero hours for everyone they apply to, including people who join later',
+        trailing: isAdmin
+            ? Wrap(spacing: Sp.sm, runSpacing: Sp.sm, children: [
+                SecondaryButton('Add a day', icon: Icons.add_rounded, onPressed: _busy ? null : _add),
+                SecondaryButton('Import bank holidays', icon: Icons.public_rounded, onPressed: _busy ? null : _import),
+              ])
+            : null,
+        child: _buildHolidays(context, isAdmin),
+      ),
+      const SizedBox(height: Sp.lg),
+      const TmInfoBox(
+        'The working week and the length of a working day are in General. Changing either rewrites every '
+        'derived capacity day, because they decide what a day is worth.',
+      ),
+    ]);
+  }
+
+  Widget _buildHolidays(BuildContext context, bool isAdmin) {
+    if (_loading) return const LoadingState();
+    if (_error != null) return ErrorState(message: _error, onRetry: _load, compact: true);
+    if (_holidays.isEmpty) {
+      return const EmptyState(
+        icon: Icons.event_outlined,
+        title: 'No public holidays',
+        message: 'Without them the plan books people over Christmas. Import a year to start.',
+        compact: true,
+      );
+    }
+    return Column(children: [
+      for (final h in _holidays)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(children: [
+            SizedBox(width: 128, child: Text(fmtShortDate(asDate(h['day'])), style: context.text.bodyMedium)),
+            Expanded(child: Text(asStrOr(h['label'], ''), style: context.text.bodyMedium, overflow: TextOverflow.ellipsis)),
+            if (asStr(h['region']) != null) ...[
+              ToneChip(asStrOr(h['region_label'], ''), compact: true),
+              const SizedBox(width: Sp.sm),
+            ],
+            ToneChip(asStrOr(h['source'], 'manual'), tone: 'info', compact: true),
+            if (isAdmin)
+              IconButton(
+                tooltip: 'Remove this day',
+                icon: const Icon(Icons.delete_outline, size: 18),
+                onPressed: _busy ? null : () => _post('delete', {'id': asIntOr(h['id'], 0)}, 'Holiday removed'),
+              ),
+          ]),
+        ),
+    ]);
+  }
+}
+
+class _ImportChoice {
+  const _ImportChoice(this.year, this.region);
+  final int year;
+  final String region;
+}
+
+class _HolidayEntry {
+  const _HolidayEntry(this.day, this.label);
+  final String day;
+  final String label;
+}
+
+class _ImportHolidaysDialog extends StatefulWidget {
+  const _ImportHolidaysDialog({required this.year, required this.regions});
+  final int year;
+  final List<Map<String, dynamic>> regions;
+
+  @override
+  State<_ImportHolidaysDialog> createState() => _ImportHolidaysDialogState();
+}
+
+class _ImportHolidaysDialogState extends State<_ImportHolidaysDialog> {
+  late int _year = widget.year;
+  String _region = 'england-and-wales';
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Import UK bank holidays'),
+      content: SizedBox(
+        width: 420,
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text(
+            'The dates are worked out from the rules that define them: Easter, the nth Monday of a month, '
+            'and the substitute weekday when one falls at a weekend. Nothing has to be looked up.',
+            style: context.text.bodySmall?.copyWith(color: context.mutedColor),
+          ),
+          const SizedBox(height: Sp.md),
+          TmField(
+            label: 'Year',
+            child: DropdownButtonFormField<int>(
+              initialValue: _year,
+              items: [for (var y = widget.year - 1; y <= widget.year + 3; y++) DropdownMenuItem(value: y, child: Text('$y'))],
+              onChanged: (y) => setState(() => _year = y ?? _year),
+            ),
+          ),
+          const SizedBox(height: Sp.md),
+          TmField(
+            label: 'Nation',
+            hint: 'England and Wales, Scotland and Northern Ireland keep different days.',
+            child: DropdownButtonFormField<String>(
+              initialValue: _region,
+              items: [
+                for (final r in widget.regions) DropdownMenuItem(value: asStrOr(r['key'], ''), child: Text(asStrOr(r['label'], ''))),
+              ],
+              onChanged: (r) => setState(() => _region = r ?? _region),
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        SecondaryButton('Cancel', onPressed: () => Navigator.of(context).pop()),
+        PrimaryButton('Import', navy: true, onPressed: () => Navigator.of(context).pop(_ImportChoice(_year, _region))),
+      ],
+    );
+  }
+}
+
+class _AddHolidayDialog extends StatefulWidget {
+  const _AddHolidayDialog();
+
+  @override
+  State<_AddHolidayDialog> createState() => _AddHolidayDialogState();
+}
+
+class _AddHolidayDialogState extends State<_AddHolidayDialog> {
+  DateTime? _day;
+  final _label = TextEditingController();
+
+  @override
+  void dispose() {
+    _label.dispose();
+    super.dispose();
+  }
+
+  static String _iso(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final ready = _day != null && _label.text.trim().isNotEmpty;
+    return AlertDialog(
+      title: const Text('Add a company day'),
+      content: SizedBox(
+        width: 420,
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          TmField(
+            label: 'Day',
+            child: SecondaryButton(
+              _day == null ? 'Choose a date' : fmtShortDate(_day),
+              icon: Icons.calendar_today_outlined,
+              expand: true,
+              onPressed: () async {
+                final now = DateTime.now();
+                final d = await showDatePicker(context: context, initialDate: _day ?? now, firstDate: DateTime(now.year - 1), lastDate: DateTime(now.year + 3));
+                if (d != null) setState(() => _day = d);
+              },
+            ),
+          ),
+          const SizedBox(height: Sp.md),
+          TmField(
+            label: 'Label',
+            hint: 'What it is called, for example "Company shutdown".',
+            child: TextField(controller: _label, onChanged: (_) => setState(() {})),
+          ),
+        ]),
+      ),
+      actions: [
+        SecondaryButton('Cancel', onPressed: () => Navigator.of(context).pop()),
+        PrimaryButton('Add', navy: true, onPressed: ready ? () => Navigator.of(context).pop(_HolidayEntry(_iso(_day!), _label.text.trim())) : null),
+      ],
+    );
+  }
+}
+
+// ─── Campaigns ────────────────────────────────────────────────────────────
+
+/// Sandbox workspaces alongside the live one (ADM-07).
+///
+/// A campaign is a real workspace of its own: its own people, its own pipeline, its own plan.
+/// Nothing in it reaches the live plan, and the live plan cannot see it. This section is where
+/// they are made, reset and deleted; switching between them is in the account menu.
+class _CampaignsSection extends StatefulWidget {
+  const _CampaignsSection();
+
+  @override
+  State<_CampaignsSection> createState() => _CampaignsSectionState();
+}
+
+class _CampaignsSectionState extends State<_CampaignsSection> {
+  List<CampaignRow> _rows = const [];
+  bool _canCreate = false;
+  bool _loading = true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final r = await loadCampaigns();
+      if (!mounted) return;
+      setState(() {
+        _rows = r.rows;
+        _canCreate = r.canCreate;
+        _loading = false;
+        _error = null;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _confirm(CampaignRow w, String action) async {
+    final destroying = action == 'delete';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(destroying ? 'Delete ${w.name}?' : 'Reset ${w.name}?'),
+        content: Text(destroying
+            ? 'Everything in this campaign goes: its people, its work and its plan. The live workspace is untouched. This cannot be undone.'
+            : 'It is emptied and rebuilt from ${w.madeFrom.toLowerCase()}. Anything tried out in it is lost, and anybody inside will have to sign in again.'),
+        actions: [
+          SecondaryButton('Cancel', onPressed: () => Navigator.of(context).pop(false)),
+          PrimaryButton(destroying ? 'Delete it' : 'Reset it', navy: true, onPressed: () => Navigator.of(context).pop(true)),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await Api.post('campaigns.php', action, {'workspace_id': w.id});
+      if (!mounted) return;
+      tmToast(context, destroying ? '${w.name} deleted' : '${w.name} reset');
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) tmToast(context, e.message, bad: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return const LoadingState();
+    if (_error != null) return ErrorState(message: _error, onRetry: _load);
+    final campaigns = _rows.where((w) => !w.isLive).toList();
+    final live = _rows.where((w) => w.isLive).toList();
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Panel(
+        title: 'Campaigns',
+        subtitle: 'Sandbox workspaces for trying things out',
+        trailing: _canCreate
+            ? SecondaryButton('New campaign…', icon: Icons.add_rounded, onPressed: _busy ? null : () async {
+                if (await showCampaignCreate(context)) return;   // creating one moves the session into it
+                if (mounted) await _load();
+              })
+            : null,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          for (final w in live)
+            Padding(padding: const EdgeInsets.only(bottom: Sp.sm), child: _CampaignTile(row: w, busy: _busy, onAction: _confirm)),
+          if (campaigns.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: Sp.sm),
+              child: EmptyState(
+                icon: Icons.science_outlined,
+                title: 'No campaigns',
+                message: 'A campaign is a copy of this workspace you can change freely. Nothing in one touches the live plan.',
+                compact: true,
+              ),
+            )
+          else
+            for (final w in campaigns)
+              Padding(padding: const EdgeInsets.only(bottom: Sp.sm), child: _CampaignTile(row: w, busy: _busy, onAction: _confirm)),
+        ]),
+      ),
+      const SizedBox(height: Sp.lg),
+      const TmInfoBox(
+        'What a campaign never copies: webhook subscriptions and intake sources (they carry signing secrets), '
+        'device registrations, notifications and the audit trail. The nightly replan runs in a campaign, because that is '
+        'the point of one; the weekly digest and push notifications do not.',
+      ),
+    ]);
+  }
+}
+
+class _CampaignTile extends StatelessWidget {
+  const _CampaignTile({required this.row, required this.busy, required this.onAction});
+  final CampaignRow row;
+  final bool busy;
+  final Future<void> Function(CampaignRow, String) onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(Sp.md),
+      decoration: BoxDecoration(
+        color: row.isCurrent ? DispatchColors.tint(DispatchColors.orange, opacity: context.isDark ? 0.16 : 0.08) : null,
+        borderRadius: DispatchRadius.panelR,
+        border: Border.all(color: context.borderColor),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(row.isLive ? Icons.public_rounded : Icons.science_outlined, size: 20,
+            color: row.isLive ? DispatchColors.green : DispatchColors.amber),
+        const SizedBox(width: Sp.md),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Wrap(spacing: Sp.sm, runSpacing: Sp.xs, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              Text(row.name, style: context.text.titleSmall),
+              ToneChip(row.isLive ? 'Live' : 'Campaign', tone: row.isLive ? 'ok' : 'warn', compact: true),
+              if (row.isCurrent) const ToneChip('You are here', tone: 'info', compact: true),
+              if (!row.isLive && !row.openToAll) const ToneChip('Invite only', compact: true),
+            ]),
+            if (row.description != null && row.description!.isNotEmpty)
+              Text(row.description!, style: context.text.bodySmall?.copyWith(color: context.mutedColor)),
+            Text(
+              dotJoin([
+                if (!row.isLive) row.madeFrom,
+                '${row.peopleCount} people',
+                '${row.itemsCount} items',
+                if (!row.isLive && row.createdByEmail != null) 'made by ${row.createdByEmail}',
+                if (!row.isLive && row.createdAt != null) fmtShortDate(row.createdAt),
+              ]),
+              style: context.text.bodySmall?.copyWith(color: context.mutedColor),
+            ),
+          ]),
+        ),
+        const SizedBox(width: Sp.sm),
+        if (row.canReset || row.canDelete)
+          Wrap(spacing: Sp.sm, children: [
+            if (row.canReset) SecondaryButton('Reset', onPressed: busy ? null : () => onAction(row, 'reset')),
+            if (row.canDelete) SecondaryButton('Delete', danger: true, onPressed: busy ? null : () => onAction(row, 'delete')),
+          ]),
+      ]),
+    );
+  }
 }
