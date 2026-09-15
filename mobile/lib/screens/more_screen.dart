@@ -163,8 +163,11 @@ class MoreScreen extends StatelessWidget {
   }
 }
 
-/// App version, shown on the About row. Kept in step with pubspec.yaml.
-const String _version = 'Version 0.1.0';
+/// App version, shown on the About row.
+///
+/// It says it is kept in step with pubspec.yaml and it was not: this read 0.1.0 while the pubspec
+/// said 0.2.0+2, because nothing makes the two agree. Bump both together.
+const String _version = 'Version 0.3.0';
 
 /// Push state for this device (MOB-04). Says plainly when the build has no push sender, and
 /// when it has one, shows the registration and offers a test notification.

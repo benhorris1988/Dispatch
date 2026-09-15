@@ -1,7 +1,7 @@
 name: dispatch_app
 description: "Dispatch — delivery planning and resource management."
 publish_to: 'none'
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: ^3.11.5
